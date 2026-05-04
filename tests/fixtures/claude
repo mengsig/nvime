@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+printf '%s\n' '```lua'
+printf '%s\n' 'local function add(a, b)'
+printf '%s\n' '  return a + b'
+printf '%s\n' 'end'
+printf '%s\n' '```'

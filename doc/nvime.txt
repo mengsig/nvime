@@ -1,0 +1,241 @@
+*nvime.txt*  No vibe coding in my editor
+
+==============================================================================
+CONTENTS                                                        *nvime-contents*
+
+1. Overview                                      |nvime-overview|
+2. Commands                                      |nvime-commands|
+3. Keymaps                                       |nvime-keymaps|
+4. Configuration                                 |nvime-configuration|
+5. Policy                                        |nvime-policy|
+
+==============================================================================
+OVERVIEW                                                        *nvime-overview*
+
+nvime routes Claude Code and Codex CLI through explicit review/docs and edit
+lanes. The edit lane is intentionally narrow: one visual range or one
+Tree-sitter function, one current file, written intent, reviewed diff.
+The selected range may be blank when the user's intent is to generate or insert
+new current-file code/text.
+
+nvime is a Neovim guardrail, not a host security sandbox.
+
+==============================================================================
+COMMANDS                                                        *nvime-commands*
+
+                                                        *:NvimeChat*
+:NvimeChat
+        Open one floating nvime://chat terminal buffer and focus the prompt at
+        the bottom. Status lives in the float title/footer instead of being
+        written into the transcript. The buffer contains only messages,
+        responses, and the active [provider]$ prompt. nvime guards the buffer so
+        only the live prompt line can be changed while typing.
+        Press i or o from anywhere in the chat to return to the prompt; press
+        <CR> on the prompt to submit a chat/review message.
+        nvime keeps an in-memory transcript for follow-up context during the
+        Neovim session. The transcript is shared across providers, so switching
+        from Claude to Codex carries the same nvime conversation.
+        While an agent is running, nvime streams start/tool/command activity
+        and provider-supplied reasoning summaries into the buffer as progress.
+        Progress lines are not treated as the final answer or edit patch.
+        By default, this lane may run shell commands and may create or update
+        Markdown files only. Providers run in a temporary workspace copy, and
+        nvime syncs only *.md and *.markdown files back into the real repo.
+
+                                                        *:NvimeChats*
+:NvimeChats [ask|edit]
+        Open the picker for highlighted-code Ask/Edit discussions. The picker
+        has a new-session row plus existing discussions, so <leader>nq and
+        <leader>ne act as an intermediate step before either starting fresh or
+        continuing an older conversation.
+
+                                                        *:NvimeReview*
+:NvimeReview [claude|codex] [prompt]
+        Run a review/docs lane. The agent may inspect context, run shell
+        commands when configured, and write Markdown documentation files. nvime
+        does not apply source/config edits from this lane.
+
+                                                        *:NvimeAsk*
+:'<,'>NvimeAsk [claude|codex] {question}
+:NvimeAsk [claude|codex] {question}
+        Ask the read-only side agent about a selected range or Tree-sitter
+        function. This is for questions such as "does this look right?". It does
+        not open a diff. Ask and Edit keep workflow discussions per selected
+        file/range, separate from general chat. If the same range already has a
+        discussion, visual <leader>nq can continue it or start a new native
+        provider session. If no question is supplied inline, nvime asks on the
+        guarded prompt line instead of opening a popup prompt.
+        After an Ask answer, the prompt remains armed for that selection.
+        Follow-up questions use Ask again; repair requests such as "please
+        proceed", "fix this", or "apply that change" launch Edit on the same
+        range without reselecting it.
+
+                                                        *:NvimeEdit*
+:'<,'>NvimeEdit [claude|codex] {intent}
+:NvimeEdit [claude|codex] {intent}
+        Request one focused edit. With a range, the range is used. Without a
+        range, nvime asks Tree-sitter for the function at the cursor. If the
+        agent reports that no change is needed, or returns an identical patch,
+        no diff is opened. Question-shaped edit requests are routed to
+        |:NvimeAsk|. The latest Ask result for the same file/range is included
+        as context for the next edit request.
+        Blank selected ranges are valid insertion targets. Non-code current
+        file ranges, such as .gitignore entries or config snippets, are also
+        valid as long as the patch stays inside the selected range.
+        Starting Edit after Ask forces the input prompt to the edit lane, so the
+        next submission can produce a reviewed patch instead of remaining in
+        read-only Ask mode.
+        If the same range already has a discussion, visual <leader>ne can
+        continue it with the provider's native resume id, when available, or
+        start a fresh nvime/provider session.
+        If no intent is supplied inline, nvime asks on the guarded prompt line
+        instead of opening a popup prompt.
+
+                                                        *:NvimeAccept*
+:NvimeAccept
+        Accept the current pending inline diff block in the target file.
+
+                                                        *:NvimeReject*
+:NvimeReject
+        Reject the current pending inline diff block in the target file.
+
+                                                        *:NvimeAudit*
+:NvimeAudit
+        Open the audit log.
+
+                                                        *:NvimeProvider*
+:NvimeProvider [claude|codex]
+        Show or set the default provider used by nvime commands and chat.
+
+Inline diff mappings in the target file:
+        Pending diffs are shown as readable change blocks: proposed green lines
+        above, current red lines below, and one compact controls header per
+        block. Large contiguous replacements are split into smaller visual
+        blocks by default. Review units remain line-level internally.
+        ]n      next unresolved line
+        [n      previous unresolved line
+        ]b      next visual change block
+        [b      previous visual change block
+        ga      accept the current visual change block
+        v_ga    accept unresolved changed lines touched by the visual range
+        gA      accept all unresolved blocks
+        gb      reject the current visual change block
+        v_gb    reject unresolved changed lines touched by the visual range
+        gB      reject all unresolved blocks
+        gr      reject the current unresolved line (alias)
+        v_gr    reject unresolved changed lines touched by the visual range
+                (alias of v_gb)
+        gR      reject all unresolved blocks (alias of gB)
+        gX      reject the current visual change block (alias of gb)
+        gc      discuss accepted/rejected/current/unresolved lines with the
+                edit agent
+
+==============================================================================
+KEYMAPS                                                          *nvime-keymaps*
+
+Default keymaps use <leader>n:
+        <leader>nc     open chat panel
+        <leader>nr     run review/docs
+        <leader>nq     ask picker: new current-function session or old chat
+        visual <leader>nq
+                       ask about selected range
+        <leader>ne     edit picker: new current-function session or old chat
+        visual <leader>ne
+                       edit selected range
+        <leader>na     open audit log
+        <leader>nd     discuss active inline diff state
+        <leader>np     choose Claude or Codex
+
+Chat buffer mappings:
+        i, I           focus the prompt (cursor near start of input)
+        a, A, o, O     focus the prompt (cursor at end of line)
+        <Esc>          focus the scrollback (leave the prompt)
+        prompt <CR>    submit the current message
+        p              cycle provider for the next chat prompt
+        <Tab>          cycle provider for the next chat prompt
+        P              choose Claude or Codex for the next chat prompt
+        q              close the floating chat window
+
+Selection workflow mappings:
+        i, I           focus the prompt (cursor near start of input)
+        a, A, o, O     focus the prompt (cursor at end of line)
+        <Esc>          focus the scrollback (leave the prompt)
+        prompt <CR>    submit the current question/intent
+        p              cycle provider for this discussion's next prompt
+        <Tab>          cycle provider for this discussion's next prompt
+        P              choose Claude or Codex for this discussion's next prompt
+        q              close the floating selection window
+
+Native provider resume:
+        Focused Ask/Edit discussions persist provider sessions. nvime captures
+        Claude stream-json session_id values and Codex JSON session_id values.
+        Follow-ups in the same nvime discussion use claude --resume or
+        codex exec resume. Starting a new nvime session creates a separate
+        provider conversation.
+
+Disable defaults with:
+>
+        require("nvime").setup({
+          keys = { enabled = false },
+        })
+<
+
+==============================================================================
+CONFIGURATION                                              *nvime-configuration*
+
+lazy.nvim local install:
+>
+        {
+          "mengsig/nvime",
+          name = "nvime",
+          opts = {},
+        }
+<
+
+Common options:
+>
+        require("nvime").setup({
+          provider = "claude",
+          ui = {
+            layout = "float",
+            side = "right",
+          },
+          keys = {
+            enabled = true,
+            prefix = "<leader>n",
+          },
+          audit = {
+            enabled = true,
+            path = nil,
+            log_prompts = false,
+          },
+          review = {
+            allow_shell = true,
+            allow_markdown_writes = true,
+          },
+          chat = {
+            max_history_messages = 24,
+          },
+          diff = {
+            max_visual_block_lines = 12,
+          },
+        })
+<
+
+Default audit path:
+        .nvime/audit.jsonl in the current git root, or
+        stdpath("state")/nvime/audit.jsonl when there is no git root.
+
+==============================================================================
+POLICY                                                            *nvime-policy*
+
+Direct claude/codex launches through common Neovim process APIs are blocked.
+nvime-owned launches are allowed and audited.
+
+Known limitations:
+        - external terminals are out of scope
+        - a hostile plugin can bypass Lua wrappers
+        - terminal commands typed inside an already-running shell are hard to
+          inspect before execution
+
+ vim:tw=78:ts=8:ft=help:norl:
