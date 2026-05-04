@@ -27,7 +27,7 @@ For local development from this checkout, use:
 
 ```lua
 {
-  dir = "/home/mengsig/Projects/nvime",
+  dir = "/path/to/nvime",
   name = "nvime",
   opts = {},
 }
