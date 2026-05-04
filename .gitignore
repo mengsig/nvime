@@ -32,3 +32,4 @@ doc/tags
 *.swo
 *.swn
 REVIEW.md
+scripts/screenshot-ui

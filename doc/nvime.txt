@@ -23,6 +23,13 @@ nvime is a Neovim guardrail, not a host security sandbox.
 ==============================================================================
 COMMANDS                                                        *nvime-commands*
 
+                                                        *:Nvime*
+:Nvime
+        Open the nvime command center. This is a Mason-style floating console
+        with saved chat and selection discussion counts, running-agent state,
+        action rows, recent sessions, provider/native-resume badges, number
+        shortcuts for visible rows, and a ? help overlay.
+
                                                         *:NvimeChat*
 :NvimeChat
         Open the picker for general chat/review conversations. Press n to start
@@ -181,6 +188,18 @@ Default keymaps use <leader>n:
         <leader>nn     reopen last used nvime conversation
         <leader>np     choose Claude or Codex
 
+Command center mappings:
+        <CR>, o, i      open the cursor row
+        1-9            open a numbered visible session row
+        n              start a fresh chat/review session
+        a              start Ask from the current function on dashboard
+        e              start an Edit discussion from the current function
+        dd             delete the selected session row
+        V ... d        delete selected session rows
+        r              refresh the command center
+        ?              open or close the help overlay
+        q, <Esc>       close the command center
+
 Chat buffer mappings:
         i, I           focus the prompt (cursor near start of input)
         a, A, o, O     focus the prompt (cursor at end of line)
@@ -237,6 +256,9 @@ Common options:
             layout = "float",
             side = "right",
             completion = "notify",
+            ascii_icons = false,
+            icons = {},
+            spinner_frames = nil,
           },
           keys = {
             enabled = true,

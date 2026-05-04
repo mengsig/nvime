@@ -95,6 +95,32 @@ function M.open_last()
   end
 end
 
+function M.statusline()
+  local ok_chat, chat = pcall(require, "nvime.chat")
+  local ok_selection, selection = pcall(require, "nvime.selection")
+  if not ok_chat or not ok_selection then
+    return "nvime"
+  end
+  local chat_sessions = chat.sessions()
+  local selection_sessions = selection.sessions()
+  local running = 0
+  for _, session in ipairs(chat_sessions) do
+    if session.busy then
+      running = running + 1
+    end
+  end
+  for _, session in ipairs(selection_sessions) do
+    if session.busy then
+      running = running + 1
+    end
+  end
+  local total = #chat_sessions + #selection_sessions
+  if running > 0 then
+    return string.format("nvime %d/%d running", running, total)
+  end
+  return string.format("nvime %d", total)
+end
+
 local function install_keymaps()
   delete_keymaps()
 
@@ -157,6 +183,12 @@ function M.setup(opts)
     desc = "Run an nvime review/docs lane through Claude or Codex",
   })
 
+  vim.api.nvim_create_user_command("Nvime", function()
+    require("nvime.chats").open({ mode = "dashboard" })
+  end, {
+    desc = "Open the nvime command center",
+  })
+
   vim.api.nvim_create_user_command("NvimeEdit", function(args)
     require("nvime.edit").start(command_opts(args))
   end, {
@@ -188,7 +220,7 @@ function M.setup(opts)
   end, {
     nargs = "?",
     complete = function()
-      return { "chat", "ask", "edit" }
+      return { "dashboard", "chat", "ask", "edit" }
     end,
     desc = "Open the nvime chat or selection discussion picker",
   })

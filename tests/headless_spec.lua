@@ -53,11 +53,32 @@ assert_eq(
   "codex tool",
   "codex command progress footer hides command text"
 )
+assert(vim.fn.exists(":Nvime") == 2, "Nvime command center command exists")
 
 vim.cmd("NvimeProvider codex")
 assert(require("nvime.state").config.provider == "codex", "provider command sets codex")
 vim.cmd("NvimeProvider claude")
 assert(require("nvime.state").config.provider == "claude", "provider command sets claude")
+
+vim.cmd("Nvime")
+local dashboard_panel = require("nvime.state").panels.chats
+assert(dashboard_panel and vim.api.nvim_win_is_valid(dashboard_panel.winid), "Nvime opens the command center")
+assert(dashboard_panel.mode == "dashboard", "Nvime command center uses dashboard mode")
+local dashboard_lines = table.concat(vim.api.nvim_buf_get_lines(dashboard_panel.bufnr, 0, -1, false), "\n")
+assert(dashboard_lines:find("Nvime", 1, true), "dashboard has branded heading")
+assert(dashboard_lines:find("Actions", 1, true), "dashboard exposes action rows")
+assert(
+  #vim.api.nvim_buf_get_extmarks(dashboard_panel.bufnr, vim.api.nvim_create_namespace("nvime.chats"), 0, -1, {}) > 0,
+  "dashboard has visual decorations"
+)
+vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("?", true, false, true), "xt", false)
+assert(vim.wait(1000, function()
+  local help = require("nvime.state").panels.chats_help
+  return help and help.winid and vim.api.nvim_win_is_valid(help.winid)
+end, 20), "dashboard help overlay opens")
+pcall(vim.api.nvim_win_close, require("nvime.state").panels.chats_help.winid, true)
+require("nvime.state").panels.chats_help = nil
+pcall(vim.api.nvim_win_close, dashboard_panel.winid, true)
 
 local stale_chat = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_buf_set_name(stale_chat, "nvime://stale-chat")

@@ -1,4 +1,16 @@
+local ui = require("nvime.ui")
+
 local M = {}
+
+local function provider_group(provider)
+  if provider == "claude" then
+    return "NvimeProviderClaude"
+  end
+  if provider == "codex" then
+    return "NvimeProviderCodex"
+  end
+  return "NvimePrompt"
+end
 
 function M.scrollback(bufnr, ns)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
@@ -30,10 +42,25 @@ function M.scrollback(bufnr, ns)
     })
   end
 
+  local function label(row, text, group)
+    if row < 0 or row >= #lines then
+      return
+    end
+    vim.api.nvim_buf_set_extmark(bufnr, ns, row, 0, {
+      virt_text = { { text, group or "NvimeMuted" } },
+      virt_text_pos = "right_align",
+      priority = 120,
+    })
+  end
+
   for index, line in ipairs(lines) do
     local row = index - 1
     if line:match("^```") then
       mark(row, 0, #line, "NvimeCodeFence")
+      local lang = vim.trim(line:gsub("^```", ""))
+      if lang ~= "" then
+        label(row, lang, "NvimeMuted")
+      end
       if in_code then
         in_code = false
         code_lang = nil
@@ -52,15 +79,26 @@ function M.scrollback(bufnr, ns)
         mark_line(row, "NvimeCode")
       end
     elseif line:match("^%[[^%]]+%]%$") then
+      local provider = line:match("^%[([^%s%]]+)")
       local finish = line:find("%$") or #line
       mark(row, 0, finish + 1, "NvimePrompt")
+      if provider then
+        mark(row, 1, 1 + #provider, provider_group(provider))
+      end
       if finish + 1 < #line then
         mark(row, finish + 1, #line, "NvimeUserText")
       end
+      label(row, "user", "NvimeMuted")
     elseif line:match("^%[[^%]]+ response%]$") then
+      local provider = line:match("^%[([^%s%]]+)")
       mark(row, 0, #line, "NvimeAgent")
+      if provider then
+        mark(row, 1, 1 + #provider, provider_group(provider))
+      end
+      label(row, ui.icon("review") .. " agent", "NvimeAgent")
     elseif line:match("^%[[^%]]+ selection question%]$") then
       mark(row, 0, #line, "NvimeAgent")
+      label(row, ui.icon("selection") .. " selection", "NvimeAgent")
     elseif line:match("^%[nvime%]") then
       mark(row, 0, #line, "NvimeExit")
     elseif line:match("^%[error%]") or line:match("^%[failed%]") then
@@ -103,13 +141,14 @@ function M.input(bufnr, ns, prompt_prefix, start_lnum)
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   start_lnum = start_lnum or 1
-  if lines[start_lnum] then
+  local prompt_lnum = start_lnum
+  if lines[start_lnum] and not vim.startswith(lines[start_lnum], prompt_prefix) then
     vim.api.nvim_buf_set_extmark(bufnr, ns, start_lnum - 1, 0, {
       end_col = #lines[start_lnum],
       hl_group = "NvimeInputStatus",
     })
+    prompt_lnum = start_lnum + 1
   end
-  local prompt_lnum = start_lnum + 1
   local prompt_line = lines[prompt_lnum] or ""
   if vim.startswith(prompt_line, prompt_prefix) then
     vim.api.nvim_buf_set_extmark(bufnr, ns, prompt_lnum - 1, 0, {
@@ -121,8 +160,29 @@ function M.input(bufnr, ns, prompt_prefix, start_lnum)
         end_col = #prompt_line,
         hl_group = "NvimeUserText",
       })
+    else
+      vim.api.nvim_buf_set_extmark(bufnr, ns, prompt_lnum - 1, 0, {
+        virt_text = { { "type a message", "NvimeInputGhost" } },
+        virt_text_pos = "right_align",
+        priority = 90,
+      })
     end
   end
+end
+
+function M.spinner_text(seed)
+  local cfg = (require("nvime.state").config or {}).ui or {}
+  local frames = cfg.spinner_frames
+  if type(frames) ~= "table" or #frames == 0 then
+    frames = cfg.ascii_icons == true and { "-", "\\", "|", "/" } or { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+  end
+  if tonumber(seed) then
+    seed = tonumber(seed)
+  else
+    local uv = vim.uv or vim.loop
+    seed = uv and uv.hrtime and math.floor(uv.hrtime() / 120000000) or os.time()
+  end
+  return frames[(seed % #frames) + 1]
 end
 
 return M

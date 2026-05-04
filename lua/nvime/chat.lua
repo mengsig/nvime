@@ -3,6 +3,7 @@ local buffer_guard = require("nvime.buffer_guard")
 local progress = require("nvime.progress")
 local prompts = require("nvime.prompts")
 local provider_api = require("nvime.provider")
+local render = require("nvime.render")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
 
@@ -528,7 +529,9 @@ local function dimensions()
 end
 
 local function title()
-  return " nvime  " .. provider() .. "  review/docs  " .. status_word() .. " "
+  local status = status_word()
+  local icon = status == "running" and ui.icon("active") or ui.icon("idle")
+  return " nvime  " .. provider() .. "  review/docs  " .. icon .. " " .. status .. " "
 end
 
 local function scroll_config()
@@ -536,7 +539,7 @@ local function scroll_config()
   local session = active_session()
   local footer = " i input | ? prompts | <CR> send on prompt | p provider | P choose | q close "
   if session and session.busy and session.progress and session.progress ~= "" then
-    footer = " " .. session.progress .. " | i input | ? prompts | <CR> send | q close "
+    footer = " " .. render.spinner_text() .. " " .. session.progress .. " | i input | ? prompts | <CR> send | q close "
   end
   return {
     relative = "editor",
@@ -603,97 +606,7 @@ local function prompt_has_submit_text(panel)
 end
 
 local function decorate_scrollback(bufnr)
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    return
-  end
-  vim.api.nvim_buf_clear_namespace(bufnr, scroll_ns, 0, -1)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local in_code = false
-  local code_lang = nil
-
-  local function mark(row, start_col, end_col, group, opts)
-    if row < 0 or row >= #lines then
-      return
-    end
-    opts = opts or {}
-    opts.end_col = math.min(end_col, #(lines[row + 1] or ""))
-    opts.hl_group = group
-    vim.api.nvim_buf_set_extmark(bufnr, scroll_ns, row, start_col, opts)
-  end
-
-  local function mark_line(row, group)
-    if row < 0 or row >= #lines then
-      return
-    end
-    vim.api.nvim_buf_set_extmark(bufnr, scroll_ns, row, 0, {
-      end_col = #(lines[row + 1] or ""),
-      hl_group = group,
-      hl_eol = true,
-    })
-  end
-
-  for index, line in ipairs(lines) do
-    local row = index - 1
-    if line:match("^```") then
-      mark(row, 0, #line, "NvimeCodeFence")
-      if in_code then
-        in_code = false
-        code_lang = nil
-      else
-        in_code = true
-        code_lang = vim.trim(line:gsub("^```", ""))
-      end
-    elseif in_code then
-      if code_lang == "diff" and line:match("^%+") and not line:match("^%+%+%+") then
-        mark_line(row, "NvimeDiffAdd")
-      elseif code_lang == "diff" and line:match("^%-") and not line:match("^%-%-%-") then
-        mark_line(row, "NvimeDiffDelete")
-      elseif code_lang == "diff" and line:match("^@@") then
-        mark_line(row, "NvimeDiffHunk")
-      else
-        mark_line(row, "NvimeCode")
-      end
-    elseif line:match("^%[[^%]]+%]%$") then
-      local finish = line:find("%$") or #line
-      mark(row, 0, finish + 1, "NvimePrompt")
-      if finish + 1 < #line then
-        mark(row, finish + 1, #line, "NvimeUserText")
-      end
-    elseif line:match("^%[[^%]]+ response%]$") then
-      mark(row, 0, #line, "NvimeAgent")
-    elseif line:match("^%[nvime%]") then
-      mark(row, 0, #line, "NvimeExit")
-    elseif line:match("^%[error%]") or line:match("^%[failed%]") then
-      mark(row, 0, #line, "NvimeError")
-    elseif line:match("^#+%s+") then
-      mark(row, 0, #line, "NvimeMarkdownHeading")
-    elseif line:match("^%s*[-*]%s+") then
-      local start_col = line:find("[-*]")
-      if start_col then
-        mark(row, start_col - 1, start_col + 1, "NvimeBullet")
-      end
-    elseif line:match("^%s*>%s+") then
-      mark(row, 0, #line, "NvimeQuote")
-    elseif line:match("^@@") then
-      mark_line(row, "NvimeDiffHunk")
-    elseif line:match("^%+") and not line:match("^%+%+%+") then
-      mark_line(row, "NvimeDiffAdd")
-    elseif line:match("^%-") and not line:match("^%-%-%-") and not line:match("^%-%-+$") then
-      mark_line(row, "NvimeDiffDelete")
-    elseif line:match("^[=-]+$") then
-      mark(row, 0, #line, "NvimeRule")
-    end
-
-    local search_from = 1
-    while true do
-      local strong_start, strong_end = line:find("%*%*.-%*%*", search_from)
-      if not strong_start then
-        break
-      end
-      mark(row, strong_start - 1, strong_end, "NvimeMarkdownStrong")
-      search_from = strong_end + 1
-    end
-  end
+  render.scrollback(bufnr, scroll_ns)
 end
 
 local function decorate_input(bufnr)
@@ -725,9 +638,15 @@ local function decorate_input(bufnr)
   local session = active_session()
   if session and session.busy and session.progress and session.progress ~= "" then
     vim.api.nvim_buf_set_extmark(bufnr, input_ns, prompt_lnum - 1, 0, {
-      virt_text = { { "● " .. session.progress, "NvimeMuted" } },
+      virt_text = { { render.spinner_text() .. " " .. session.progress, "NvimeStatusRunning" } },
       virt_text_pos = "right_align",
       priority = 200,
+    })
+  elseif #prompt_line <= #prefix then
+    vim.api.nvim_buf_set_extmark(bufnr, input_ns, prompt_lnum - 1, 0, {
+      virt_text = { { "type a review/docs prompt", "NvimeInputGhost" } },
+      virt_text_pos = "right_align",
+      priority = 90,
     })
   end
 end
@@ -1029,6 +948,37 @@ function M.refresh(bufnr)
   sync_active_panel_to_session()
 end
 
+local spinner_timer = nil
+
+local function stop_spinner_timer()
+  if spinner_timer then
+    spinner_timer:stop()
+    spinner_timer:close()
+    spinner_timer = nil
+  end
+end
+
+local function ensure_spinner_timer()
+  if spinner_timer then
+    return
+  end
+  local uv = vim.uv or vim.loop
+  if not uv or not uv.new_timer then
+    return
+  end
+  spinner_timer = uv.new_timer()
+  spinner_timer:start(120, 120, function()
+    vim.schedule(function()
+      local session = active_session()
+      if not session or not session.busy or not panel_is_open(session.id) then
+        stop_spinner_timer()
+        return
+      end
+      M.refresh()
+    end)
+  end)
+end
+
 local function append_scrollback(text, session_id)
   if not text or text == "" then
     return
@@ -1239,6 +1189,8 @@ function M.set_busy(value, session_id)
   session.busy = value == true
   if not session.busy then
     session.progress = nil
+  else
+    ensure_spinner_timer()
   end
   touch_session(session)
   if state.chat.active_session_id == session.id then
@@ -1315,6 +1267,7 @@ function M.submit(text, opts)
   session.busy = true
   session.progress = nil
   touch_session(session)
+  ensure_spinner_timer()
   M.refresh(bufnr)
 
   if opts.display_user ~= false then

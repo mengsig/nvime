@@ -19,6 +19,9 @@ M.defaults = {
     float_height = 0.72,
     border = "rounded",
     completion = "notify",
+    ascii_icons = false,
+    icons = {},
+    spinner_frames = nil,
   },
   audit = {
     enabled = true,

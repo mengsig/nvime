@@ -445,7 +445,9 @@ local function dimensions()
 end
 
 local function title()
-  return " nvime  " .. provider() .. "  " .. mode() .. "  " .. status_word() .. " "
+  local status = status_word()
+  local icon = status == "running" and ui.icon("active") or ui.icon("idle")
+  return " nvime  " .. provider() .. "  " .. mode() .. "  " .. icon .. " " .. status .. " "
 end
 
 local function scroll_config()
@@ -453,7 +455,7 @@ local function scroll_config()
   local active = active_session()
   local footer = " i input | ? prompts | <CR> send on prompt | p provider | P choose | q close "
   if active and active.busy and active.progress and active.progress ~= "" then
-    footer = " " .. active.progress .. " | i input | ? prompts | <CR> send | q close "
+    footer = " " .. render.spinner_text() .. " " .. active.progress .. " | i input | ? prompts | <CR> send | q close "
   end
   return {
     relative = "editor",
@@ -532,7 +534,7 @@ local function decorate_input(bufnr)
   local session = active_session()
   if session and session.busy and session.progress and session.progress ~= "" then
     vim.api.nvim_buf_set_extmark(bufnr, input_ns, panel.input_start - 1, 0, {
-      virt_text = { { "● " .. session.progress, "NvimeMuted" } },
+      virt_text = { { render.spinner_text() .. " " .. session.progress, "NvimeStatusRunning" } },
       virt_text_pos = "right_align",
       priority = 200,
     })
@@ -895,12 +897,45 @@ function M.refresh()
   sync_active_panel_to_session()
 end
 
+local spinner_timer = nil
+
+local function stop_spinner_timer()
+  if spinner_timer then
+    spinner_timer:stop()
+    spinner_timer:close()
+    spinner_timer = nil
+  end
+end
+
+local function ensure_spinner_timer()
+  if spinner_timer then
+    return
+  end
+  local uv = vim.uv or vim.loop
+  if not uv or not uv.new_timer then
+    return
+  end
+  spinner_timer = uv.new_timer()
+  spinner_timer:start(120, 120, function()
+    vim.schedule(function()
+      local session = active_session()
+      if not session or not session.busy or not panel_is_open(session.id) then
+        stop_spinner_timer()
+        return
+      end
+      M.refresh()
+    end)
+  end)
+end
+
 function M.set_busy(value, session_id)
   local session = session_id and M.get_session(session_id) or active_session()
   if session then
     session.busy = value == true
     if not session.busy then
       session.progress = nil
+    else
+      ensure_spinner_timer()
     end
     touch_session(session)
   end

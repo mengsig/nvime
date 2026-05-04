@@ -63,6 +63,9 @@ require("nvime").setup({
     float_height = 0.72,
     border = "rounded",
     completion = "notify", -- "notify" or "open" when a hidden agent finishes
+    ascii_icons = false, -- set true for terminals without glyph support
+    icons = {}, -- optional per-icon overrides
+    spinner_frames = nil, -- optional custom frame list for running agents
   },
   audit = {
     enabled = true,
@@ -154,6 +157,8 @@ require("nvime").setup({
 
 ## Commands
 
+- `:Nvime` opens the Mason-style nvime command center with recent chats,
+  selection discussions, running state, and action rows.
 - `:NvimeChat` opens the picker for general chat/review conversations.
 - `:NvimeChats [chat|ask|edit]` opens the picker for general chat or highlighted-code Ask/Edit discussions.
 - `:NvimeReview [claude|codex] [prompt]` runs a review/docs session and includes
@@ -168,6 +173,13 @@ require("nvime").setup({
 - `:NvimeAudit` opens `.nvime/audit.jsonl`.
 
 ## Chat Panel
+
+`:Nvime` opens the command center: a Mason-style floating console with session
+counts, running status, action rows, recent general chats, recent Ask/Edit
+discussions, provider/native-resume badges, a compact help overlay on `?`, and
+number shortcuts for the visible rows.
+For statuslines, `require("nvime").statusline()` returns a compact summary such
+as `nvime 2` or `nvime 1/3 running`.
 
 `:NvimeChat` opens the general conversation picker. Press `n` to start a fresh
 chat/review conversation, or open an older conversation from the list. Each

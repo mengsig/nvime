@@ -4,33 +4,90 @@ local M = {}
 
 local highlight_pending = false
 
+local ICONS = {
+  active = "●",
+  idle = "○",
+  success = "✓",
+  pending = "…",
+  error = "✕",
+  warning = "!",
+  chat = "◈",
+  selection = "◇",
+  ask = "?",
+  edit = "✎",
+  review = "◆",
+  resume = "↻",
+  local_session = "•",
+  new = "+",
+  key = "›",
+}
+
+local ASCII_ICONS = {
+  active = "*",
+  idle = "o",
+  success = "+",
+  pending = ".",
+  error = "x",
+  warning = "!",
+  chat = "#",
+  selection = "-",
+  ask = "?",
+  edit = "e",
+  review = "r",
+  resume = "~",
+  local_session = ".",
+  new = "+",
+  key = ">",
+}
+
 local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeNormal", { link = "NormalFloat", default = true })
-  vim.api.nvim_set_hl(0, "NvimeBorder", { fg = "#7aa2f7", default = true })
-  vim.api.nvim_set_hl(0, "NvimeTitle", { fg = "#7aa2f7", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputNormal", { bg = "#111827", fg = "#c0caf5", default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputBorder", { fg = "#e0af68", default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputStatus", { fg = "#7dcfff", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputPrompt", { fg = "#e0af68", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeHeader", { fg = "#c0caf5", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeStatus", { fg = "#9ece6a", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeHelp", { fg = "#7dcfff", default = true })
-  vim.api.nvim_set_hl(0, "NvimeRule", { fg = "#3b4261", default = true })
-  vim.api.nvim_set_hl(0, "NvimeMuted", { fg = "#565f89", default = true })
-  vim.api.nvim_set_hl(0, "NvimePrompt", { fg = "#e0af68", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeUserText", { fg = "#c0caf5", default = true })
-  vim.api.nvim_set_hl(0, "NvimeAgent", { fg = "#bb9af7", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeExit", { fg = "#565f89", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownHeading", { fg = "#7aa2f7", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#c0caf5", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeBullet", { fg = "#9ece6a", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeQuote", { fg = "#9d7cd8", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeCodeFence", { fg = "#7dcfff", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeCode", { fg = "#a9b1d6", bg = "#16161e", default = true })
-  vim.api.nvim_set_hl(0, "NvimeDiffAdd", { fg = "#9ece6a", bg = "#1b2b22", default = true })
-  vim.api.nvim_set_hl(0, "NvimeDiffDelete", { fg = "#f7768e", bg = "#2d1f28", default = true })
-  vim.api.nvim_set_hl(0, "NvimeDiffHunk", { fg = "#7aa2f7", bg = "#1f2335", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeError", { fg = "#f7768e", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBorder", { fg = "#4fd6be", default = true })
+  vim.api.nvim_set_hl(0, "NvimeTitle", { fg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeSubtitle", { fg = "#89ddff", default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputNormal", { bg = "#10141d", fg = "#d7dde8", default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputBorder", { fg = "#f4bf75", default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputStatus", { fg = "#89ddff", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputPrompt", { fg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputGhost", { fg = "#566075", italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHeader", { fg = "#d7dde8", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeSection", { fg = "#89ddff", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatus", { fg = "#8bdc7c", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusIdle", { fg = "#6f7a92", default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusRunning", { fg = "#4fd6be", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusSuccess", { fg = "#8bdc7c", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusWarn", { fg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusError", { fg = "#ff6b7a", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHelp", { fg = "#89ddff", default = true })
+  vim.api.nvim_set_hl(0, "NvimeKey", { fg = "#10141d", bg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRule", { fg = "#263142", default = true })
+  vim.api.nvim_set_hl(0, "NvimeMuted", { fg = "#6f7a92", default = true })
+  vim.api.nvim_set_hl(0, "NvimeFaint", { fg = "#424b5e", default = true })
+  vim.api.nvim_set_hl(0, "NvimePrompt", { fg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeUserText", { fg = "#d7dde8", default = true })
+  vim.api.nvim_set_hl(0, "NvimeAgent", { fg = "#b8cc52", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeExit", { fg = "#6f7a92", italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownHeading", { fg = "#89ddff", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#d7dde8", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBullet", { fg = "#8bdc7c", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeQuote", { fg = "#c099ff", italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeCodeFence", { fg = "#4fd6be", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeCode", { fg = "#ccd6e3", bg = "#111620", default = true })
+  vim.api.nvim_set_hl(0, "NvimeDiffAdd", { fg = "#8bdc7c", bg = "#14241d", default = true })
+  vim.api.nvim_set_hl(0, "NvimeDiffDelete", { fg = "#ff6b7a", bg = "#2a1720", default = true })
+  vim.api.nvim_set_hl(0, "NvimeDiffHunk", { fg = "#89ddff", bg = "#182132", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeError", { fg = "#ff6b7a", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeCursorLine", { bg = "#141b27", default = true })
+  vim.api.nvim_set_hl(0, "NvimeRowIndex", { fg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRowTitle", { fg = "#d7dde8", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRowMeta", { fg = "#6f7a92", default = true })
+  vim.api.nvim_set_hl(0, "NvimeProviderClaude", { fg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeProviderCodex", { fg = "#4fd6be", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadge", { fg = "#10141d", bg = "#4fd6be", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeMuted", { fg = "#d7dde8", bg = "#263142", default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeSuccess", { fg = "#10141d", bg = "#8bdc7c", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeWarn", { fg = "#10141d", bg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeError", { fg = "#10141d", bg = "#ff6b7a", bold = true, default = true })
 end
 
 function M.ensure_highlights()
@@ -46,6 +103,50 @@ function M.ensure_highlights()
     return
   end
   define_highlights()
+end
+
+function M.icon(name)
+  local cfg = (state.config or {}).ui or {}
+  local custom = cfg.icons or {}
+  if custom[name] then
+    return custom[name]
+  end
+  if cfg.ascii_icons == true then
+    return ASCII_ICONS[name] or ""
+  end
+  return ICONS[name] or ASCII_ICONS[name] or ""
+end
+
+function M.truncate(text, max_width)
+  text = tostring(text or "")
+  max_width = tonumber(max_width) or 0
+  if max_width <= 0 or #text <= max_width then
+    return text
+  end
+  if max_width <= 1 then
+    return text:sub(1, max_width)
+  end
+  return text:sub(1, max_width - 1) .. "…"
+end
+
+function M.relative_time(timestamp)
+  timestamp = tonumber(timestamp)
+  if not timestamp or timestamp <= 0 then
+    return "new"
+  end
+  local seconds = math.max(0, os.time() - timestamp)
+  if seconds < 60 then
+    return tostring(seconds) .. "s"
+  end
+  local minutes = math.floor(seconds / 60)
+  if minutes < 60 then
+    return tostring(minutes) .. "m"
+  end
+  local hours = math.floor(minutes / 60)
+  if hours < 48 then
+    return tostring(hours) .. "h"
+  end
+  return tostring(math.floor(hours / 24)) .. "d"
 end
 
 local function set_scratch_options(bufnr, filetype)
