@@ -61,7 +61,10 @@ require("nvime").setup({
     height = 24,
     float_width = 0.82,
     float_height = 0.72,
+    dashboard_width = 0.86,
+    dashboard_height = 0.9,
     border = "rounded",
+    backdrop = 60, -- false disables the dimmed dashboard backdrop
     completion = "notify", -- "notify" or "open" when a hidden agent finishes
     ascii_icons = false, -- set true for terminals without glyph support
     icons = {}, -- optional per-icon overrides
@@ -158,7 +161,7 @@ require("nvime").setup({
 ## Commands
 
 - `:Nvime` opens the Mason-style nvime command center with recent chats,
-  selection discussions, running state, and action rows.
+  selection discussions, running state, tabs, and action rows.
 - `:NvimeChat` opens the picker for general chat/review conversations.
 - `:NvimeChats [chat|ask|edit]` opens the picker for general chat or highlighted-code Ask/Edit discussions.
 - `:NvimeReview [claude|codex] [prompt]` runs a review/docs session and includes
@@ -175,9 +178,11 @@ require("nvime").setup({
 ## Chat Panel
 
 `:Nvime` opens the command center: a Mason-style floating console with session
-counts, running status, action rows, recent general chats, recent Ask/Edit
-discussions, provider/native-resume badges, a compact help overlay on `?`, and
-number shortcuts for the visible rows.
+counts, running status, block-highlighted tabs, action rows, recent general
+chats, recent Ask/Edit discussions, provider/native-resume badges, a dimmed
+backdrop, and in-buffer help on `?` / `g?`. On the dashboard, `(1)`-`(5)`
+switch the All, Chat, Ask, Edit, and Running tabs; in scoped pickers, `1`-`9`
+still open visible session rows.
 For statuslines, `require("nvime").statusline()` returns a compact summary such
 as `nvime 2` or `nvime 1/3 running`.
 

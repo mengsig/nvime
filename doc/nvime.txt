@@ -27,8 +27,10 @@ COMMANDS                                                        *nvime-commands*
 :Nvime
         Open the nvime command center. This is a Mason-style floating console
         with saved chat and selection discussion counts, running-agent state,
-        action rows, recent sessions, provider/native-resume badges, number
-        shortcuts for visible rows, and a ? help overlay.
+        block-highlighted tabs, action rows, recent sessions, a dim backdrop,
+        provider/native-resume badges, and in-buffer ? / g? help. Dashboard
+        number keys switch tabs; number shortcuts still open visible rows in
+        scoped pickers.
 
                                                         *:NvimeChat*
 :NvimeChat
@@ -190,14 +192,15 @@ Default keymaps use <leader>n:
 
 Command center mappings:
         <CR>, o, i      open the cursor row
-        1-9            open a numbered visible session row
+        1-5            switch dashboard tabs
+        picker 1-9     open a numbered visible session row
         n              start a fresh chat/review session
         a              start Ask from the current function on dashboard
         e              start an Edit discussion from the current function
         dd             delete the selected session row
         V ... d        delete selected session rows
         r              refresh the command center
-        ?              open or close the help overlay
+        ?, g?          open or close the in-buffer help
         q, <Esc>       close the command center
 
 Chat buffer mappings:

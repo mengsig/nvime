@@ -6,6 +6,20 @@ local ui = require("nvime.ui")
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("nvime.chats")
+local backdrop_ns = vim.api.nvim_create_namespace("nvime.chats.backdrop")
+
+local DASHBOARD_TABS = {
+  { id = "all", label = "All" },
+  { id = "chat", label = "Chat" },
+  { id = "ask", label = "Ask" },
+  { id = "edit", label = "Edit" },
+  { id = "running", label = "Running" },
+}
+
+local DASHBOARD_TAB_BY_INDEX = {}
+for index, tab in ipairs(DASHBOARD_TABS) do
+  DASHBOARD_TAB_BY_INDEX[index] = tab.id
+end
 
 local function find_buffer_by_name(name)
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
@@ -34,23 +48,40 @@ local function set_locked(bufnr, locked)
   vim.bo[bufnr].modifiable = not locked
 end
 
-local function dimensions()
+local function dimensions(mode)
   local cfg = (state.config or {}).ui or {}
   local columns = vim.o.columns
   local lines = vim.o.lines
   local width = math.floor(columns * (cfg.float_width or 0.78))
-  local height = math.floor(lines * 0.56)
+  local default_height = mode == "dashboard" and 0.86 or 0.56
+  local height = math.floor(lines * default_height)
   if cfg.width and type(cfg.width) == "number" and not (type(cfg.float_width) == "number" and cfg.float_width > 0) then
     width = math.max(64, math.min(cfg.width, columns - 6))
   end
   if type(cfg.float_width) == "number" and cfg.float_width > 0 and cfg.float_width <= 1 then
     width = math.floor(columns * cfg.float_width)
   end
-  if type(cfg.float_height) == "number" and cfg.float_height > 0 and cfg.float_height <= 1 then
-    height = math.floor(lines * math.min(cfg.float_height, 0.7))
+  if mode == "dashboard" and type(cfg.dashboard_width) == "number" and cfg.dashboard_width > 0 and cfg.dashboard_width <= 1 then
+    width = math.floor(columns * cfg.dashboard_width)
+  elseif mode == "dashboard" then
+    width = math.floor(columns * math.max(type(cfg.float_width) == "number" and cfg.float_width or 0, 0.86))
   end
-  width = math.max(64, math.min(width, columns - 6))
-  height = math.max(12, math.min(height, lines - 6))
+  if type(cfg.float_height) == "number" and cfg.float_height > 0 and cfg.float_height <= 1 then
+    local height_ratio = cfg.float_height
+    if mode == "dashboard" then
+      height_ratio = cfg.dashboard_height or math.max(height_ratio, 0.84)
+    else
+      height_ratio = math.min(height_ratio, 0.7)
+    end
+    height = math.floor(lines * height_ratio)
+  end
+  if mode == "dashboard" and type(cfg.dashboard_height) == "number" and cfg.dashboard_height > 0 and cfg.dashboard_height <= 1 then
+    height = math.floor(lines * cfg.dashboard_height)
+  end
+  local max_width = mode == "dashboard" and columns - 2 or columns - 6
+  local max_height = mode == "dashboard" and lines - 2 or lines - 6
+  width = math.max(64, math.min(width, max_width))
+  height = math.max(12, math.min(height, max_height))
   return {
     width = width,
     height = height,
@@ -60,8 +91,14 @@ local function dimensions()
   }
 end
 
-local function window_config()
-  local dim = dimensions()
+local function window_config(mode)
+  local panel = state.panels.chats or {}
+  mode = mode or (panel.mode == "dashboard" and "dashboard" or panel.mode)
+  local dim = dimensions(mode)
+  local footer = " 1-9 open | <CR> open | n new | dd delete | r refresh | ? help | q close "
+  if mode == "dashboard" then
+    footer = " (1)-(5) tabs | <CR> open | n new | a ask | e edit | dd delete | r refresh | ? help | q close "
+  end
   return {
     relative = "editor",
     width = dim.width,
@@ -70,9 +107,9 @@ local function window_config()
     col = dim.col,
     style = "minimal",
     border = dim.border,
-    title = " nvime command center ",
+    title = mode == "dashboard" and " nvime.nvim " or " nvime command center ",
     title_pos = "center",
-    footer = " 1-9 open | <CR> open | n new | dd delete | r refresh | ? help | q close ",
+    footer = footer,
     footer_pos = "center",
     zindex = 54,
   }
@@ -90,6 +127,65 @@ local function configure_window(winid)
     "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted,CursorLine:NvimeCursorLine"
 end
 
+local function close_backdrop()
+  local backdrop = state.panels.chats_backdrop
+  if backdrop and backdrop.winid and vim.api.nvim_win_is_valid(backdrop.winid) then
+    pcall(vim.api.nvim_win_close, backdrop.winid, true)
+  end
+  state.panels.chats_backdrop = nil
+end
+
+local function open_backdrop()
+  local cfg = (state.config or {}).ui or {}
+  if cfg.backdrop == false then
+    close_backdrop()
+    return
+  end
+  local existing = state.panels.chats_backdrop
+  if existing and existing.winid and vim.api.nvim_win_is_valid(existing.winid) then
+    return
+  end
+
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].swapfile = false
+  local height = math.max(1, vim.o.lines - 1)
+  local width = math.max(1, vim.o.columns)
+  local blank_lines = {}
+  for _ = 1, height do
+    blank_lines[#blank_lines + 1] = string.rep(" ", width)
+  end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, blank_lines)
+  vim.api.nvim_buf_clear_namespace(bufnr, backdrop_ns, 0, -1)
+  for row = 0, height - 1 do
+    vim.api.nvim_buf_set_extmark(bufnr, backdrop_ns, row, 0, {
+      end_col = width,
+      hl_group = "NvimeBackdrop",
+    })
+  end
+  local ok, winid = pcall(vim.api.nvim_open_win, bufnr, false, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = 0,
+    col = 0,
+    style = "minimal",
+    focusable = false,
+    zindex = 50,
+  })
+  if not ok then
+    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+    return
+  end
+  vim.wo[winid].winblend = tonumber(cfg.backdrop) or 60
+  vim.wo[winid].winhighlight = "NormalFloat:NvimeBackdrop"
+  state.panels.chats_backdrop = {
+    bufnr = bufnr,
+    winid = winid,
+  }
+end
+
 local function close()
   local help = state.panels.chats_help
   if help and help.winid and vim.api.nvim_win_is_valid(help.winid) then
@@ -100,11 +196,26 @@ local function close()
   if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
     pcall(vim.api.nvim_win_close, panel.winid, true)
   end
+  close_backdrop()
 end
 
 local function open_help()
   local panel = state.panels.chats
   if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
+    return
+  end
+  if panel.mode == "dashboard" then
+    local show_help = not panel.show_help
+    state.panels.chats_help = show_help and {
+      bufnr = panel.bufnr,
+      winid = panel.winid,
+      in_buffer = true,
+    } or nil
+    M.open({
+      mode = "dashboard",
+      tab = panel.tab,
+      show_help = show_help,
+    })
     return
   end
   local existing = state.panels.chats_help
@@ -256,6 +367,220 @@ local function count_all_running(chat_sessions, selection_sessions)
   return count_running(chat_sessions) + count_running(selection_sessions)
 end
 
+local function render_width()
+  local panel = state.panels.chats or {}
+  if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+    return vim.api.nvim_win_get_width(panel.winid)
+  end
+  return dimensions(requested_mode()).width
+end
+
+local function add_mark(marks, row, start_col, end_col, hl_group)
+  if end_col <= start_col then
+    return
+  end
+  marks[#marks + 1] = {
+    row = row,
+    start_col = start_col,
+    end_col = end_col,
+    hl_group = hl_group,
+  }
+end
+
+local function centered_prefix(text, width)
+  return string.rep(" ", math.max(0, math.floor((width - #text) / 2)))
+end
+
+local function add_centered_blocks(lines, marks, parts, width)
+  local text = ""
+  for _, part in ipairs(parts) do
+    text = text .. part[1]
+  end
+  local prefix = centered_prefix(text, width)
+  local row = #lines + 1
+  lines[row] = prefix .. text
+  local offset = #prefix
+  for _, part in ipairs(parts) do
+    local value = part[1]
+    add_mark(marks, row, offset, offset + #value, part[2])
+    offset = offset + #value
+  end
+  return row
+end
+
+local function add_centered_text(lines, marks, text, width, hl_group)
+  local row = #lines + 1
+  local prefix = centered_prefix(text, width)
+  lines[row] = prefix .. text
+  if hl_group then
+    add_mark(marks, row, #prefix, #prefix + #text, hl_group)
+  end
+  return row
+end
+
+local function dashboard_tab()
+  local panel = state.panels.chats or {}
+  return panel.tab or "all"
+end
+
+local function add_dashboard_header(lines, marks)
+  local width = render_width()
+  add_centered_blocks(lines, marks, {
+    { " nvime.nvim ", "NvimeHeaderBlock" },
+    { " v0.1.0 ", "NvimeHeaderBlockSecondary" },
+  }, width)
+  add_centered_blocks(lines, marks, {
+    { "press ", "NvimeMuted" },
+    { " ? ", "NvimeKey" },
+    { " for help", "NvimeMuted" },
+  }, width)
+  add_centered_text(lines, marks, "review/docs chat  |  scoped ask  |  reviewed edit", width, "NvimeMuted")
+end
+
+local function add_dashboard_tabs(lines, marks)
+  local active = dashboard_tab()
+  local row = #lines + 1
+  local line = "  "
+  local offset = #line
+  lines[row] = line
+  for index, tab in ipairs(DASHBOARD_TABS) do
+    local span = string.format(" (%d) %s ", index, tab.label)
+    lines[row] = lines[row] .. span .. " "
+    add_mark(marks, row, offset, offset + #span, tab.id == active and "NvimeTabActive" or "NvimeTabInactive")
+    offset = offset + #span + 1
+  end
+  return row
+end
+
+local function add_count_mark(count_marks, row, count)
+  count_marks[#count_marks + 1] = {
+    row = row,
+    text = " (" .. tostring(count) .. ")",
+  }
+end
+
+local function session_mode(session, kind)
+  if kind == "chat" then
+    return "chat"
+  end
+  return session.mode or "selection"
+end
+
+local function session_title(session, kind)
+  if kind == "chat" then
+    return session.title or ("Chat #" .. tostring(session.id or "?"))
+  end
+  return format_range(session)
+end
+
+local function provider_label(session)
+  return session.provider or "?"
+end
+
+local function session_primary_line(session, kind)
+  local status_icon = session.busy and ui.icon("active") or ui.icon("idle")
+  local title = session_title(session, kind)
+  local provider = provider_label(session)
+  local suffix = string.format("%s  %s  %s", provider, session_mode(session, kind), ui.relative_time(session.updated_at))
+  local max_title = math.max(24, render_width() - #suffix - 12)
+  return string.format("  %s %s  %s", status_icon, ui.truncate(title, max_title), suffix)
+end
+
+local function session_detail_line(session, kind)
+  local provider = provider_label(session)
+  local detail = {
+    native_text(session, provider),
+  }
+  if kind == "selection" then
+    local selected = session.selection or {}
+    detail[#detail + 1] = (selected.source or "range")
+    detail[#detail + 1] = session.mode or "selection"
+  else
+    detail[#detail + 1] = "review/docs"
+  end
+  if session.busy and session.progress then
+    detail[#detail + 1] = require("nvime.render").spinner_text() .. " " .. session.progress
+  end
+  if session.provider_sessions and session.provider_sessions[provider] then
+    detail[#detail + 1] = "native " .. ui.truncate(session.provider_sessions[provider], 24)
+  end
+  return "     " .. table.concat(detail, "  ")
+end
+
+local function include_dashboard_session(tab, session, kind)
+  if tab == "all" then
+    return true
+  end
+  if tab == "running" then
+    return session.busy == true
+  end
+  if tab == "chat" then
+    return kind == "chat"
+  end
+  if tab == "ask" or tab == "edit" then
+    return kind == "selection" and (session.mode or "selection") == tab
+  end
+  return true
+end
+
+local function add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_row, detail_rows, sessions, kind, limit)
+  local added = 0
+  for _, session in ipairs(sessions) do
+    if added >= limit then
+      break
+    end
+    local row = #lines + 1
+    row_to_session[row] = session.id
+    row_to_kind[row] = kind
+    number_to_row[#number_to_row + 1] = row
+    lines[row] = session_primary_line(session, kind)
+    detail_rows[#lines + 1] = true
+    lines[#lines + 1] = session_detail_line(session, kind)
+    added = added + 1
+  end
+  return added
+end
+
+local function filtered_dashboard_sessions(tab, chat_sessions, selection_sessions)
+  local filtered_chats = {}
+  local filtered_selections = {}
+  for _, session in ipairs(chat_sessions) do
+    if include_dashboard_session(tab, session, "chat") then
+      filtered_chats[#filtered_chats + 1] = session
+    end
+  end
+  for _, session in ipairs(selection_sessions) do
+    if include_dashboard_session(tab, session, "selection") then
+      filtered_selections[#filtered_selections + 1] = session
+    end
+  end
+  return filtered_chats, filtered_selections
+end
+
+local function add_dashboard_help(lines, section_rows, meta_rows)
+  lines[#lines + 1] = "Keymaps"
+  section_rows[#section_rows + 1] = #lines
+  lines[#lines + 1] = "  g? / ?         toggle this help"
+  meta_rows[#meta_rows + 1] = #lines
+  lines[#lines + 1] = "  (1)-(5)        switch All, Chat, Ask, Edit, Running tabs"
+  meta_rows[#meta_rows + 1] = #lines
+  lines[#lines + 1] = "  <CR> / o / i   open the selected session or action"
+  meta_rows[#meta_rows + 1] = #lines
+  lines[#lines + 1] = "  n / a / e      start chat, Ask, or Edit from the current context"
+  meta_rows[#meta_rows + 1] = #lines
+  lines[#lines + 1] = "  dd / V...d     delete one session or a visual range"
+  meta_rows[#meta_rows + 1] = #lines
+  lines[#lines + 1] = "  r              refresh package/session state"
+  meta_rows[#meta_rows + 1] = #lines
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Panels"
+  section_rows[#section_rows + 1] = #lines
+  lines[#lines + 1] = "  Chat rows are long-running review/docs conversations."
+  meta_rows[#meta_rows + 1] = #lines
+  lines[#lines + 1] = "  Ask/Edit rows are scoped to a file range and keep their native provider session when possible."
+  meta_rows[#meta_rows + 1] = #lines
+end
+
 local function render(bufnr)
   local mode = requested_mode()
   local lines = {}
@@ -266,82 +591,79 @@ local function render(bufnr)
   local section_rows = {}
   local meta_rows = {}
   local action_rows = {}
+  local detail_rows = {}
+  local span_marks = {}
+  local count_marks = {}
 
   if mode == "dashboard" then
     local chat_sessions = chat.sessions()
     local selection_sessions = selection.sessions()
-    lines = {
-      "Nvime",
-      "  No-vibe agent control for review, selection Ask, and reviewed edits",
-      "",
-      string.format(
-        "  %s %d chats   %s %d selections   %s %d running   %s %s",
-        ui.icon("chat"),
-        #chat_sessions,
-        ui.icon("selection"),
-        #selection_sessions,
-        ui.icon("active"),
-        count_all_running(chat_sessions, selection_sessions),
-        ui.icon("review"),
-        (state.config and state.config.provider) or "claude"
-      ),
-      "",
-      "Actions",
-      "-------",
-    }
-    section_rows[#section_rows + 1] = 1
-    meta_rows[#meta_rows + 1] = 2
-    meta_rows[#meta_rows + 1] = 4
-    row_to_action[#lines + 1] = { type = "new_chat" }
-    action_rows[#lines + 1] = true
-    lines[#lines + 1] = " n  start new review/docs chat"
-    row_to_action[#lines + 1] = { type = "new", mode = "ask" }
-    action_rows[#lines + 1] = true
-    lines[#lines + 1] = " a  ask about current function"
-    row_to_action[#lines + 1] = { type = "new", mode = "edit" }
-    action_rows[#lines + 1] = true
-    lines[#lines + 1] = " e  edit current function"
+    local tab = dashboard_tab()
+    local filtered_chats, filtered_selections = filtered_dashboard_sessions(tab, chat_sessions, selection_sessions)
+    add_dashboard_header(lines, span_marks)
+    lines[#lines + 1] = ""
+    add_dashboard_tabs(lines, span_marks)
+    lines[#lines + 1] = ""
+    local provider = (state.config and state.config.provider) or "claude"
+    lines[#lines + 1] = string.format(
+      "Workflow Filter: %s %d chats   %s %d scoped   %s %d running   %s provider %s",
+      ui.icon("chat"),
+      #chat_sessions,
+      ui.icon("selection"),
+      #selection_sessions,
+      ui.icon("active"),
+      count_all_running(chat_sessions, selection_sessions),
+      ui.icon("review"),
+      provider
+    )
+    meta_rows[#meta_rows + 1] = #lines
     lines[#lines + 1] = ""
 
-    if #chat_sessions > 0 then
-      lines[#lines + 1] = "General Conversations"
+    if state.panels.chats and state.panels.chats.show_help then
+      add_dashboard_help(lines, section_rows, meta_rows)
+    else
+      lines[#lines + 1] = "Actions"
       section_rows[#section_rows + 1] = #lines
-      lines[#lines + 1] = "    status    agent   native    age   title"
-      meta_rows[#meta_rows + 1] = #lines
-      for index, session in ipairs(chat_sessions) do
-        if index > 5 then
-          break
-        end
-        local row = #lines + 1
-        row_to_session[row] = session.id
-        row_to_kind[row] = "chat"
-        number_to_row[#number_to_row + 1] = row
-        lines[#lines + 1] = format_chat_session(#number_to_row, session)
-      end
+      row_to_action[#lines + 1] = { type = "new_chat" }
+      action_rows[#lines + 1] = true
+      lines[#lines + 1] = " n  new review/docs chat"
+      row_to_action[#lines + 1] = { type = "new", mode = "ask" }
+      action_rows[#lines + 1] = true
+      lines[#lines + 1] = " a  ask about current function"
+      row_to_action[#lines + 1] = { type = "new", mode = "edit" }
+      action_rows[#lines + 1] = true
+      lines[#lines + 1] = " e  edit current function"
       lines[#lines + 1] = ""
-    end
 
-    if #selection_sessions > 0 then
-      lines[#lines + 1] = "Selection Discussions"
-      section_rows[#section_rows + 1] = #lines
-      lines[#lines + 1] = "    status    agent   lane   native    age   file:lines"
-      meta_rows[#meta_rows + 1] = #lines
-      for index, session in ipairs(selection_sessions) do
-        if index > 7 or #number_to_row >= 9 then
-          break
-        end
-        local row = #lines + 1
-        row_to_session[row] = session.id
-        row_to_kind[row] = "selection"
-        number_to_row[#number_to_row + 1] = row
-        lines[#lines + 1] = format_session(#number_to_row, session)
+      if #filtered_chats > 0 then
+        lines[#lines + 1] = "General Conversations"
+        section_rows[#section_rows + 1] = #lines
+        add_count_mark(count_marks, #lines, #filtered_chats)
+        add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_row, detail_rows, filtered_chats, "chat", 20)
+        lines[#lines + 1] = ""
       end
-    end
 
-    if #chat_sessions == 0 and #selection_sessions == 0 then
-      lines[#lines + 1] = "No saved nvime sessions yet."
-      lines[#lines + 1] = ""
-      lines[#lines + 1] = "Press n for review/docs chat, or open a file and use a/e for scoped work."
+      if #filtered_selections > 0 then
+        lines[#lines + 1] = "Selection Discussions"
+        section_rows[#section_rows + 1] = #lines
+        add_count_mark(count_marks, #lines, #filtered_selections)
+        add_dashboard_rows(
+          lines,
+          row_to_session,
+          row_to_kind,
+          number_to_row,
+          detail_rows,
+          filtered_selections,
+          "selection",
+          24
+        )
+      end
+
+      if #filtered_chats == 0 and #filtered_selections == 0 then
+        lines[#lines + 1] = "No saved nvime sessions match this tab."
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "Press n for review/docs chat, or open a file and use a/e for scoped work."
+      end
     end
   elseif mode == "chat" then
     local sessions = chat.sessions()
@@ -493,16 +815,34 @@ local function render(bufnr)
   set_locked(bufnr, true)
 
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+  for _, mark in ipairs(span_marks) do
+    vim.api.nvim_buf_set_extmark(bufnr, ns, mark.row - 1, mark.start_col, {
+      end_col = mark.end_col,
+      hl_group = mark.hl_group,
+    })
+  end
   for _, row in ipairs(section_rows) do
     vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
       end_col = #(lines[row] or ""),
       hl_group = row == 1 and "NvimeHeader" or "NvimeSection",
     })
   end
+  for _, mark in ipairs(count_marks) do
+    vim.api.nvim_buf_set_extmark(bufnr, ns, mark.row - 1, #(lines[mark.row] or ""), {
+      virt_text = { { mark.text, "NvimeMuted" } },
+      virt_text_pos = "eol",
+    })
+  end
   for _, row in ipairs(meta_rows) do
     vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
       end_col = #(lines[row] or ""),
       hl_group = "NvimeMuted",
+    })
+  end
+  for row, _ in pairs(detail_rows) do
+    vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
+      end_col = #(lines[row] or ""),
+      hl_group = "NvimeRowDetail",
     })
   end
   for row, _ in pairs(action_rows) do
@@ -520,10 +860,21 @@ local function render(bufnr)
     local kind = row_to_kind[row] or (is_chat_mode() and "chat" or "selection")
     local session = kind == "chat" and chat.get_session(session_id) or selection.get_session(session_id)
     local line = lines[row] or ""
-    vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
-      end_col = math.min(2, #line),
-      hl_group = "NvimeRowIndex",
-    })
+    if mode == "dashboard" then
+      vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 2, {
+        end_col = math.min(3, #line),
+        hl_group = session and session.busy and "NvimeStatusRunning" or "NvimeStatusIdle",
+      })
+      vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 4, {
+        end_col = math.max(4, math.min(#line, render_width() - 24)),
+        hl_group = "NvimeRowTitle",
+      })
+    else
+      vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
+        end_col = math.min(2, #line),
+        hl_group = "NvimeRowIndex",
+      })
+    end
     local provider = session and session.provider
     if provider then
       local start_col = line:find(provider, 1, true)
@@ -712,9 +1063,19 @@ local function attach_maps(bufnr)
     M.open({ mode = requested_mode() })
   end, opts)
   vim.keymap.set("n", "?", open_help, opts)
+  vim.keymap.set("n", "g?", open_help, opts)
   for index = 1, 9 do
     local key_index = index
     vim.keymap.set("n", tostring(index), function()
+      if is_dashboard() and DASHBOARD_TAB_BY_INDEX[key_index] then
+        local panel = state.panels.chats or {}
+        M.open({
+          mode = "dashboard",
+          tab = DASHBOARD_TAB_BY_INDEX[key_index],
+          show_help = panel.show_help,
+        })
+        return
+      end
       open_number(key_index)
     end, opts)
   end
@@ -729,13 +1090,24 @@ function M.open(opts)
   ui.ensure_highlights()
   local bufnr = ensure_buffer()
   local panel = state.panels.chats or {}
+  local mode = opts.mode or panel.mode
+  local tab = opts.tab or (mode == "dashboard" and panel.tab) or "all"
+  local show_help = opts.show_help
+  if show_help == nil and mode == "dashboard" then
+    show_help = panel.show_help
+  end
+  if mode == "dashboard" then
+    open_backdrop()
+  else
+    close_backdrop()
+  end
   local winid
   if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
     winid = panel.winid
     vim.api.nvim_win_set_buf(winid, bufnr)
-    vim.api.nvim_win_set_config(winid, window_config())
+    vim.api.nvim_win_set_config(winid, window_config(mode))
   else
-    winid = vim.api.nvim_open_win(bufnr, true, window_config())
+    winid = vim.api.nvim_open_win(bufnr, true, window_config(mode))
   end
   configure_window(winid)
   state.panels.chats = {
@@ -745,7 +1117,9 @@ function M.open(opts)
     row_to_kind = {},
     row_to_action = {},
     number_to_row = {},
-    mode = opts.mode,
+    mode = mode,
+    tab = tab,
+    show_help = show_help,
   }
   attach_maps(bufnr)
   render(bufnr)

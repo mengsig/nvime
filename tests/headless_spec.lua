@@ -65,7 +65,8 @@ local dashboard_panel = require("nvime.state").panels.chats
 assert(dashboard_panel and vim.api.nvim_win_is_valid(dashboard_panel.winid), "Nvime opens the command center")
 assert(dashboard_panel.mode == "dashboard", "Nvime command center uses dashboard mode")
 local dashboard_lines = table.concat(vim.api.nvim_buf_get_lines(dashboard_panel.bufnr, 0, -1, false), "\n")
-assert(dashboard_lines:find("Nvime", 1, true), "dashboard has branded heading")
+assert(dashboard_lines:find("nvime.nvim", 1, true), "dashboard has branded heading")
+assert(dashboard_lines:find("(1) All", 1, true), "dashboard exposes Mason-style tabs")
 assert(dashboard_lines:find("Actions", 1, true), "dashboard exposes action rows")
 assert(
   #vim.api.nvim_buf_get_extmarks(dashboard_panel.bufnr, vim.api.nvim_create_namespace("nvime.chats"), 0, -1, {}) > 0,
