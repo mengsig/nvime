@@ -1,5 +1,89 @@
 local M = {}
 
+local uv = vim.uv or vim.loop
+
+local function is_valid_buf(bufnr)
+  return bufnr and vim.api.nvim_buf_is_valid(bufnr)
+end
+
+local function systemlist(cmd)
+  local ok, result = pcall(vim.fn.systemlist, cmd)
+  if not ok then
+    return {}
+  end
+  return result or {}
+end
+
+local function repo_root()
+  local cwd = uv and uv.cwd and uv.cwd() or vim.fn.getcwd()
+  local result = systemlist({ "git", "-C", cwd, "rev-parse", "--show-toplevel" })
+  if vim.v.shell_error == 0 and result[1] and result[1] ~= "" then
+    return vim.trim(result[1])
+  end
+  return cwd
+end
+
+local function normalize_path(path)
+  if not path or path == "" then
+    return nil
+  end
+  if path:sub(1, 1) == "/" then
+    return vim.fn.fnamemodify(path, ":p")
+  end
+  local cwd_path = vim.fn.fnamemodify(path, ":p")
+  if vim.fn.filereadable(cwd_path) == 1 then
+    return cwd_path
+  end
+  local root = repo_root()
+  if root and root ~= "" then
+    local root_path = vim.fn.fnamemodify(root .. "/" .. path, ":p")
+    if vim.fn.filereadable(root_path) == 1 then
+      return root_path
+    end
+  end
+  return cwd_path
+end
+
+local function buffer_for_path(path)
+  local abs = normalize_path(path)
+  if not abs then
+    return nil
+  end
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      local name = vim.api.nvim_buf_get_name(bufnr)
+      if name ~= "" and vim.fn.fnamemodify(name, ":p") == abs then
+        return bufnr
+      end
+    end
+  end
+  if vim.fn.filereadable(abs) ~= 1 then
+    return nil
+  end
+  local bufnr = vim.fn.bufadd(abs)
+  vim.fn.bufload(bufnr)
+  if vim.api.nvim_buf_is_valid(bufnr) then
+    return bufnr
+  end
+  return nil
+end
+
+function M.resolve_bufnr(range)
+  if not range then
+    return nil
+  end
+  if is_valid_buf(range.bufnr) then
+    return range.bufnr
+  end
+  local bufnr = buffer_for_path(range.path)
+  if bufnr then
+    range.bufnr = bufnr
+    return bufnr
+  end
+  range.bufnr = nil
+  return nil
+end
+
 local function function_type(node_type)
   if not node_type then
     return false
@@ -75,7 +159,16 @@ function M.range_from_command(opts)
 end
 
 function M.lines(range)
-  return vim.api.nvim_buf_get_lines(range.bufnr, range.line1 - 1, range.line2, false)
+  local bufnr = M.resolve_bufnr(range)
+  if not bufnr then
+    return {}
+  end
+  local count = vim.api.nvim_buf_line_count(bufnr)
+  local start_line = math.max(1, tonumber(range.line1) or 1)
+  local end_line = math.max(start_line, tonumber(range.line2) or start_line)
+  local start_idx = math.max(0, math.min(start_line - 1, count))
+  local end_idx = math.max(start_idx, math.min(end_line, count))
+  return vim.api.nvim_buf_get_lines(bufnr, start_idx, end_idx, false)
 end
 
 return M

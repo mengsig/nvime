@@ -123,6 +123,36 @@ chat_win = chat_panel.winid
 chat_input = chat_panel.input_bufnr
 chat_input_win = chat_panel.input_winid
 
+;(function()
+  local dedupe_claude = tmp .. "/dedupe-claude"
+  vim.fn.writefile({
+    "#!/usr/bin/env sh",
+    "printf '%s\\n' '{\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"Hey!\"}}}'",
+    "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Hey!\"}]}}'",
+  }, dedupe_claude)
+  vim.fn.setfperm(dedupe_claude, "rwxr-xr-x")
+  local dedupe_old_claude_cmd = require("nvime.state").config.providers.claude.cmd
+  require("nvime.state").config.providers.claude.cmd = dedupe_claude
+  local dedupe_chunks = {}
+  local dedupe_done = false
+  require("nvime.agents").run({
+    provider = "claude",
+    lane = "ask",
+    prompt = "hello",
+    on_text = function(text)
+      dedupe_chunks[#dedupe_chunks + 1] = text
+    end,
+    on_exit = function()
+      dedupe_done = true
+    end,
+  })
+  assert(vim.wait(5000, function()
+    return dedupe_done
+  end, 20), "agent dedupe fixture exits")
+  assert_eq(table.concat(dedupe_chunks), "Hey!", "claude streamed delta and final aggregate are not duplicated")
+  require("nvime.state").config.providers.claude.cmd = dedupe_old_claude_cmd
+end)()
+
 require("nvime.chat").prompt()
 assert(vim.api.nvim_get_current_buf() == chat_buf, "chat prompt focuses shared input buffer")
 assert(vim.api.nvim_get_current_win() == chat_input_win, "chat prompt focuses the single chat window")
@@ -873,6 +903,64 @@ require("nvime.selection").save_sessions()
 local after_delete_json = table.concat(vim.fn.readfile(sessions_path), "\n")
 assert(not after_delete_json:find("nvime%-chat%.txt"), "deleted discussions are removed from persisted sessions")
 
+;(function()
+  local stale_selection_file = tmp .. "/stale-selection.lua"
+  vim.fn.writefile({
+    "local function stale()",
+    "  return true",
+    "end",
+  }, stale_selection_file)
+  vim.cmd.edit(stale_selection_file)
+  local stale_selection_buf = vim.api.nvim_get_current_buf()
+  require("nvime.selection").open({
+    provider = "claude",
+    mode = "edit",
+    selection = {
+      bufnr = stale_selection_buf,
+      line1 = 1,
+      line2 = 3,
+      path = stale_selection_file,
+      source = "test",
+    },
+    new_session = true,
+  })
+  local stale_selection_session_id = require("nvime.selection").active_session_id()
+  require("nvime.selection").save_sessions()
+  pcall(vim.api.nvim_buf_delete, stale_selection_buf, { force = true })
+  require("nvime.selection").reload_sessions()
+  local stale_no_change_claude = tmp .. "/stale-no-change-claude"
+  vim.fn.writefile({
+    "#!/usr/bin/env sh",
+    "printf '%s\\n' 'NVIME_NO_CHANGE'",
+    "printf '%s\\n' 'stale persisted selection reattached'",
+  }, stale_no_change_claude)
+  vim.fn.setfperm(stale_no_change_claude, "rwxr-xr-x")
+  local stale_old_claude_cmd = require("nvime.state").config.providers.claude.cmd
+  require("nvime.state").config.providers.claude.cmd = stale_no_change_claude
+  local stale_session = require("nvime.selection").get_session(stale_selection_session_id)
+  assert(stale_session and stale_session.selection.bufnr == nil, "persisted selection reload drops stale buffer ids")
+  require("nvime.edit").start({
+    provider = "claude",
+    selection = stale_session.selection,
+    session_id = stale_selection_session_id,
+  })
+  require("nvime.selection").focus_input()
+  local stale_panel = require("nvime.state").panels.selection
+  vim.api.nvim_buf_set_lines(stale_panel.bufnr, stale_panel.input_start - 1, stale_panel.input_start, false, {
+    "[claude edit]$ please fix",
+  })
+  local stale_submit_ok, stale_submit_err = pcall(require("nvime.selection").submit_current)
+  assert(stale_submit_ok, tostring(stale_submit_err))
+  assert(vim.wait(5000, function()
+    local session = require("nvime.selection").get_session(stale_selection_session_id)
+    return session
+      and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n")
+        :find("stale persisted selection reattached", 1, true)
+  end, 20), "persisted selection sessions reattach by path before submit")
+  require("nvime.state").config.providers.claude.cmd = stale_old_claude_cmd
+  require("nvime.selection").delete_sessions({ stale_selection_session_id })
+end)()
+
 require("nvime.ask").start({
   provider = "claude",
   selection = {
@@ -937,7 +1025,9 @@ assert(vim.wait(5000, function()
   return session and not session.busy and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("hidden ask done", 1, true)
 end, 20), "hidden ask still records the completed response")
 assert(not require("nvime.selection").is_open(hidden_ask_session_id), "hidden ask completion does not reopen the float")
-assert(vim.tbl_contains(selection_notices, "nvime ask finished. Reopen with :NvimeLast or <leader>nn."), "hidden ask completion notifies")
+assert(vim.wait(1000, function()
+  return vim.tbl_contains(selection_notices, "nvime ask finished. Reopen with :NvimeLast or <leader>nn.")
+end, 20), "hidden ask completion notifies")
 vim.notify = old_notify_selection
 require("nvime").open_last()
 assert(require("nvime.selection").is_open(hidden_ask_session_id), "NvimeLast reopens the hidden completed selection discussion")

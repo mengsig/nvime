@@ -62,16 +62,33 @@ local function persisted_lines(session)
   return session.lines or {}
 end
 
+local function persisted_selection(selection)
+  local out = vim.deepcopy(selection or {})
+  out.bufnr = nil
+  return out
+end
+
+local function persisted_last_ask(last_ask)
+  if type(last_ask) ~= "table" then
+    return last_ask
+  end
+  local out = vim.deepcopy(last_ask)
+  if type(out.selection) == "table" then
+    out.selection = persisted_selection(out.selection)
+  end
+  return out
+end
+
 local function serializable_session(session)
   return {
     id = session.id,
     key = session.key,
-    selection = session.selection,
+    selection = persisted_selection(session.selection),
     provider = session.provider,
     mode = session.mode,
     input_start = session.input_start,
     provider_sessions = session.provider_sessions or {},
-    last_ask = session.last_ask,
+    last_ask = persisted_last_ask(session.last_ask),
     lines = persisted_lines(session),
     created_at = session.created_at,
     updated_at = session.updated_at,
@@ -153,6 +170,12 @@ local function load_sessions()
     if type(item) == "table" and item.id and item.selection then
       item.id = tonumber(item.id)
       if item.id then
+        if type(item.selection) == "table" then
+          item.selection.bufnr = nil
+        end
+        if type(item.last_ask) == "table" and type(item.last_ask.selection) == "table" then
+          item.last_ask.selection.bufnr = nil
+        end
         item.provider_sessions = type(item.provider_sessions) == "table" and item.provider_sessions or {}
         item.lines = type(item.lines) == "table" and item.lines or nil
         item.pending_input = nil

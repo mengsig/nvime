@@ -17,6 +17,9 @@ local function code_fence_for(text)
 end
 
 local function current_path(bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
   local name = vim.api.nvim_buf_get_name(bufnr)
   if name == "" then
     return nil

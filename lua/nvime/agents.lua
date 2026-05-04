@@ -411,7 +411,7 @@ local function parse_claude(line)
   local event = decoded.event or {}
   local delta = event.delta or decoded.delta or {}
   if delta.type == "text_delta" and delta.text then
-    return attach_session({ text = delta.text })
+    return attach_session({ text = delta.text, text_kind = "delta" })
   end
 
   if decoded.type == "assistant" and decoded.message and type(decoded.message.content) == "table" then
@@ -425,7 +425,7 @@ local function parse_claude(line)
       end
     end
     if #text_parts > 0 then
-      return attach_session({ text = table.concat(text_parts, "\n") })
+      return attach_session({ text = table.concat(text_parts, "\n"), text_kind = "aggregate" })
     end
     if #progress > 0 then
       return attach_session({ progress = table.concat(progress, "\n") .. "\n" })
@@ -467,7 +467,7 @@ local function parse_codex(line)
   local item = decoded.item
   if type(item) == "table" then
     if item.type == "agent_message" and item.text then
-      return out({ text = item.text })
+      return out({ text = item.text, text_kind = "aggregate" })
     end
     if item.type == "reasoning" and item.summary then
       if type(item.summary) == "table" then
@@ -534,6 +534,31 @@ local function consume_chunks(provider, on_text, on_progress, on_session_id, opt
   local parse = parser_for(provider)
   local pending = ""
   local last_progress = nil
+  local emitted_text = ""
+  local function dedupe_text(parsed)
+    local text = parsed.text
+    if not text or text == "" then
+      return nil
+    end
+    if parsed.text_kind == "aggregate" and emitted_text ~= "" then
+      if text == emitted_text then
+        return nil
+      end
+      if text:sub(1, #emitted_text) == emitted_text then
+        local tail = text:sub(#emitted_text + 1)
+        emitted_text = text
+        if tail == "" then
+          return nil
+        end
+        return tail
+      end
+      if #text < #emitted_text and emitted_text:sub(-#text) == text then
+        return nil
+      end
+    end
+    emitted_text = emitted_text .. text
+    return text
+  end
   local function emit(parsed)
     if not parsed then
       return
@@ -546,7 +571,10 @@ local function consume_chunks(provider, on_text, on_progress, on_session_id, opt
       on_session_id(parsed.session_id)
     end
     if parsed.text and parsed.text ~= "" then
-      on_text(parsed.text)
+      local text = dedupe_text(parsed)
+      if text and text ~= "" then
+        on_text(text)
+      end
     end
     if parsed.progress and parsed.progress ~= "" then
       if parsed.progress ~= last_progress then
