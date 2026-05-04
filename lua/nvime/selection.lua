@@ -1,5 +1,6 @@
 local buffer_guard = require("nvime.buffer_guard")
 local progress = require("nvime.progress")
+local prompts = require("nvime.prompts")
 local provider_api = require("nvime.provider")
 local render = require("nvime.render")
 local state = require("nvime.state")
@@ -427,9 +428,9 @@ end
 local function scroll_config()
   local dim = dimensions()
   local active = active_session()
-  local footer = " i input | <CR> send on prompt | p provider | P choose | q close "
+  local footer = " i input | ? prompts | <CR> send on prompt | p provider | P choose | q close "
   if active and active.busy and active.progress and active.progress ~= "" then
-    footer = " " .. active.progress .. " | i input | <CR> send | q close "
+    footer = " " .. active.progress .. " | i input | ? prompts | <CR> send | q close "
   end
   return {
     relative = "editor",
@@ -630,6 +631,39 @@ local function close_panel()
   end
 end
 
+local function panel_is_open(session_id)
+  local panel = state.panels.selection
+  return panel
+    and panel.winid
+    and vim.api.nvim_win_is_valid(panel.winid)
+    and (not session_id or panel.session_id == session_id)
+end
+
+local function completion_behavior()
+  local ui = (state.config or {}).ui or {}
+  if ui.completion == "open" or ui.completion == "popup" then
+    return "open"
+  end
+  return "notify"
+end
+
+local function notify_finished(lane, session_id, code)
+  if panel_is_open(session_id) then
+    return
+  end
+  local session = session_id and M.get_session(session_id) or active_session()
+  if session then
+    state.last_session = { kind = "selection", id = session.id }
+  end
+  if completion_behavior() == "open" then
+    M.open_session(session_id)
+    return
+  end
+  local level = code == 0 and vim.log.levels.INFO or vim.log.levels.WARN
+  local status = code == 0 and "finished" or ("failed with code " .. tostring(code))
+  vim.notify("nvime " .. tostring(lane or "selection") .. " " .. status .. ". Reopen with :NvimeLast or <leader>nn.", level)
+end
+
 function M.close()
   close_panel()
 end
@@ -725,6 +759,9 @@ local function attach_panel(bufnr)
   vim.keymap.set("n", "P", function()
     provider_api.choose({ scope = "selection" })
   end, opts)
+  vim.keymap.set("n", "?", function()
+    require("nvime.selection").choose_prompt()
+  end, opts)
   vim.keymap.set("i", "<CR>", function()
     vim.cmd.stopinsert()
     require("nvime.selection").submit_current()
@@ -765,6 +802,7 @@ function M.open(opts)
   touch_session(session)
 
   state.selection.active_session_id = session.id
+  state.last_session = { kind = "selection", id = session.id }
   state.selection.mode = session.mode
   state.selection.provider = session.provider
   state.selection.active_selection = session.selection
@@ -893,8 +931,9 @@ function M.append(text, session_id)
       touch_session(session)
     end, decorate_scrollback, panel)
     set_locked(bufnr, true)
-    if state.selection and state.selection.active_session_id == session.id then
-      state.panels.selection.input_start = session.input_start
+    local active_panel = state.panels.selection
+    if state.selection and state.selection.active_session_id == session.id and active_panel and active_panel.session_id == session.id then
+      active_panel.input_start = session.input_start
       if follow then
         scroll_to_bottom()
       else
@@ -927,7 +966,7 @@ function M.prompt(opts)
   end
   local next_provider = opts.provider or session.provider or provider()
   local next_mode = opts.mode or session.mode or mode()
-  local focus_input = opts.focus_input ~= false
+  local focus_input = opts.focus_input == true
   local open_panel = opts.open ~= false
   session.provider_sessions = session.provider_sessions or {}
   session.pending_input = {
@@ -960,6 +999,19 @@ function M.prompt(opts)
     focus_input = focus_input,
   })
   reset_input("")
+end
+
+function M.insert_prompt(text)
+  text = vim.trim(text or "")
+  M.open()
+  reset_input(text, { force_follow = true })
+  M.focus_input({ cursor = "end" })
+end
+
+function M.choose_prompt()
+  prompts.choose("selection", function(text)
+    M.insert_prompt(text)
+  end)
 end
 
 function M.focus_input(opts)
@@ -1070,6 +1122,14 @@ function M.active_session_id()
   return state.selection and state.selection.active_session_id
 end
 
+function M.is_open(session_id)
+  return panel_is_open(session_id)
+end
+
+function M.notify_finished(lane, session_id, code)
+  notify_finished(lane, session_id, code or 0)
+end
+
 function M.sessions()
   local items = vim.deepcopy(ensure_sessions())
   table.sort(items, function(left, right)
@@ -1155,7 +1215,7 @@ function M.open_session(id, opts)
     provider = session.provider,
     mode = session.mode,
     selection = session.selection,
-    focus_input = opts.focus_input ~= false and session.pending_input ~= nil,
+    focus_input = opts.focus_input == true and session.pending_input ~= nil,
   })
 end
 

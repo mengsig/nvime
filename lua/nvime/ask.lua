@@ -191,6 +191,7 @@ run = function(selection, question, provider, session_opts)
 			selection_state.set_progress(text, session_id)
 		end,
 		on_exit = function(result)
+			local was_open = selection_state.is_open(session_id)
 			selection_state.set_busy(false, session_id)
 			local answer = vim.trim(table.concat(response))
 			selection_state.mark_last_ask(session_id, {
@@ -213,7 +214,10 @@ run = function(selection, question, provider, session_opts)
 					opened_diff = true
 				end
 			end
-			arm_followup(selection, provider, session_id, not opened_diff and selection_state.active_session_id() == session_id)
+			arm_followup(selection, provider, session_id, not opened_diff and was_open and selection_state.active_session_id() == session_id)
+			if not opened_diff and not was_open then
+				selection_state.notify_finished("ask", session_id, result.code)
+			end
 			if opened_diff then
 				selection_state.close()
 			end

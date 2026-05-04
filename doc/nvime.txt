@@ -61,12 +61,22 @@ COMMANDS                                                        *nvime-commands*
         default in .nvime/selection-sessions.json. In the picker, press 1-9 to
         open a numbered row, <CR> to open the cursor row, dd to delete the
         current row, or visual-select rows with V and press d to delete several.
+        If a hidden session finishes, ui.completion = "notify" reports it with
+        vim.notify instead of reopening the float. Set ui.completion = "open"
+        for pop-open behavior. :NvimeLast or <leader>nn reopens the last used
+        conversation.
 
                                                         *:NvimeReview*
 :NvimeReview [claude|codex] [prompt]
         Run a review/docs lane. The agent may inspect context, run shell
         commands when configured, and write Markdown documentation files. nvime
         does not apply source/config edits from this lane.
+
+                                                        *:NvimeLast*
+:NvimeLast
+        Reopen the last used general chat or Ask/Edit discussion. If no session
+        has been used in the current Neovim process, it opens the most recently
+        updated persisted chat or selection discussion.
 
                                                         *:NvimeAsk*
 :'<,'>NvimeAsk [claude|codex] {question}
@@ -168,12 +178,14 @@ Default keymaps use <leader>n:
                        edit selected range
         <leader>na     open audit log
         <leader>nd     discuss active inline diff state
+        <leader>nn     reopen last used nvime conversation
         <leader>np     choose Claude or Codex
 
 Chat buffer mappings:
         i, I           focus the prompt (cursor near start of input)
         a, A, o, O     focus the prompt (cursor at end of line)
         <Esc>          focus the scrollback (leave the prompt)
+        ?              choose a configured prompt template
         prompt <CR>    submit the current message
         p              cycle provider for the next chat prompt
         <Tab>          cycle provider for the next chat prompt
@@ -184,6 +196,7 @@ Selection workflow mappings:
         i, I           focus the prompt (cursor near start of input)
         a, A, o, O     focus the prompt (cursor at end of line)
         <Esc>          focus the scrollback (leave the prompt)
+        ?              choose a configured prompt template
         prompt <CR>    submit the current question/intent
         p              cycle provider for this discussion's next prompt
         <Tab>          cycle provider for this discussion's next prompt
@@ -223,6 +236,7 @@ Common options:
           ui = {
             layout = "float",
             side = "right",
+            completion = "notify",
           },
           keys = {
             enabled = true,

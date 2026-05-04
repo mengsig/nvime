@@ -18,6 +18,7 @@ M.defaults = {
     float_width = 0.82,
     float_height = 0.72,
     border = "rounded",
+    completion = "notify",
   },
   audit = {
     enabled = true,
@@ -70,11 +71,50 @@ M.defaults = {
       ask = "q",
       audit = "a",
       discuss = "d",
+      last = "n",
       provider = "p",
     },
     visual = {
       edit = "e",
       ask = "q",
+    },
+  },
+  prompts = {
+    general = {
+      {
+        label = "Review repository",
+        prompt = "Please review this repository for correctness, maintainability, and documentation drift. Run relevant read-only checks and summarize concrete findings.",
+      },
+      {
+        label = "Update docs",
+        prompt = "Please inspect the repository and ensure the Markdown documentation is accurate, complete, and easy for future agents to use.",
+      },
+      {
+        label = "Explain architecture",
+        prompt = "Please explain the repository architecture, important modules, data flow, and the safest places to make changes.",
+      },
+      {
+        label = "Run tests",
+        prompt = "Please run the relevant tests/checks, explain failures if any, and recommend the smallest next fix.",
+      },
+    },
+    selection = {
+      {
+        label = "Review selection",
+        prompt = "Please review this selection for correctness, maintainability, edge cases, and whether it fits the surrounding code.",
+      },
+      {
+        label = "Explain selection",
+        prompt = "Please explain what this selected code does and how it interacts with the rest of the repository.",
+      },
+      {
+        label = "Suggest minimal diff",
+        prompt = "Please suggest the smallest approvable diff for this selection, and avoid changing unrelated lines.",
+      },
+      {
+        label = "Proceed with fix",
+        prompt = "Please proceed with the concrete fix for this selection, keeping the change minimal and inside the selected range.",
+      },
     },
   },
 }

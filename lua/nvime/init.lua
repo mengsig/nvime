@@ -58,6 +58,43 @@ local function visual_ask()
   })
 end
 
+function M.open_last()
+  local chat = require("nvime.chat")
+  local selection = require("nvime.selection")
+  local last = state.last_session
+  if last and last.kind == "chat" and chat.get_session(last.id) then
+    chat.open_session(last.id)
+    return
+  end
+  if last and last.kind == "selection" and selection.get_session(last.id) then
+    selection.open_session(last.id)
+    return
+  end
+
+  local latest = nil
+  local latest_kind = nil
+  for _, session in ipairs(chat.sessions()) do
+    if not latest or (session.updated_at or 0) > (latest.updated_at or 0) then
+      latest = session
+      latest_kind = "chat"
+    end
+  end
+  for _, session in ipairs(selection.sessions()) do
+    if not latest or (session.updated_at or 0) > (latest.updated_at or 0) then
+      latest = session
+      latest_kind = "selection"
+    end
+  end
+
+  if latest_kind == "chat" then
+    chat.open_session(latest.id)
+  elseif latest_kind == "selection" then
+    selection.open_session(latest.id)
+  else
+    vim.notify("No nvime conversation to reopen", vim.log.levels.INFO)
+  end
+end
+
 local function install_keymaps()
   delete_keymaps()
 
@@ -78,6 +115,7 @@ local function install_keymaps()
   set_keymap("n", prefix .. (normal.discuss or "d"), function()
     require("nvime.edit").continue_remaining()
   end, "nvime discuss active inline diff")
+  set_keymap("n", prefix .. (normal.last or "n"), M.open_last, "nvime reopen last conversation")
   set_keymap("n", prefix .. (normal.provider or "p"), provider.choose, "nvime choose provider")
 
   set_keymap("x", prefix .. (visual.edit or "e"), visual_edit, "nvime edit visual selection")
@@ -153,6 +191,10 @@ function M.setup(opts)
       return { "chat", "ask", "edit" }
     end,
     desc = "Open the nvime chat or selection discussion picker",
+  })
+
+  vim.api.nvim_create_user_command("NvimeLast", M.open_last, {
+    desc = "Reopen the last used nvime conversation",
   })
 
   vim.api.nvim_create_user_command("NvimeProvider", function(args)

@@ -1,6 +1,7 @@
 local agents = require("nvime.agents")
 local buffer_guard = require("nvime.buffer_guard")
 local progress = require("nvime.progress")
+local prompts = require("nvime.prompts")
 local provider_api = require("nvime.provider")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
@@ -231,6 +232,40 @@ local function close_panel()
   end
 end
 
+local function panel_is_open(session_id)
+  local panel = state.panels.chat
+  return panel
+    and panel.winid
+    and vim.api.nvim_win_is_valid(panel.winid)
+    and (not session_id or panel.session_id == session_id)
+end
+
+local function completion_behavior()
+  local ui = (state.config or {}).ui or {}
+  if ui.completion == "open" or ui.completion == "popup" then
+    return "open"
+  end
+  return "notify"
+end
+
+local function notify_finished(session, code)
+  if not session or panel_is_open(session.id) then
+    return
+  end
+  state.last_session = { kind = "chat", id = session.id }
+  if completion_behavior() == "open" then
+    M.open_session(session.id)
+    return
+  end
+  local level = code == 0 and vim.log.levels.INFO or vim.log.levels.WARN
+  local status = code == 0 and "finished" or ("failed with code " .. tostring(code))
+  vim.notify("nvime chat " .. status .. ". Reopen with :NvimeLast or <leader>nn.", level)
+end
+
+function M.close()
+  close_panel()
+end
+
 local function find_buffer_by_name(name)
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == name then
@@ -365,6 +400,7 @@ local function create_session(opts)
   ensure_session_buffer(session)
   table.insert(sessions, session)
   state.chat.active_session_id = session.id
+  state.last_session = { kind = "chat", id = session.id }
   sync_session_to_legacy(session)
   schedule_save_sessions()
   return session
@@ -498,9 +534,9 @@ end
 local function scroll_config()
   local dim = dimensions()
   local session = active_session()
-  local footer = " i input | <CR> send on prompt | p provider | P choose | q close "
+  local footer = " i input | ? prompts | <CR> send on prompt | p provider | P choose | q close "
   if session and session.busy and session.progress and session.progress ~= "" then
-    footer = " " .. session.progress .. " | i input | <CR> send | q close "
+    footer = " " .. session.progress .. " | i input | ? prompts | <CR> send | q close "
   end
   return {
     relative = "editor",
@@ -896,6 +932,9 @@ local function attach_panel(bufnr)
   vim.keymap.set("n", "P", function()
     provider_api.choose({ scope = "chat" })
   end, opts)
+  vim.keymap.set("n", "?", function()
+    require("nvime.chat").choose_prompt()
+  end, opts)
   vim.keymap.set("i", "<CR>", function()
     vim.cmd.stopinsert()
     require("nvime.chat").submit_current()
@@ -1016,8 +1055,9 @@ local function append_scrollback(text, session_id)
       touch_session(session)
     end, decorate_scrollback, panel)
     set_locked(bufnr, true)
-    if state.chat and state.chat.active_session_id == session.id then
-      state.panels.chat.input_start = session.input_start
+    local active_panel = state.panels.chat
+    if state.chat and state.chat.active_session_id == session.id and active_panel and active_panel.session_id == session.id then
+      active_panel.input_start = session.input_start
       sync_session_to_legacy(session)
       if follow then
         scroll_to_bottom()
@@ -1217,9 +1257,6 @@ function M.append(text, session_id)
     return
   end
   local session = session_id and get_session(session_id) or ensure_active_session()
-  if state.chat.active_session_id == session.id then
-    M.open({ session_id = session.id })
-  end
   append_scrollback(text, session.id)
 end
 
@@ -1327,13 +1364,27 @@ function M.submit(text, opts)
       if result.code ~= 0 then
         append_scrollback("\n[nvime] chat failed with code " .. tostring(result.code) .. "\n", session.id)
       end
+      notify_finished(session, result.code)
       vim.schedule(function()
-        if state.chat.active_session_id == session.id then
+        if state.chat.active_session_id == session.id and panel_is_open(session.id) then
           M.refresh(bufnr)
         end
       end)
     end,
   })
+end
+
+function M.insert_prompt(text)
+  text = vim.trim(text or "")
+  M.open()
+  reset_input(text, { force_follow = true })
+  M.prompt({ cursor = "end" })
+end
+
+function M.choose_prompt()
+  prompts.choose("general", function(text)
+    M.insert_prompt(text)
+  end)
 end
 
 function M.prompt(opts)
@@ -1376,6 +1427,10 @@ end
 
 function M.active_session_id()
   return state.chat and state.chat.active_session_id
+end
+
+function M.is_open(session_id)
+  return panel_is_open(session_id)
 end
 
 function M.get_session(id)

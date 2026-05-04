@@ -181,6 +181,7 @@ run_edit = function(selection, intent, provider, session_opts)
       selection_state.set_progress(text, session_id)
     end,
     on_exit = function(result)
+      local was_open = selection_state.is_open(session_id)
       selection_state.set_busy(false, session_id)
       local opened_diff = false
       if result.code ~= 0 then
@@ -196,7 +197,10 @@ run_edit = function(selection, intent, provider, session_opts)
           opened_diff = true
         end
       end
-      arm_edit_followup(selection, provider, session_id, not opened_diff and selection_state.active_session_id() == session_id)
+      arm_edit_followup(selection, provider, session_id, not opened_diff and was_open and selection_state.active_session_id() == session_id)
+      if not opened_diff and not was_open then
+        selection_state.notify_finished("edit", session_id, result.code)
+      end
       if opened_diff then
         selection_state.close()
       end
@@ -346,8 +350,10 @@ function M.continue_remaining()
           selection_state.set_progress(text, selection_session_id)
         end,
         on_exit = function(result)
+          local was_open = selection_state.is_open(selection_session_id)
           selection_state.set_busy(false, selection_session_id)
           local body = table.concat(response)
+          local opened_diff = false
           if body:find("NVIME_DIFF", 1, true)
             or body:find("NVIME_REPLACEMENT", 1, true)
             or body:find("```diff", 1, true)
@@ -360,10 +366,16 @@ function M.continue_remaining()
               selection_state.append("\n[nvime] no updated patch opened: " .. diff_result.message .. "\n", selection_session_id)
             elseif diff_result and diff_result.session then
               diff_result.session.selection_session_id = selection_session_id
+              opened_diff = true
             end
           end
           if result.code ~= 0 then
             selection_state.append("\n[nvime] discuss failed with code " .. tostring(result.code) .. "\n", selection_session_id)
+          end
+          if opened_diff then
+            selection_state.close()
+          elseif not was_open then
+            selection_state.notify_finished("edit", selection_session_id, result.code)
           end
         end,
       })

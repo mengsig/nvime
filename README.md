@@ -62,6 +62,7 @@ require("nvime").setup({
     float_width = 0.82,
     float_height = 0.72,
     border = "rounded",
+    completion = "notify", -- "notify" or "open" when a hidden agent finishes
   },
   audit = {
     enabled = true,
@@ -114,11 +115,26 @@ require("nvime").setup({
       ask = "q",
       audit = "a",
       discuss = "d",
+      last = "n",
       provider = "p",
     },
     visual = {
       edit = "e",
       ask = "q",
+    },
+  },
+  prompts = {
+    general = {
+      { label = "Review repository", prompt = "Please review this repository..." },
+      { label = "Update docs", prompt = "Please inspect the repository and ensure the Markdown documentation is accurate..." },
+      { label = "Explain architecture", prompt = "Please explain the repository architecture..." },
+      { label = "Run tests", prompt = "Please run the relevant tests/checks..." },
+    },
+    selection = {
+      { label = "Review selection", prompt = "Please review this selection..." },
+      { label = "Explain selection", prompt = "Please explain what this selected code does..." },
+      { label = "Suggest minimal diff", prompt = "Please suggest the smallest approvable diff..." },
+      { label = "Proceed with fix", prompt = "Please proceed with the concrete fix..." },
     },
   },
 })
@@ -142,6 +158,7 @@ require("nvime").setup({
 - `:NvimeChats [chat|ask|edit]` opens the picker for general chat or highlighted-code Ask/Edit discussions.
 - `:NvimeReview [claude|codex] [prompt]` runs a review/docs session and includes
   the current worktree diff by default.
+- `:NvimeLast` reopens the last used general chat or Ask/Edit discussion.
 - `:NvimeAsk [claude|codex] <question>` asks the read-only side agent about the visual range or current function.
 - `:'<,'>NvimeEdit [claude|codex] <intent>` asks for a reviewed edit for the visual range.
 - `:NvimeEdit [claude|codex] <intent>` uses the Tree-sitter function at the cursor.
@@ -193,6 +210,7 @@ Or use `<leader>np`.
 Inside the chat window:
 
 - `i`, `I`, `a`, `A`, `o`, `O`: jump to the prompt
+- `?`: choose a configured prompt template
 - prompt `<CR>`: submit the current message
 - `p`, `<Tab>`: cycle Claude/Codex for the next chat prompt
 - `P`: choose Claude or Codex for the next chat prompt
@@ -211,6 +229,7 @@ Inside the chat window:
 - visual `<leader>ne`: edit selected range
 - `<leader>na`: open audit log
 - `<leader>nd`: discuss the active inline diff state
+- `<leader>nn`: reopen the last used nvime conversation
 - `<leader>np`: choose Claude or Codex
 
 Use `NvimeAsk` for questions such as "does this look right?" or "what does
@@ -241,6 +260,10 @@ Both live inside the current git root, so the pickers can show older sessions
 after restarting Neovim. In a picker, press `1`-`9` to open a numbered row,
 `<CR>` to open the cursor row, `dd` to delete the current row, or visual-select
 rows with `V` and press `d` to delete several.
+If an agent finishes while its float is closed, `ui.completion = "notify"`
+raises a notification instead of reopening the window. Set `ui.completion =
+"open"` to restore pop-open behavior. `:NvimeLast` or `<leader>nn` reopens the
+last used chat or selection discussion.
 The selection workflow uses the same one-window scratch-buffer layout as chat. If you
 run Ask/Edit without an inline prompt, nvime asks for the question or intent on
 the guarded prompt line instead of opening a separate popup. After an Ask
@@ -257,6 +280,7 @@ in the shared scrollback for context.
 Inside an open selection discussion:
 
 - `i`, `I`, `a`, `A`, `o`, `O`: jump to the prompt
+- `?`: choose a configured prompt template
 - prompt `<CR>`: submit the current message
 - `p`, `<Tab>`: cycle Claude/Codex for the next selection prompt
 - `P`: choose Claude or Codex for the next selection prompt

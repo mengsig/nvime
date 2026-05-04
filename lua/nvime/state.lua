@@ -4,6 +4,7 @@ local M = {
   guard_installed = false,
   trusted_depth = 0,
   panels = {},
+  last_session = nil,
   current_diff = nil,
   running = {},
   raw = {},

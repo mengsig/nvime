@@ -45,6 +45,7 @@ assert(vim.fn.maparg("<leader>nq", "x") ~= "", "default visual ask keymap exists
 assert(vim.fn.maparg("<leader>nc", "n") == "<Cmd>NvimeChat<CR>", "default normal chat keymap opens chat picker")
 assert(vim.fn.maparg("<leader>ne", "n") == "<Cmd>NvimeChats edit<CR>", "default normal edit keymap opens edit picker")
 assert(vim.fn.maparg("<leader>nq", "n") == "<Cmd>NvimeChats ask<CR>", "default normal ask keymap opens ask picker")
+assert(vim.fn.maparg("<leader>nn", "n") ~= "", "default normal last-session keymap exists")
 assert(vim.fn.maparg("<leader>np", "n") ~= "", "default provider keymap exists")
 assert_eq(require("nvime.progress").compact("[claude] tool: Bash: rg README"), "claude Bash", "claude progress footer keeps tool name")
 assert_eq(
@@ -126,6 +127,18 @@ require("nvime.chat").prompt()
 assert(vim.api.nvim_get_current_buf() == chat_buf, "chat prompt focuses shared input buffer")
 assert(vim.api.nvim_get_current_win() == chat_input_win, "chat prompt focuses the single chat window")
 assert(vim.bo[chat_buf].modifiable == true, "chat buffer becomes editable while typing on the prompt")
+local old_select = vim.ui.select
+vim.ui.select = function(items, _opts, on_choice)
+  on_choice(items[1])
+end
+require("nvime.chat").choose_prompt()
+chat_panel = require("nvime.state").panels.chat
+local templated_chat_prompt = vim.api.nvim_buf_get_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false)[1] or ""
+assert(templated_chat_prompt:find("Please review this repository", 1, true), "chat prompt picker fills the prompt line")
+vim.api.nvim_buf_set_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false, { "[claude]$ " })
+vim.ui.select = old_select
+pcall(vim.cmd.stopinsert)
+require("nvime.chat").prompt()
 vim.api.nvim_buf_set_lines(chat_buf, 0, -1, false, { "oops" })
 assert(vim.wait(1000, function()
   local guarded = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
@@ -370,6 +383,35 @@ require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 require("nvime.state").chat.provider_sessions = {}
 require("nvime.state").chat.provider_workspaces = {}
 require("nvime.state").chat.last_provider = nil
+
+local hidden_chat_claude = tmp .. "/hidden-chat-claude"
+vim.fn.writefile({
+  "#!/usr/bin/env sh",
+  "sleep 0.2",
+  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hidden chat done\"}]}}'",
+}, hidden_chat_claude)
+vim.fn.setfperm(hidden_chat_claude, "rwxr-xr-x")
+require("nvime.state").config.providers.claude.cmd = hidden_chat_claude
+local old_notify = vim.notify
+local notices = {}
+vim.notify = function(msg, level, opts)
+  notices[#notices + 1] = tostring(msg)
+  return old_notify(msg, level, opts)
+end
+require("nvime.chat").submit("hidden chat notify")
+local hidden_chat_id = require("nvime.chat").active_session_id()
+require("nvime.chat").close()
+assert(not require("nvime.chat").is_open(hidden_chat_id), "hidden chat fixture closes the float while running")
+assert(vim.wait(5000, function()
+  local session = require("nvime.chat").get_session(hidden_chat_id)
+  return session and not session.busy and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("hidden chat done", 1, true)
+end, 20), "hidden chat still records the completed response")
+assert(not require("nvime.chat").is_open(hidden_chat_id), "hidden chat completion does not reopen the float")
+assert(vim.tbl_contains(notices, "nvime chat finished. Reopen with :NvimeLast or <leader>nn."), "hidden chat completion notifies")
+vim.notify = old_notify
+require("nvime").open_last()
+assert(require("nvime.chat").is_open(hidden_chat_id), "NvimeLast reopens the hidden completed chat")
+require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 
 local writer_claude = tmp .. "/writer-claude"
 vim.fn.writefile({
@@ -812,7 +854,8 @@ local edit_numeric_prompt = table.concat(
   "\n"
 )
 assert(edit_numeric_prompt:find("[claude edit]$ ", 1, true), "edit picker numeric shortcut arms the edit prompt")
-pcall(vim.cmd.stopinsert)
+assert(vim.api.nvim_get_mode().mode ~= "i", "edit picker numeric shortcut opens in normal mode")
+assert(vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false, "edit picker numeric shortcut keeps prompt locked until input focus")
 vim.cmd("NvimeChats ask")
 local delete_panel = require("nvime.state").panels.chats
 local delete_row = nil
@@ -829,6 +872,77 @@ end, 20), "chats picker dd deletes the selected discussion")
 require("nvime.selection").save_sessions()
 local after_delete_json = table.concat(vim.fn.readfile(sessions_path), "\n")
 assert(not after_delete_json:find("nvime%-chat%.txt"), "deleted discussions are removed from persisted sessions")
+
+require("nvime.ask").start({
+  provider = "claude",
+  selection = {
+    bufnr = chat_buf,
+    line1 = 1,
+    line2 = 1,
+    path = "nvime-chat.txt",
+    source = "test",
+  },
+  new_session = true,
+})
+local prompt_only_session_id = require("nvime.selection").active_session_id()
+assert(vim.api.nvim_get_mode().mode ~= "i", "selection prompt opens in normal mode")
+assert(vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false, "selection prompt is locked until input focus")
+local old_select_selection = vim.ui.select
+vim.ui.select = function(items, _opts, on_choice)
+  on_choice(items[1])
+end
+require("nvime.selection").choose_prompt()
+local templated_selection_prompt = vim.api.nvim_buf_get_lines(
+  require("nvime.state").panels.selection.bufnr,
+  require("nvime.state").panels.selection.input_start - 1,
+  require("nvime.state").panels.selection.input_start,
+  false
+)[1] or ""
+assert(templated_selection_prompt:find("Please review this selection", 1, true), "selection prompt picker fills the prompt line")
+vim.ui.select = old_select_selection
+pcall(vim.cmd.stopinsert)
+require("nvime.selection").delete_sessions({ prompt_only_session_id })
+
+local hidden_ask_claude = tmp .. "/hidden-ask-claude"
+vim.fn.writefile({
+  "#!/usr/bin/env sh",
+  "sleep 0.2",
+  "printf '%s\\n' 'hidden ask done'",
+}, hidden_ask_claude)
+vim.fn.setfperm(hidden_ask_claude, "rwxr-xr-x")
+require("nvime.state").config.providers.claude.cmd = hidden_ask_claude
+local old_notify_selection = vim.notify
+local selection_notices = {}
+vim.notify = function(msg, level, opts)
+  selection_notices[#selection_notices + 1] = tostring(msg)
+  return old_notify_selection(msg, level, opts)
+end
+require("nvime.ask").start({
+  provider = "claude",
+  question = "finish while hidden",
+  selection = {
+    bufnr = chat_buf,
+    line1 = 1,
+    line2 = 1,
+    path = "nvime-chat.txt",
+    source = "test",
+  },
+  new_session = true,
+})
+local hidden_ask_session_id = require("nvime.selection").active_session_id()
+require("nvime.selection").close()
+assert(not require("nvime.selection").is_open(hidden_ask_session_id), "hidden ask fixture closes the float while running")
+assert(vim.wait(5000, function()
+  local session = require("nvime.selection").get_session(hidden_ask_session_id)
+  return session and not session.busy and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("hidden ask done", 1, true)
+end, 20), "hidden ask still records the completed response")
+assert(not require("nvime.selection").is_open(hidden_ask_session_id), "hidden ask completion does not reopen the float")
+assert(vim.tbl_contains(selection_notices, "nvime ask finished. Reopen with :NvimeLast or <leader>nn."), "hidden ask completion notifies")
+vim.notify = old_notify_selection
+require("nvime").open_last()
+assert(require("nvime.selection").is_open(hidden_ask_session_id), "NvimeLast reopens the hidden completed selection discussion")
+require("nvime.selection").delete_sessions({ hidden_ask_session_id })
+require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 
 vim.cmd.edit(tmp .. "/visual-resume.lua")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
