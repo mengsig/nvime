@@ -586,6 +586,22 @@ local function current_input_text()
   return extract_prompt_text(line)
 end
 
+local function prompt_has_submit_text(panel)
+  if not panel or not panel.input_bufnr or not vim.api.nvim_buf_is_valid(panel.input_bufnr) then
+    return false
+  end
+  if not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
+    return false
+  end
+  local lnum = panel.input_start or 1
+  local ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
+  if not ok or cursor[1] ~= lnum then
+    return false
+  end
+  local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, lnum, false)[1] or ""
+  return vim.trim(extract_prompt_text(line)) ~= ""
+end
+
 local function decorate_scrollback(bufnr)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
@@ -899,7 +915,7 @@ end
 local function attach_panel(bufnr)
   local opts = { buffer = bufnr, silent = true }
   vim.keymap.set("n", "<CR>", function()
-    if in_input_window(state.panels.chat) then
+    if in_input_window(state.panels.chat) or prompt_has_submit_text(state.panels.chat) then
       require("nvime.chat").submit_current()
     else
       require("nvime.chat").prompt()

@@ -886,6 +886,35 @@ local edit_numeric_prompt = table.concat(
 assert(edit_numeric_prompt:find("[claude edit]$ ", 1, true), "edit picker numeric shortcut arms the edit prompt")
 assert(vim.api.nvim_get_mode().mode ~= "i", "edit picker numeric shortcut opens in normal mode")
 assert(vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false, "edit picker numeric shortcut keeps prompt locked until input focus")
+;(function()
+  local normal_enter_claude = tmp .. "/normal-enter-claude"
+  vim.fn.writefile({
+    "#!/usr/bin/env sh",
+    "printf '%s\\n' 'NVIME_NO_CHANGE'",
+    "printf '%s\\n' 'normal enter submitted'",
+  }, normal_enter_claude)
+  vim.fn.setfperm(normal_enter_claude, "rwxr-xr-x")
+  local normal_enter_old_cmd = require("nvime.state").config.providers.claude.cmd
+  require("nvime.state").config.providers.claude.cmd = normal_enter_claude
+  require("nvime.selection").focus_input()
+  local panel = require("nvime.state").panels.selection
+  vim.api.nvim_buf_set_lines(panel.bufnr, panel.input_start - 1, panel.input_start, false, {
+    "[claude edit]$ hey",
+  })
+  pcall(vim.cmd.stopinsert)
+  panel.input_active = false
+  vim.bo[panel.bufnr].modifiable = false
+  vim.api.nvim_set_current_win(panel.winid)
+  vim.api.nvim_win_set_cursor(panel.winid, { panel.input_start, 0 })
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "xt", false)
+  assert(vim.wait(5000, function()
+    local session = require("nvime.selection").get_session(require("nvime.selection").active_session_id())
+    return session
+      and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n")
+        :find("normal enter submitted", 1, true)
+  end, 20), "normal-mode Enter submits a filled selection prompt after reopening a discussion")
+  require("nvime.state").config.providers.claude.cmd = normal_enter_old_cmd
+end)()
 vim.cmd("NvimeChats ask")
 local delete_panel = require("nvime.state").panels.chats
 local delete_row = nil
