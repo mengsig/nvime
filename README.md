@@ -1,8 +1,8 @@
 # nvime
 
-`nvime` means "No Vibe Coding In My Editor".
+`nvime` means "No Vibe Coding In My Editor": no AI sprawl, no mystery edits, no bullshit.
 
-It is a Neovim Lua plugin that routes Claude Code and Codex CLI through explicit engineering lanes:
+It is a Neovim Lua plugin for getting real work done with Claude Code and Codex CLI through explicit engineering lanes:
 
 - review/docs lane: broad repo inspection, shell/test output, Markdown docs writes only
 - edit lane: one selected range or Tree-sitter detected function, one current file, written intent required
