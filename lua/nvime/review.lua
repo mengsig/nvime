@@ -15,7 +15,7 @@ function M.start(opts)
   local prompt = opts.prompt
   if not prompt or prompt == "" then
     prompt =
-      "Review the current repository state. Be concrete, prioritize bugs and behavioral regressions. You may create or update Markdown documentation files only; do not edit source/config files."
+      "Review the current repository state. Be concrete, prioritize bugs and behavioral regressions. You may use shell commands including curl and web fetch/search tools when available. You may create or update Markdown documentation files only; do not edit source/config files."
   end
 
   local input = opts.input
@@ -24,28 +24,34 @@ function M.start(opts)
   end
 
   chat.open()
-  chat.append("\n\n[" .. provider .. " review]$ " .. prompt .. "\n\n")
-  chat.append("[" .. provider .. " response]\n" .. string.rep("-", 78) .. "\n\n")
-  chat.set_busy(true)
+  local session_id = chat.active_session_id()
+  chat.append("\n\n[" .. provider .. " review]$ " .. prompt .. "\n\n", session_id)
+  chat.append("[" .. provider .. " response]\n" .. string.rep("-", 78) .. "\n\n", session_id)
+  chat.set_busy(true, session_id)
+  local agent_session = chat.agent_run_opts(provider, session_id)
   agents.run({
     provider = provider,
     lane = "review",
     prompt = prompt,
     input = input,
+    persist_session = agent_session.persist_session,
+    resume_session_id = agent_session.resume_session_id,
+    markdown_workspace = agent_session.markdown_workspace,
+    on_session_id = agent_session.on_session_id,
     on_text = function(text)
-      chat.append(text)
+      chat.append(text, session_id)
     end,
     on_progress = function(text)
-      chat.append(text)
+      chat.set_progress(text, session_id)
     end,
     on_exit = function(result)
-      chat.set_busy(false)
+      chat.set_busy(false, session_id)
       local synced = result.nvime_synced_markdown or {}
       if #synced > 0 then
         vim.notify("nvime synced markdown: " .. table.concat(synced, ", "), vim.log.levels.INFO)
       end
       if result.code ~= 0 then
-        chat.append("\n[nvime] review failed with code " .. tostring(result.code) .. "\n")
+        chat.append("\n[nvime] review failed with code " .. tostring(result.code) .. "\n", session_id)
       end
     end,
   })

@@ -1,3 +1,4 @@
+local chat = require("nvime.chat")
 local selection = require("nvime.selection")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
@@ -63,7 +64,7 @@ local function window_config()
     border = dim.border,
     title = " nvime chats ",
     title_pos = "center",
-    footer = " <CR> open | n new | r refresh | q close ",
+    footer = " 1-9 open | <CR> open | n new | dd delete | visual d delete | r refresh | q close ",
     footer_pos = "center",
     zindex = 54,
   }
@@ -104,30 +105,89 @@ end
 
 local function requested_mode()
   local panel = state.panels.chats or {}
-  if panel.mode == "ask" or panel.mode == "edit" then
+  if panel.mode == "ask" or panel.mode == "edit" or panel.mode == "chat" then
     return panel.mode
   end
   return nil
 end
 
+local function is_chat_mode()
+  return requested_mode() == "chat"
+end
+
+local function format_chat_session(index, session)
+  local status = session.busy and "running" or "idle"
+  local provider = session.provider or "?"
+  local native = session.provider_sessions and session.provider_sessions[provider] and "resume" or "local"
+  local title = session.title or ("Chat #" .. tostring(session.id or index))
+  return string.format("%2d  %-7s %-8s %-6s %s", index, provider, status, native, title)
+end
+
 local function render(bufnr)
-  local sessions = selection.sessions()
   local mode = requested_mode()
-  local lines = {
-    "Selection Discussions",
-    "",
-  }
+  local lines = {}
   local row_to_session = {}
   local row_to_action = {}
+  local number_to_row = {}
 
-  if mode then
+  if mode == "chat" then
+    local sessions = chat.sessions()
+    lines = {
+      "General Conversations",
+      "",
+    }
+    row_to_action[#lines + 1] = {
+      type = "new_chat",
+    }
+    lines[#lines + 1] = " n  start new chat conversation"
+    lines[#lines + 1] = ""
+
+    if #sessions == 0 then
+      lines[#lines + 1] = "No general chat conversations yet."
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "Press n to start one, or <CR> on the new row."
+    else
+      lines[#lines + 1] = "    agent   status   native title"
+      lines[#lines + 1] = "    -----   ------   ------ -----"
+      for index, session in ipairs(sessions) do
+        local row = #lines + 1
+        row_to_session[row] = session.id
+        number_to_row[index] = row
+        lines[#lines + 1] = format_chat_session(index, session)
+      end
+    end
+  elseif mode then
+    local sessions = selection.sessions()
+    lines = {
+      "Selection Discussions",
+      "",
+    }
     row_to_action[#lines + 1] = {
       type = "new",
       mode = mode,
     }
     lines[#lines + 1] = " n  start new " .. mode .. " session from current function"
     lines[#lines + 1] = ""
+    if #sessions == 0 then
+      lines[#lines + 1] = "No highlighted-code discussions yet."
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "Select code and press visual <leader>nq or visual <leader>ne, or start from the current function above."
+    else
+      lines[#lines + 1] = "    agent   lane   status   native file:lines"
+      lines[#lines + 1] = "    -----   ----   ------   ------ ----------"
+      for index, session in ipairs(sessions) do
+        local row = #lines + 1
+        row_to_session[row] = session.id
+        number_to_row[index] = row
+        lines[#lines + 1] = format_session(index, session)
+      end
+    end
   else
+    local sessions = selection.sessions()
+    lines = {
+      "Selection Discussions",
+      "",
+    }
     row_to_action[#lines + 1] = {
       type = "new",
       mode = "ask",
@@ -139,18 +199,19 @@ local function render(bufnr)
     }
     lines[#lines + 1] = " e  start new edit session from current function"
     lines[#lines + 1] = ""
-  end
-
-  if #sessions == 0 then
-    lines[#lines + 1] = "No highlighted-code discussions yet."
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "Select code and press visual <leader>nq or visual <leader>ne, or start from the current function above."
-  else
-    lines[#lines + 1] = "    agent   lane   status   native file:lines"
-    lines[#lines + 1] = "    -----   ----   ------   ------ ----------"
-    for index, session in ipairs(sessions) do
-      row_to_session[#lines + 1] = session.id
-      lines[#lines + 1] = format_session(index, session)
+    if #sessions == 0 then
+      lines[#lines + 1] = "No highlighted-code discussions yet."
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "Select code and press visual <leader>nq or visual <leader>ne, or start from the current function above."
+    else
+      lines[#lines + 1] = "    agent   lane   status   native file:lines"
+      lines[#lines + 1] = "    -----   ----   ------   ------ ----------"
+      for index, session in ipairs(sessions) do
+        local row = #lines + 1
+        row_to_session[row] = session.id
+        number_to_row[index] = row
+        lines[#lines + 1] = format_session(index, session)
+      end
     end
   end
 
@@ -164,7 +225,7 @@ local function render(bufnr)
     hl_group = "NvimeHeader",
   })
   for row, session_id in pairs(row_to_session) do
-    local session = selection.get_session(session_id)
+    local session = is_chat_mode() and chat.get_session(session_id) or selection.get_session(session_id)
     if session and session.busy then
       vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
         line_hl_group = "NvimeDiffHunk",
@@ -174,6 +235,7 @@ local function render(bufnr)
 
   state.panels.chats.row_to_session = row_to_session
   state.panels.chats.row_to_action = row_to_action
+  state.panels.chats.number_to_row = number_to_row
 end
 
 local function selected_item()
@@ -188,11 +250,41 @@ local function selected_item()
   local session_id = panel.row_to_session and panel.row_to_session[row]
   if session_id then
     return {
-      type = "session",
+      type = is_chat_mode() and "chat_session" or "session",
       session_id = session_id,
     }
   end
   return nil
+end
+
+local function selected_session_ids()
+  local panel = state.panels.chats
+  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
+    return {}
+  end
+
+  local first = vim.api.nvim_win_get_cursor(panel.winid)[1]
+  local last = first
+  local current_mode = vim.fn.mode()
+  if current_mode == "v" or current_mode == "V" or current_mode == "\22" then
+    local anchor = vim.fn.getpos("v")[2]
+    if anchor and anchor > 0 then
+      first = math.min(anchor, last)
+      last = math.max(anchor, last)
+    end
+    vim.cmd.normal({ args = { "\27" }, bang = true })
+  end
+
+  local ids = {}
+  local seen = {}
+  for row = first, last do
+    local session_id = panel.row_to_session and panel.row_to_session[row]
+    if session_id and not seen[session_id] then
+      seen[session_id] = true
+      ids[#ids + 1] = session_id
+    end
+  end
+  return ids
 end
 
 local function open_selected()
@@ -201,10 +293,14 @@ local function open_selected()
     return
   end
   close()
-  if item.type == "new" then
+  if item.type == "new_chat" then
+    chat.new_session()
+  elseif item.type == "new" then
     require("nvime." .. item.mode).start({
       new_session = true,
     })
+  elseif item.type == "chat_session" then
+    chat.open_session(item.session_id)
   elseif item.type == "session" then
     local mode = requested_mode()
     local session = selection.get_session(item.session_id)
@@ -219,11 +315,42 @@ local function open_selected()
   end
 end
 
+local function open_number(index)
+  local panel = state.panels.chats
+  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
+    return
+  end
+  local row = panel.number_to_row and panel.number_to_row[index]
+  if not row then
+    vim.notify("No nvime session at number " .. tostring(index), vim.log.levels.INFO)
+    return
+  end
+  vim.api.nvim_win_set_cursor(panel.winid, { row, 0 })
+  open_selected()
+end
+
 local function open_new(mode)
   close()
+  if mode == "chat" then
+    chat.new_session()
+    return
+  end
   require("nvime." .. mode).start({
     new_session = true,
   })
+end
+
+local function delete_selected()
+  local ids = selected_session_ids()
+  if #ids == 0 then
+    vim.notify("No nvime " .. (is_chat_mode() and "chat" or "discussion") .. " selected", vim.log.levels.INFO)
+    return
+  end
+  local deleted = is_chat_mode() and chat.delete_sessions(ids) or selection.delete_sessions(ids)
+  if deleted > 0 then
+    vim.notify("Deleted " .. tostring(deleted) .. " nvime " .. (is_chat_mode() and "chat(s)" or "discussion(s)"), vim.log.levels.INFO)
+  end
+  M.open({ mode = requested_mode() })
 end
 
 local function attach_maps(bufnr)
@@ -235,11 +362,23 @@ local function attach_maps(bufnr)
     open_new(requested_mode() or "ask")
   end, opts)
   vim.keymap.set("n", "e", function()
+    if is_chat_mode() then
+      open_selected()
+      return
+    end
     open_new("edit")
   end, opts)
   vim.keymap.set("n", "r", function()
     M.open({ mode = requested_mode() })
   end, opts)
+  for index = 1, 9 do
+    local key_index = index
+    vim.keymap.set("n", tostring(index), function()
+      open_number(key_index)
+    end, opts)
+  end
+  vim.keymap.set("n", "dd", delete_selected, opts)
+  vim.keymap.set("x", "d", delete_selected, opts)
   vim.keymap.set("n", "q", close, opts)
   vim.keymap.set("n", "<Esc>", close, opts)
 end
@@ -263,6 +402,7 @@ function M.open(opts)
     winid = winid,
     row_to_session = {},
     row_to_action = {},
+    number_to_row = {},
     mode = opts.mode,
   }
   attach_maps(bufnr)

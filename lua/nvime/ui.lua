@@ -2,6 +2,8 @@ local state = require("nvime.state")
 
 local M = {}
 
+local highlight_pending = false
+
 local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeNormal", { link = "NormalFloat", default = true })
   vim.api.nvim_set_hl(0, "NvimeBorder", { fg = "#7aa2f7", default = true })
@@ -32,6 +34,17 @@ local function define_highlights()
 end
 
 function M.ensure_highlights()
+  if vim.in_fast_event and vim.in_fast_event() then
+    if highlight_pending then
+      return
+    end
+    highlight_pending = true
+    vim.schedule(function()
+      highlight_pending = false
+      define_highlights()
+    end)
+    return
+  end
   define_highlights()
 end
 
@@ -79,7 +92,7 @@ local function configure_window(winid)
 end
 
 local function float_config(title)
-  define_highlights()
+  M.ensure_highlights()
   local ui = state.config.ui or {}
   local columns = vim.o.columns
   local lines = vim.o.lines

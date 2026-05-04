@@ -5,6 +5,8 @@ local state = require("nvime.state")
 
 local M = {}
 
+local persist_group = vim.api.nvim_create_augroup("nvime.persist", { clear = false })
+
 local function delete_keymaps()
   for _, keymap in ipairs(state.keymaps or {}) do
     pcall(vim.keymap.del, keymap.mode, keymap.lhs)
@@ -68,7 +70,7 @@ local function install_keymaps()
   local normal = keys.normal or {}
   local visual = keys.visual or {}
 
-  set_keymap("n", prefix .. (normal.chat or "c"), "<Cmd>NvimeChat<CR>", "nvime chat panel")
+  set_keymap("n", prefix .. (normal.chat or "c"), "<Cmd>NvimeChat<CR>", "nvime chat conversations")
   set_keymap("n", prefix .. (normal.review or "r"), "<Cmd>NvimeReview<CR>", "nvime review/docs")
   set_keymap("n", prefix .. (normal.edit or "e"), "<Cmd>NvimeChats edit<CR>", "nvime edit discussions")
   set_keymap("n", prefix .. (normal.ask or "q"), "<Cmd>NvimeChats ask<CR>", "nvime ask discussions")
@@ -136,9 +138,9 @@ function M.setup(opts)
   })
 
   vim.api.nvim_create_user_command("NvimeChat", function()
-    require("nvime.chat").prompt()
+    require("nvime.chats").open({ mode = "chat" })
   end, {
-    desc = "Open the nvime chat panel and focus input",
+    desc = "Open the nvime general chat conversation picker",
   })
 
   vim.api.nvim_create_user_command("NvimeChats", function(args)
@@ -148,9 +150,9 @@ function M.setup(opts)
   end, {
     nargs = "?",
     complete = function()
-      return { "ask", "edit" }
+      return { "chat", "ask", "edit" }
     end,
-    desc = "Open the nvime selection discussion picker",
+    desc = "Open the nvime chat or selection discussion picker",
   })
 
   vim.api.nvim_create_user_command("NvimeProvider", function(args)
@@ -182,6 +184,15 @@ function M.setup(opts)
   })
 
   install_keymaps()
+
+  pcall(vim.api.nvim_clear_autocmds, { group = persist_group })
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = persist_group,
+    callback = function()
+      require("nvime.chat").save_sessions()
+      require("nvime.selection").save_sessions()
+    end,
+  })
 
   state.setup_done = true
 end

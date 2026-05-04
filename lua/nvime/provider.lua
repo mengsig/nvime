@@ -33,6 +33,28 @@ local function current_selection_provider()
   return state.selection and state.selection.provider
 end
 
+local function active_chat_session()
+  local chat = state.chat or {}
+  local active_id = chat.active_session_id
+  if not active_id or type(chat.sessions) ~= "table" then
+    return nil
+  end
+  for _, session in ipairs(chat.sessions) do
+    if session.id == active_id then
+      return session
+    end
+  end
+  return nil
+end
+
+local function current_chat_provider()
+  local session = active_chat_session()
+  if session and session.provider then
+    return session.provider
+  end
+  return state.chat and state.chat.provider
+end
+
 local function set_active_selection_provider(name)
   state.selection = state.selection or {}
   state.selection.provider = name
@@ -46,10 +68,22 @@ local function set_active_selection_provider(name)
   end
 end
 
+local function set_active_chat_provider(name)
+  state.chat = state.chat or {}
+  state.chat.provider = name
+  local session = active_chat_session()
+  if session then
+    session.provider = name
+  end
+end
+
 function M.current(opts)
   opts = normalize_opts(opts)
   if opts.scope == "selection" then
     return current_selection_provider() or (state.config and state.config.provider) or "claude"
+  end
+  if opts.scope == "chat" then
+    return current_chat_provider() or (state.config and state.config.provider) or "claude"
   end
   return (state.config and state.config.provider) or "claude"
 end
@@ -69,8 +103,12 @@ function M.set(name, opts)
   state.config.provider = name
 
   local update_selection = opts.scope == "selection" or (not opts.scope and state.panels and state.panels.selection)
+  local update_chat = opts.scope == "chat" or (not opts.scope and state.panels and state.panels.chat)
   if update_selection then
     set_active_selection_provider(name)
+  end
+  if update_chat then
+    set_active_chat_provider(name)
   end
   if opts.scope ~= "selection" then
     pcall(function()

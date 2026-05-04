@@ -38,7 +38,12 @@ M.defaults = {
   },
   review = {
     allow_shell = true,
+    allow_web = true,
     allow_markdown_writes = true,
+  },
+  selection = {
+    allow_shell = true,
+    allow_web = true,
   },
   edit = {
     context_lines = 0,
@@ -48,6 +53,12 @@ M.defaults = {
   },
   chat = {
     max_history_messages = 24,
+  },
+  sessions = {
+    enabled = true,
+    path = nil,
+    chat_path = nil,
+    max = 100,
   },
   keys = {
     enabled = true,

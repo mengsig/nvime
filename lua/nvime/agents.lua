@@ -33,6 +33,86 @@ local function review_allows_shell()
   return review.allow_shell == true
 end
 
+local function review_allows_web()
+  local review = (state.config or {}).review or {}
+  return review.allow_web ~= false
+end
+
+local function selection_allows_shell()
+  local selection = (state.config or {}).selection or {}
+  if selection.allow_shell ~= nil then
+    return selection.allow_shell == true
+  end
+  return review_allows_shell()
+end
+
+local function selection_allows_web()
+  local selection = (state.config or {}).selection or {}
+  if selection.allow_web ~= nil then
+    return selection.allow_web ~= false
+  end
+  return review_allows_web()
+end
+
+local function claude_read_tools(opts)
+  opts = opts or {}
+  local tools = { "Read", "Glob", "Grep", "LS" }
+  if opts.allow_web then
+    vim.list_extend(tools, { "WebFetch", "WebSearch" })
+  end
+  if opts.allow_shell then
+    tools[#tools + 1] = "Bash"
+  end
+  return table.concat(tools, ",")
+end
+
+local function claude_disallowed_tools()
+  return "Edit,Write,MultiEdit,NotebookEdit"
+end
+
+local function claude_web_disallowed_tools()
+  return "WebFetch,WebSearch"
+end
+
+local function claude_nonreview_disallowed()
+  local disallowed = { claude_disallowed_tools() }
+  if not selection_allows_web() then
+    disallowed[#disallowed + 1] = claude_web_disallowed_tools()
+  end
+  return table.concat(disallowed, ",")
+end
+
+local function claude_review_disallowed(markdown_writes)
+  local disallowed = {}
+  if markdown_writes then
+    disallowed[#disallowed + 1] = "NotebookEdit"
+  else
+    disallowed[#disallowed + 1] = claude_disallowed_tools()
+  end
+  if not review_allows_web() then
+    disallowed[#disallowed + 1] = claude_web_disallowed_tools()
+  end
+  return table.concat(disallowed, ",")
+end
+
+local function claude_review_tools(markdown_writes)
+  local tools = claude_read_tools({
+    allow_shell = review_allows_shell(),
+    allow_web = review_allows_web(),
+  })
+  if markdown_writes then
+    tools = tools .. ",Write,Edit,MultiEdit"
+  end
+  return tools
+end
+
+local function claude_selection_tools()
+  return claude_read_tools({
+    allow_shell = selection_allows_shell(),
+    allow_web = selection_allows_web(),
+  })
+end
+
 local function claude_args(cfg, lane, prompt, run_opts)
   run_opts = run_opts or {}
   local args = {
@@ -53,12 +133,9 @@ local function claude_args(cfg, lane, prompt, run_opts)
   end
 
   if lane == "review" then
-    local tools = review_allows_shell() and "Read,Glob,Grep,LS,Bash" or "Read,Glob,Grep,LS"
-    local disallowed = "Edit,Write,MultiEdit,NotebookEdit"
-    if review_allows_markdown_writes() then
-      tools = tools .. ",Write,Edit,MultiEdit"
-      disallowed = "NotebookEdit"
-    end
+    local markdown_writes = review_allows_markdown_writes()
+    local tools = claude_review_tools(markdown_writes)
+    local disallowed = claude_review_disallowed(markdown_writes)
     vim.list_extend(args, {
       "--permission-mode",
       "dontAsk",
@@ -70,11 +147,16 @@ local function claude_args(cfg, lane, prompt, run_opts)
       disallowed,
     })
   else
+    local tools = claude_selection_tools()
     vim.list_extend(args, {
       "--permission-mode",
       "dontAsk",
       "--tools",
-      "",
+      tools,
+      "--allowedTools",
+      tools,
+      "--disallowedTools",
+      claude_nonreview_disallowed(),
     })
   end
 
@@ -142,6 +224,14 @@ local excluded_workspace_dirs = {
 
 local function mkdir_p(path)
   vim.fn.mkdir(path, "p")
+end
+
+local function normalize_dir(path)
+  local normalized = vim.fn.fnamemodify(path, ":p")
+  if #normalized > 1 then
+    normalized = normalized:gsub("/+$", "")
+  end
+  return normalized
 end
 
 local function ensure_workspace_git_root(path)
@@ -218,11 +308,23 @@ local function collect_markdown(root, base, out)
   end
 end
 
-local function prepare_markdown_workspace(lane, allow_workspace)
+local function prepare_markdown_workspace(lane, allow_workspace, requested_workspace)
   if allow_workspace == false or lane ~= "review" or not review_allows_markdown_writes() then
     return nil
   end
   local root = repo_root()
+  if requested_workspace and requested_workspace ~= "" then
+    local cwd = normalize_dir(requested_workspace)
+    mkdir_p(cwd)
+    copy_tree(root, cwd)
+    ensure_workspace_git_root(cwd)
+    return {
+      root = root,
+      cwd = cwd,
+      persist = true,
+    }
+  end
+
   local tmp = vim.fn.tempname()
   local cwd = tmp .. "/workspace"
   copy_tree(root, cwd)
@@ -235,6 +337,9 @@ local function prepare_markdown_workspace(lane, allow_workspace)
 end
 
 local function cleanup_workspace(workspace)
+  if workspace and workspace.persist then
+    return
+  end
   if workspace and workspace.tmp and workspace.tmp ~= "" then
     pcall(vim.fn.delete, workspace.tmp, "rf")
   end
@@ -417,7 +522,15 @@ local function parser_for(provider)
   end
 end
 
-local function consume_chunks(provider, on_text, on_progress, on_session_id)
+local function is_provider_noise(provider, line)
+  if provider == "codex" then
+    return line:find("codex_models_manager::manager: failed to refresh available models", 1, true) ~= nil
+  end
+  return false
+end
+
+local function consume_chunks(provider, on_text, on_progress, on_session_id, opts)
+  opts = opts or {}
   local parse = parser_for(provider)
   local pending = ""
   local last_progress = nil
@@ -454,11 +567,16 @@ local function consume_chunks(provider, on_text, on_progress, on_session_id)
       end
       local line = pending:sub(1, idx - 1)
       pending = pending:sub(idx + 1)
-      emit(parse(line))
+      if not (opts.stderr and is_provider_noise(provider, line)) then
+        emit(parse(line))
+      end
     end
   end, function()
     if pending ~= "" then
-      local parsed = parse(pending)
+      local parsed = nil
+      if not (opts.stderr and is_provider_noise(provider, pending)) then
+        parsed = parse(pending)
+      end
       pending = ""
       emit(parsed)
     end
@@ -478,7 +596,7 @@ function M.run(opts)
     persist_session = opts.persist_session == true,
     resume_session_id = opts.resume_session_id,
   }
-  local workspace = prepare_markdown_workspace(lane, opts.allow_markdown_workspace)
+  local workspace = prepare_markdown_workspace(lane, opts.allow_markdown_workspace, opts.markdown_workspace)
   local cwd = workspace and workspace.cwd or repo_root()
   local args = build_args(provider, cfg, lane, prompt, cwd, run_opts)
   local stdin = input
@@ -499,7 +617,7 @@ function M.run(opts)
   local stdout, drain_stdout = consume_chunks(provider, on_text, on_progress, handle_session_id)
   local stderr, drain_stderr = consume_chunks(provider, function(text)
     on_text(text)
-  end, on_progress, handle_session_id)
+  end, on_progress, handle_session_id, { stderr = true })
   drain = function()
     drain_stdout()
     drain_stderr()

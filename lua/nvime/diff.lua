@@ -22,8 +22,61 @@ local function split_lines(text)
   return lines
 end
 
+local function fence_marker(line)
+  local marker, rest = (line or ""):match("^%s*([`~]+)(.*)$")
+  if not marker or #marker < 3 then
+    return nil
+  end
+  local char = marker:sub(1, 1)
+  if marker ~= string.rep(char, #marker) then
+    return nil
+  end
+  if rest ~= "" and not rest:match("^%s*[%w_-]*%s*$") then
+    return nil
+  end
+  return marker
+end
+
+local function closing_fence_marker(line, opening)
+  local marker, rest = (line or ""):match("^%s*([`~]+)(.*)$")
+  if not marker or rest:match("%S") then
+    return false
+  end
+  local char = opening:sub(1, 1)
+  return marker == string.rep(char, #marker) and #marker >= #opening
+end
+
+local function fenced_body(text)
+  local lines = split_lines(text)
+  local open_index = nil
+  local opening = nil
+  for index, line in ipairs(lines) do
+    if line:match("%S") then
+      opening = fence_marker(line)
+      if not opening then
+        return nil
+      end
+      open_index = index
+      break
+    end
+  end
+  if not open_index or not opening then
+    return nil
+  end
+  for index = open_index + 1, #lines do
+    if closing_fence_marker(lines[index], opening) then
+      local body = {}
+      for body_index = open_index + 1, index - 1 do
+        body[#body + 1] = lines[body_index]
+      end
+      return table.concat(body, "\n")
+    end
+  end
+  return nil
+end
+
 local function strip_fence(text)
-  local fenced = text:match("```[%w_-]*\n(.-)\n```")
+  local fenced = fenced_body(text)
   if fenced then
     return fenced
   end
@@ -31,20 +84,60 @@ local function strip_fence(text)
 end
 
 local function has_fence(text)
-  return (text or ""):match("```[%w_-]*\n.-\n```") ~= nil
+  return fenced_body(text) ~= nil
 end
 
 local function trim(text)
   return vim.trim(text or "")
 end
 
+local function normalize_mode_boundaries(text)
+  return (text or ""):gsub("([`~][`~][`~]+)(NVIME_[A-Z_]+)", "%1\n%2")
+end
+
+local RESPONSE_MODES = {
+  NVIME_NO_CHANGE = true,
+  NVIME_REPLACEMENT = true,
+  NVIME_DIFF = true,
+}
+
 local function response_mode(text)
-  text = text or ""
-  local mode = text:match("^%s*(NVIME_[A-Z_]+)")
-  if not mode then
-    return nil, text
+  text = normalize_mode_boundaries(text)
+  local lines = split_lines(text)
+  for index, line in ipairs(lines) do
+    local mode, rest = line:match("^%s*(NVIME_[A-Z_]+)%s*(.*)$")
+    if mode and RESPONSE_MODES[mode] then
+      local body = {}
+      rest = vim.trim(rest or "")
+      if rest ~= "" then
+        body[#body + 1] = rest
+      end
+      for body_index = index + 1, #lines do
+        body[#body + 1] = lines[body_index]
+      end
+      return mode, table.concat(body, "\n")
+    end
   end
-  return mode, text:gsub("^%s*" .. mode .. "%s*", "", 1)
+  return nil, text
+end
+
+local function fenced_diff_body(text)
+  local lines = split_lines(normalize_mode_boundaries(text))
+  for index, line in ipairs(lines) do
+    local marker, lang = line:match("^%s*([`~][`~][`~]+)%s*([%w_-]*)%s*$")
+    if marker and (lang == "" or lang == "diff" or lang == "patch") then
+      for close_index = index + 1, #lines do
+        if closing_fence_marker(lines[close_index], marker) then
+          local body = {}
+          for body_index = index + 1, close_index - 1 do
+            body[#body + 1] = lines[body_index]
+          end
+          return table.concat(body, "\n")
+        end
+      end
+    end
+  end
+  return nil
 end
 
 local function same_lines(left, right)
@@ -70,6 +163,7 @@ local function line_slice(lines, first, last)
 end
 
 local function extract_unified(text)
+  text = normalize_mode_boundaries(text)
   local lines = split_lines(text)
   local start = nil
   for i, line in ipairs(lines) do
@@ -83,15 +177,113 @@ local function extract_unified(text)
   end
   local out = {}
   for i = start, #lines do
+    if i > start and lines[i]:match("^%s*NVIME_[A-Z_]+%s*$") then
+      break
+    end
     out[#out + 1] = lines[i]
   end
   return out
+end
+
+local function has_ranged_hunk(lines)
+  for _, line in ipairs(lines or {}) do
+    if line:match("^@@ %-%d+,?%d* %+%d+,?%d* @@") then
+      return true
+    end
+  end
+  return false
+end
+
+local function locate_sequence(haystack, needle)
+  if #needle == 0 then
+    return 1
+  end
+  if #needle > #haystack then
+    return nil
+  end
+  for start = 1, #haystack - #needle + 1 do
+    local matched = true
+    for offset = 1, #needle do
+      if haystack[start + offset - 1] ~= needle[offset] then
+        matched = false
+        break
+      end
+    end
+    if matched then
+      return start
+    end
+  end
+  return nil
+end
+
+local function unranged_diff_lines(text)
+  local lines = split_lines(strip_fence(text))
+  local out = {}
+  local saw_marker = false
+  for _, line in ipairs(lines) do
+    if line:match("^@@%s*$") or line:match("^@@ .*$") then
+      saw_marker = true
+    elseif line:match("^%-%-%- ") or line:match("^%+%+%+ ") or line:match("^diff %-%-git ") then
+      -- Ignore incomplete file headers; nvime will rebuild them for the current file.
+    elseif line:sub(1, 1) == " " or line:sub(1, 1) == "-" or line:sub(1, 1) == "+" then
+      saw_marker = true
+      out[#out + 1] = line
+    elseif saw_marker and vim.trim(line) == "" then
+      out[#out + 1] = " "
+    end
+  end
+  return out
+end
+
+local function build_unranged_hunk(selection, text)
+  local diff_body = unranged_diff_lines(text)
+  if #diff_body == 0 then
+    return nil, "agent returned NVIME_DIFF without a unified diff"
+  end
+
+  local old_lines = {}
+  local new_lines = {}
+  local saw_change = false
+  for _, line in ipairs(diff_body) do
+    local prefix = line:sub(1, 1)
+    local value = line:sub(2)
+    if prefix == " " then
+      old_lines[#old_lines + 1] = value
+      new_lines[#new_lines + 1] = value
+    elseif prefix == "-" then
+      old_lines[#old_lines + 1] = value
+      saw_change = true
+    elseif prefix == "+" then
+      new_lines[#new_lines + 1] = value
+      saw_change = true
+    end
+  end
+  if not saw_change then
+    return nil, "agent returned a diff with no changed lines"
+  end
+
+  local selected = vim.api.nvim_buf_get_lines(selection.bufnr, selection.line1 - 1, selection.line2, false)
+  local offset = locate_sequence(selected, old_lines)
+  if not offset then
+    return nil, "agent returned an unranged diff that could not be anchored in the selected range"
+  end
+
+  local start_line = selection.line1 + offset - 1
+  local hunk = {
+    "--- a/" .. selection.path,
+    "+++ b/" .. selection.path,
+    string.format("@@ -%d,%d +%d,%d @@", start_line, #old_lines, start_line, #new_lines),
+  }
+  vim.list_extend(hunk, diff_body)
+  return hunk
 end
 
 local function parse_hunks(lines)
   local hunks = {}
   local current = nil
   local header = {}
+  local old_seen = 0
+  local new_seen = 0
 
   for _, line in ipairs(lines) do
     local old_start, old_count, new_start, new_count = line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
@@ -105,14 +297,61 @@ local function parse_hunks(lines)
         status = "pending",
       }
       hunks[#hunks + 1] = current
+      old_seen = 0
+      new_seen = 0
     elseif current then
-      current.lines[#current.lines + 1] = line
+      local prefix = line:sub(1, 1)
+      local old_done = old_seen >= current.old_count
+      local new_done = new_seen >= current.new_count
+      local is_file_header = line:match("^diff %-%-git ")
+        or line:match("^%-%-%- [ab]/")
+        or line:match("^%+%+%+ [ab]/")
+        or line:match("^%-%-%- /dev/null")
+        or line:match("^%+%+%+ /dev/null")
+        or line:match("^%s*NVIME_[A-Z_]+%s*$")
+        or ((old_done and new_done) and fence_marker(line))
+      if is_file_header then
+        current = nil
+      elseif old_done and new_done then
+        current = nil
+      elseif prefix == " " or prefix == "-" or prefix == "+" or prefix == "\\" then
+        current.lines[#current.lines + 1] = line
+        if prefix == " " or prefix == "-" then
+          old_seen = old_seen + 1
+        end
+        if prefix == " " or prefix == "+" then
+          new_seen = new_seen + 1
+        end
+      else
+        current.lines[#current.lines + 1] = " " .. line
+        old_seen = old_seen + 1
+        new_seen = new_seen + 1
+      end
     else
       header[#header + 1] = line
     end
   end
 
   return header, hunks
+end
+
+local function dedupe_hunks(hunks)
+  local out = {}
+  local seen = {}
+  for _, hunk in ipairs(hunks or {}) do
+    local key = table.concat({
+      tostring(hunk.old_start),
+      tostring(hunk.old_count),
+      tostring(hunk.new_start),
+      tostring(hunk.new_count),
+      table.concat(hunk.lines or {}, "\n"),
+    }, "\0")
+    if not seen[key] then
+      seen[key] = true
+      out[#out + 1] = hunk
+    end
+  end
+  return out
 end
 
 local function clean_diff_path(path)
@@ -168,6 +407,34 @@ end
 local function hunk_has_change(hunk)
   local old_lines, new_lines = hunk_old_new_lines(hunk)
   return not same_lines(old_lines, new_lines)
+end
+
+local function sequence_at(lines, start, needle)
+  if start < 1 or #needle == 0 or start + #needle - 1 > #lines then
+    return false
+  end
+  for index = 1, #needle do
+    if lines[start + index - 1] ~= needle[index] then
+      return false
+    end
+  end
+  return true
+end
+
+local function reanchor_hunks(selection, hunks)
+  local all_lines = vim.api.nvim_buf_get_lines(selection.bufnr, 0, -1, false)
+  local selected = vim.api.nvim_buf_get_lines(selection.bufnr, selection.line1 - 1, selection.line2, false)
+  for _, hunk in ipairs(hunks or {}) do
+    local old_lines = hunk_old_new_lines(hunk)
+    if #old_lines > 0 and not sequence_at(all_lines, hunk.old_start, old_lines) then
+      local offset = locate_sequence(selected, old_lines)
+      local start_line = offset and (selection.line1 + offset - 1) or locate_sequence(all_lines, old_lines)
+      if start_line then
+        hunk.old_start = start_line
+        hunk.new_start = start_line
+      end
+    end
+  end
 end
 
 local function hunks_have_changes(hunks)
@@ -669,14 +936,8 @@ function M.start_session(selection, response, provider, prompt)
     }
   end
 
-  local diff_lines = extract_unified(body)
-  if not diff_lines then
-    if not mode and not has_fence(body) then
-      return {
-        status = "no_change",
-        message = "agent answered without returning a patch",
-      }
-    end
+  local diff_lines = nil
+  if mode == "NVIME_REPLACEMENT" then
     local no_change_reason
     diff_lines, no_change_reason = build_single_hunk(selection, body)
     if not diff_lines then
@@ -684,6 +945,39 @@ function M.start_session(selection, response, provider, prompt)
         status = "no_change",
         message = no_change_reason,
       }
+    end
+  else
+    diff_lines = extract_unified(body)
+    if mode == "NVIME_DIFF" and (not diff_lines or not has_ranged_hunk(diff_lines)) then
+      local anchor_error
+      diff_lines, anchor_error = build_unranged_hunk(selection, body)
+      if not diff_lines then
+        return {
+          status = "no_change",
+          message = anchor_error,
+        }
+      end
+    elseif not diff_lines then
+      if mode == "NVIME_DIFF" then
+        return {
+          status = "no_change",
+          message = "agent returned NVIME_DIFF without a unified diff",
+        }
+      end
+      if not mode and not has_fence(body) then
+        return {
+          status = "no_change",
+          message = "agent answered without returning a patch",
+        }
+      end
+      local no_change_reason
+      diff_lines, no_change_reason = build_single_hunk(selection, body)
+      if not diff_lines then
+        return {
+          status = "no_change",
+          message = no_change_reason,
+        }
+      end
     end
   end
 
@@ -693,9 +987,11 @@ function M.start_session(selection, response, provider, prompt)
   end
 
   local header, hunks = parse_hunks(diff_lines)
+  hunks = dedupe_hunks(hunks)
   if #hunks == 0 then
     error("nvime could not find any hunks in the proposed diff")
   end
+  reanchor_hunks(selection, hunks)
   if not hunks_have_changes(hunks) then
     return {
       status = "no_change",

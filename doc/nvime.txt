@@ -25,29 +25,42 @@ COMMANDS                                                        *nvime-commands*
 
                                                         *:NvimeChat*
 :NvimeChat
-        Open one floating nvime://chat terminal buffer and focus the prompt at
-        the bottom. Status lives in the float title/footer instead of being
-        written into the transcript. The buffer contains only messages,
-        responses, and the active [provider]$ prompt. nvime guards the buffer so
-        only the live prompt line can be changed while typing.
+        Open the picker for general chat/review conversations. Press n to start
+        a fresh conversation, or open an older conversation from the list. Each
+        conversation opens as one floating nvime://chat/<id> scratch buffer with
+        the prompt at the bottom, focused in normal mode. Status lives in the
+        float title/footer instead of being written into the transcript. The
+        buffer contains only messages, responses, and the active [provider]$
+        prompt. nvime guards the buffer so only the live prompt line can be
+        changed while typing.
         Press i or o from anywhere in the chat to return to the prompt; press
         <CR> on the prompt to submit a chat/review message.
-        nvime keeps an in-memory transcript for follow-up context during the
-        Neovim session. The transcript is shared across providers, so switching
-        from Claude to Codex carries the same nvime conversation.
-        While an agent is running, nvime streams start/tool/command activity
-        and provider-supplied reasoning summaries into the buffer as progress.
-        Progress lines are not treated as the final answer or edit patch.
-        By default, this lane may run shell commands and may create or update
-        Markdown files only. Providers run in a temporary workspace copy, and
-        nvime syncs only *.md and *.markdown files back into the real repo.
+        nvime keeps a transcript and native provider session id per general
+        conversation. Same-provider follow-ups resume the native Claude/Codex
+        conversation. Switching providers sends that conversation's nvime
+        transcript so the newly selected provider has shared context.
+        Review/docs runs reuse a stable temporary workspace for the provider
+        session so native resumes resolve in the same project path.
+        While an agent is running, nvime flushes start/tool/command activity
+        and provider-supplied reasoning summaries into the float footer/status
+        area instead of appending them to the transcript. Final answers and
+        provider errors still appear in the buffer.
+        By default, this lane may run shell commands, including curl, may use
+        web fetch/search tools, and may create or update Markdown files only.
+        Providers run in a temporary workspace copy, and nvime syncs only *.md
+        and *.markdown files back into the real repo.
 
                                                         *:NvimeChats*
-:NvimeChats [ask|edit]
-        Open the picker for highlighted-code Ask/Edit discussions. The picker
-        has a new-session row plus existing discussions, so <leader>nq and
-        <leader>ne act as an intermediate step before either starting fresh or
-        continuing an older conversation.
+:NvimeChats [chat|ask|edit]
+        Open the picker for general chat conversations or highlighted-code
+        Ask/Edit discussions. The picker has a new-session row plus existing
+        sessions, so <leader>nc, <leader>nq, and <leader>ne act as an
+        intermediate step before either starting fresh or continuing an older
+        conversation. General chats are persisted by default in
+        .nvime/chat-sessions.json. Selection discussions are persisted by
+        default in .nvime/selection-sessions.json. In the picker, press 1-9 to
+        open a numbered row, <CR> to open the cursor row, dd to delete the
+        current row, or visual-select rows with V and press d to delete several.
 
                                                         *:NvimeReview*
 :NvimeReview [claude|codex] [prompt]
@@ -63,12 +76,20 @@ COMMANDS                                                        *nvime-commands*
         not open a diff. Ask and Edit keep workflow discussions per selected
         file/range, separate from general chat. If the same range already has a
         discussion, visual <leader>nq can continue it or start a new native
-        provider session. If no question is supplied inline, nvime asks on the
-        guarded prompt line instead of opening a popup prompt.
+        provider session. The visual chooser also offers same-file and recent
+        repo discussions, so a newly highlighted range can reuse context from a
+        persisted conversation. If no question is supplied inline, nvime asks
+        on the guarded prompt line instead of opening a popup prompt.
         After an Ask answer, the prompt remains armed for that selection.
         Follow-up questions use Ask again; repair requests such as "please
-        proceed", "fix this", or "apply that change" launch Edit on the same
-        range without reselecting it.
+        proceed", "fix this", "suggest the diff", or "apply that change" launch
+        Edit on the same range without reselecting it. If an Ask response
+        already contains NVIME_DIFF, NVIME_REPLACEMENT, or a current-file
+        unified diff, nvime opens it as an inline review instead of leaving it
+        as plain chat text. When an inline review opens, the selection
+        conversation float closes so the file and accept/reject mappings are
+        immediately visible; reopen the discussion with <leader>ne or
+        <leader>nq.
 
                                                         *:NvimeEdit*
 :'<,'>NvimeEdit [claude|codex] {intent}
@@ -76,18 +97,21 @@ COMMANDS                                                        *nvime-commands*
         Request one focused edit. With a range, the range is used. Without a
         range, nvime asks Tree-sitter for the function at the cursor. If the
         agent reports that no change is needed, or returns an identical patch,
-        no diff is opened. Question-shaped edit requests are routed to
-        |:NvimeAsk|. The latest Ask result for the same file/range is included
-        as context for the next edit request.
+        no diff is opened. Question-shaped and review-shaped edit requests are
+        routed to |:NvimeAsk|. The latest Ask result for the same file/range is
+        included as context for the next edit request.
         Blank selected ranges are valid insertion targets. Non-code current
         file ranges, such as .gitignore entries or config snippets, are also
         valid as long as the patch stays inside the selected range.
+        Edit prompts prefer minimal NVIME_DIFF hunks for existing text,
+        especially Markdown and large selections, instead of reproducing the
+        whole selected file.
         Starting Edit after Ask forces the input prompt to the edit lane, so the
         next submission can produce a reviewed patch instead of remaining in
         read-only Ask mode.
-        If the same range already has a discussion, visual <leader>ne can
-        continue it with the provider's native resume id, when available, or
-        start a fresh nvime/provider session.
+        Visual <leader>ne can continue an exact range match, a same-file
+        discussion, or a recent repo discussion with the provider's native
+        resume id, when available, or start a fresh nvime/provider session.
         If no intent is supplied inline, nvime asks on the guarded prompt line
         instead of opening a popup prompt.
 
@@ -134,7 +158,7 @@ Inline diff mappings in the target file:
 KEYMAPS                                                          *nvime-keymaps*
 
 Default keymaps use <leader>n:
-        <leader>nc     open chat panel
+        <leader>nc     open general chat conversation picker
         <leader>nr     run review/docs
         <leader>nq     ask picker: new current-function session or old chat
         visual <leader>nq
@@ -167,11 +191,11 @@ Selection workflow mappings:
         q              close the floating selection window
 
 Native provider resume:
-        Focused Ask/Edit discussions persist provider sessions. nvime captures
-        Claude stream-json session_id values and Codex JSON session_id values.
-        Follow-ups in the same nvime discussion use claude --resume or
-        codex exec resume. Starting a new nvime session creates a separate
-        provider conversation.
+        General chat and focused Ask/Edit discussions persist provider
+        sessions. nvime captures Claude stream-json session_id values and Codex
+        JSON session_id values. Follow-ups in the same nvime session use
+        claude --resume or codex exec resume. Starting a new nvime session
+        creates a separate provider conversation.
 
 Disable defaults with:
 >
@@ -211,10 +235,21 @@ Common options:
           },
           review = {
             allow_shell = true,
+            allow_web = true,
             allow_markdown_writes = true,
+          },
+          selection = {
+            allow_shell = true,
+            allow_web = true,
           },
           chat = {
             max_history_messages = 24,
+          },
+          sessions = {
+            enabled = true,
+            path = nil,
+            chat_path = nil,
+            max = 100,
           },
           diff = {
             max_visual_block_lines = 12,

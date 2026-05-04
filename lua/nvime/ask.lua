@@ -1,4 +1,5 @@
 local agents = require("nvime.agents")
+local diff = require("nvime.diff")
 local selection_state = require("nvime.selection")
 local state = require("nvime.state")
 local ts = require("nvime.treesitter")
@@ -38,7 +39,8 @@ local function build_prompt(selection, question)
 	return table.concat({
 		"NVIME READ-ONLY SELECTION CHAT.",
 		"You are the read-only side agent inside Neovim.",
-		"Answer the user's question about the selected code. Do not edit files. Do not produce a patch unless only explaining what a future patch would do.",
+		"Answer the user's question about the selected code. You may use read/search, web fetch/search, and shell commands such as curl for inspection, external docs, or tests when available.",
+		"Do not edit files directly. Do not produce a patch unless only explaining what a future patch would do.",
 		"",
 		"File: " .. selection.path,
 		"Selected range: " .. selection.line1 .. "-" .. selection.line2 .. " (" .. selection.source .. ")",
@@ -66,6 +68,7 @@ local EDIT_KEYWORDS = {
 	"remove",
 	"add",
 	"patch",
+	"diff",
 	"make it",
 }
 
@@ -110,12 +113,24 @@ local function wants_edit_followup(input)
 	if has_negation(text) then
 		return false
 	end
+	if text:find("approv", 1, true) and (text:find("diff", 1, true) or text:find("patch", 1, true)) then
+		return true
+	end
 	for _, keyword in ipairs(EDIT_KEYWORDS) do
 		if has_word(text, keyword) then
 			return true
 		end
 	end
 	return false
+end
+
+local function response_has_patch(body)
+	body = body or ""
+	return body:find("NVIME_DIFF", 1, true) ~= nil
+		or body:find("NVIME_REPLACEMENT", 1, true) ~= nil
+		or body:find("```diff", 1, true) ~= nil
+		or body:find("--- a/", 1, true) ~= nil
+		or body:find("--- b/", 1, true) ~= nil
 end
 
 local run
@@ -158,12 +173,13 @@ run = function(selection, question, provider, session_opts)
 	selection_state.append_response_header(provider, "ask", session_id)
 
 	local response = {}
+	local prompt = build_prompt(selection, question)
 	local agent_session = selection_state.agent_run_opts(session_id, provider)
 	selection_state.set_busy(true, session_id)
 	agents.run({
 		provider = provider,
 		lane = "ask",
-		prompt = build_prompt(selection, question),
+		prompt = prompt,
 		persist_session = agent_session.persist_session,
 		resume_session_id = agent_session.resume_session_id,
 		on_session_id = agent_session.on_session_id,
@@ -172,20 +188,35 @@ run = function(selection, question, provider, session_opts)
 			selection_state.append(text, session_id)
 		end,
 		on_progress = function(text)
-			selection_state.append(text, session_id)
+			selection_state.set_progress(text, session_id)
 		end,
 		on_exit = function(result)
 			selection_state.set_busy(false, session_id)
+			local answer = vim.trim(table.concat(response))
 			selection_state.mark_last_ask(session_id, {
 				selection = selection_state.snapshot(selection),
 				provider = provider,
 				question = question,
-				answer = vim.trim(table.concat(response)),
+				answer = answer,
 			})
+			local opened_diff = false
 			if result.code ~= 0 then
 				selection_state.append("\n[nvime] ask failed with code " .. tostring(result.code) .. "\n", session_id)
+			elseif response_has_patch(answer) then
+				local ok, diff_result = pcall(diff.start_session, selection, answer, provider, prompt)
+				if not ok then
+					selection_state.append("\n[nvime] " .. tostring(diff_result) .. "\n", session_id)
+				elseif diff_result and diff_result.status == "no_change" then
+					selection_state.append("\n[nvime] no patch opened: " .. diff_result.message .. "\n", session_id)
+				elseif diff_result and diff_result.session then
+					diff_result.session.selection_session_id = session_id
+					opened_diff = true
+				end
 			end
-			arm_followup(selection, provider, session_id, selection_state.active_session_id() == session_id)
+			arm_followup(selection, provider, session_id, not opened_diff and selection_state.active_session_id() == session_id)
+			if opened_diff then
+				selection_state.close()
+			end
 		end,
 	})
 end
@@ -216,21 +247,22 @@ function M.start(opts)
 	local question = opts.question or opts.prompt
 	local function proceed(session_opts)
 		session_opts = session_opts or {}
+		local proceed_provider = session_opts.provider or provider
 		if not question or question == "" then
 			selection_state.prompt({
-				provider = provider,
+				provider = proceed_provider,
 				mode = "ask",
 				selection = selection,
 				session_id = session_opts.session_id,
 				new_session = session_opts.new_session,
 				on_submit = function(input, selected_provider)
-					run(selection, input, selected_provider or provider, { session_id = selection_state.active_session_id() })
+					run(selection, input, selected_provider or proceed_provider, { session_id = selection_state.active_session_id() })
 				end,
 			})
 			return
 		end
 
-		run(selection, question, provider, session_opts)
+		run(selection, question, proceed_provider, session_opts)
 	end
 
 	if opts.choose_session then

@@ -9,7 +9,13 @@ local M = {
   raw = {},
   keymaps = {},
   chat = {
+    active_session_id = nil,
+    next_session_id = 1,
+    sessions = {},
     history = {},
+    provider_sessions = {},
+    provider_workspaces = {},
+    last_provider = nil,
   },
   selection = {
     last_ask = nil,

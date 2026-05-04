@@ -6,6 +6,16 @@ local ts = require("nvime.treesitter")
 
 local M = {}
 
+local function code_fence_for(text)
+  local max_run = 2
+  for run in (text or ""):gmatch("`+") do
+    if #run > max_run then
+      max_run = #run
+    end
+  end
+  return string.rep("`", max_run + 1)
+end
+
 local function current_path(bufnr)
   local name = vim.api.nvim_buf_get_name(bufnr)
   if name == "" then
@@ -25,6 +35,7 @@ local function build_prompt(selection, intent)
   if vim.trim(selected_body) == "" then
     selected_display = "(selected range is empty or blank)"
   end
+  local selected_fence = code_fence_for(selected_display)
   local ask = selection_state.last_ask_for(selection)
   local prior_context = {}
   if ask and selection_state.same_range(selection, ask.selection) then
@@ -39,14 +50,17 @@ local function build_prompt(selection, intent)
 
   return table.concat({
     "NVIME EDIT MODE.",
-    "You are a constrained patch worker. You may only propose a change for exactly one selected range in exactly one current file.",
-    "The selected range can be existing code, plain text, config text, comments, blank lines, or an intentionally empty insertion area.",
-    "If the selected range is blank and the intent asks you to add, generate, complete, or insert something, produce the requested replacement for that range.",
-    "Non-code files are allowed when the selected range is in the current file; for example .gitignore, README snippets, config fragments, and comments.",
-    "Do not edit files directly. Do not use tools. Do not mention other file patches. Do not produce a whole-repo refactor.",
-    "If the user is asking a question, asking for review, or the existing selected range already satisfies the intent, do not produce code.",
-    "When producing a replacement, return the complete new contents for the selected range only. Do not include surrounding unselected lines.",
-    "Use exactly one of these response forms:",
+    "You are a constrained patch worker, not a reviewer.",
+    "Return exactly one machine-readable response block. Do not write analysis, caveats, summaries, or prose outside the block.",
+    "You may only propose changes for the selected range in the current file.",
+    "You may use read/search, web fetch/search, and shell commands such as curl for inspection, external docs, or tests when available.",
+    "Do not edit files directly. Do not mention patches for other files or ranges.",
+    "If no concrete change is needed, return NVIME_NO_CHANGE with one short reason.",
+    "For existing nonblank text, return NVIME_DIFF with the smallest changed hunks only. This is required for Markdown, large selections, and selections containing code fences.",
+    "For blank insertions or tiny whole-range replacements, NVIME_REPLACEMENT is allowed.",
+    "A user request that says both review/check and fix/proceed means: silently make only the concrete fixes you are confident about.",
+    "NVIME_DIFF must include --- a/" .. selection.path .. ", +++ b/" .. selection.path .. ", and ranged @@ -line,count +line,count @@ headers.",
+    "Use one response form:",
     "",
     "NVIME_NO_CHANGE",
     "<brief explanation>",
@@ -58,7 +72,10 @@ local function build_prompt(selection, intent)
     "",
     "NVIME_DIFF",
     "```diff",
-    "<unified diff for this file only>",
+    "--- a/" .. selection.path,
+    "+++ b/" .. selection.path,
+    "@@ -<line>,<count> +<line>,<count> @@",
+    "<minimal changed hunk lines only>",
     "```",
     "",
     "File: " .. selection.path,
@@ -67,13 +84,71 @@ local function build_prompt(selection, intent)
     table.concat(prior_context, "\n"),
     "",
     "Selected code:",
-    "```",
+    selected_fence,
     selected_display,
-    "```",
+    selected_fence,
   }, "\n")
 end
 
-local function run_edit(selection, intent, provider, session_opts)
+local run_edit
+
+local function looks_like_question(intent)
+  local text = (intent or ""):lower()
+  if text == "" then
+    return false
+  end
+  if text:match("%f[%w](make|change|fix|add|remove|replace|implement|refactor|rename|convert|update|handle)%f[%W]") then
+    return false
+  end
+  return text:find("?", 1, true)
+    or text:find("look right", 1, true)
+    or text:find("looks right", 1, true)
+    or text:find("does this", 1, true)
+    or text:find("is this", 1, true)
+    or text:find("check ", 1, true)
+    or text:find("verify", 1, true)
+    or text:find("inspect", 1, true)
+    or text:find("audit", 1, true)
+    or text:find("iterate throughout", 1, true)
+    or text:find("correctness", 1, true)
+    or text:find("nitpick", 1, true)
+    or text:find("appropriate", 1, true)
+    or text:find("what ", 1, true)
+    or text:find("why ", 1, true)
+    or text:find("explain", 1, true)
+    or text:find("review", 1, true)
+end
+
+local function submit_edit(selection, fallback_provider, input, selected_provider, session_id)
+  selected_provider = selected_provider or fallback_provider
+  local active_session_id = session_id or selection_state.active_session_id()
+  if looks_like_question(input) then
+    require("nvime.ask").start({
+      selection = selection,
+      provider = selected_provider,
+      question = input,
+      session_id = active_session_id,
+    })
+  else
+    run_edit(selection, input, selected_provider, { session_id = active_session_id })
+  end
+end
+
+local function arm_edit_followup(selection, provider, session_id, open_panel)
+  selection_state.prompt({
+    provider = provider,
+    mode = "edit",
+    selection = selection,
+    session_id = session_id,
+    focus_input = false,
+    open = open_panel ~= false,
+    on_submit = function(input, selected_provider)
+      submit_edit(selection, provider, input, selected_provider, session_id)
+    end,
+  })
+end
+
+run_edit = function(selection, intent, provider, session_opts)
   session_opts = session_opts or {}
   selection_state.open({
     provider = provider,
@@ -103,43 +178,30 @@ local function run_edit(selection, intent, provider, session_opts)
       selection_state.append(text, session_id)
     end,
     on_progress = function(text)
-      selection_state.append(text, session_id)
+      selection_state.set_progress(text, session_id)
     end,
     on_exit = function(result)
       selection_state.set_busy(false, session_id)
+      local opened_diff = false
       if result.code ~= 0 then
         selection_state.append("\n[nvime] edit failed with code " .. tostring(result.code) .. "\n", session_id)
-        return
+      else
+        local ok, diff_result = pcall(diff.start_session, selection, table.concat(response), provider, prompt)
+        if not ok then
+          selection_state.append("\n[nvime] " .. tostring(diff_result) .. "\n", session_id)
+        elseif diff_result and diff_result.status == "no_change" then
+          selection_state.append("\n[nvime] no patch opened: " .. diff_result.message .. "\n", session_id)
+        elseif diff_result and diff_result.session then
+          diff_result.session.selection_session_id = session_id
+          opened_diff = true
+        end
       end
-      local ok, result = pcall(diff.start_session, selection, table.concat(response), provider, prompt)
-      if not ok then
-        selection_state.append("\n[nvime] " .. tostring(result) .. "\n", session_id)
-      elseif result and result.status == "no_change" then
-        selection_state.append("\n[nvime] no patch opened: " .. result.message .. "\n", session_id)
-      elseif result and result.session then
-        result.session.selection_session_id = session_id
+      arm_edit_followup(selection, provider, session_id, not opened_diff and selection_state.active_session_id() == session_id)
+      if opened_diff then
+        selection_state.close()
       end
     end,
   })
-end
-
-local function looks_like_question(intent)
-  local text = (intent or ""):lower()
-  if text == "" then
-    return false
-  end
-  if text:match("%f[%w](make|change|fix|add|remove|replace|implement|refactor|rename|convert|update|handle)%f[%W]") then
-    return false
-  end
-  return text:find("?", 1, true)
-    or text:find("look right", 1, true)
-    or text:find("looks right", 1, true)
-    or text:find("does this", 1, true)
-    or text:find("is this", 1, true)
-    or text:find("what ", 1, true)
-    or text:find("why ", 1, true)
-    or text:find("explain", 1, true)
-    or text:find("review", 1, true)
 end
 
 function M.start(opts)
@@ -165,26 +227,16 @@ function M.start(opts)
   local intent = opts.intent
   local function proceed(session_opts)
     session_opts = session_opts or {}
+    local proceed_provider = session_opts.provider or provider
     if not intent or intent == "" then
       selection_state.prompt({
-        provider = provider,
+        provider = proceed_provider,
         mode = "edit",
         selection = selection,
         session_id = session_opts.session_id,
         new_session = session_opts.new_session,
         on_submit = function(input, selected_provider)
-          selected_provider = selected_provider or provider
-          local active_session_id = selection_state.active_session_id()
-          if looks_like_question(input) then
-            require("nvime.ask").start({
-              selection = selection,
-              provider = selected_provider,
-              question = input,
-              session_id = active_session_id,
-            })
-          else
-            run_edit(selection, input, selected_provider, { session_id = active_session_id })
-          end
+          submit_edit(selection, proceed_provider, input, selected_provider, selection_state.active_session_id())
         end,
       })
       return
@@ -193,7 +245,7 @@ function M.start(opts)
     if looks_like_question(intent) then
       require("nvime.ask").start({
         selection = selection,
-        provider = provider,
+        provider = proceed_provider,
         question = intent,
         session_id = session_opts.session_id,
         new_session = session_opts.new_session,
@@ -201,7 +253,7 @@ function M.start(opts)
       return
     end
 
-    run_edit(selection, intent, provider, session_opts)
+    run_edit(selection, intent, proceed_provider, session_opts)
   end
 
   if opts.choose_session then
@@ -220,18 +272,7 @@ function M.start(opts)
       session_id = opts.session_id,
       new_session = opts.new_session,
       on_submit = function(input, selected_provider)
-        selected_provider = selected_provider or provider
-        local active_session_id = selection_state.active_session_id()
-        if looks_like_question(input) then
-          require("nvime.ask").start({
-            selection = selection,
-            provider = selected_provider,
-            question = input,
-            session_id = active_session_id,
-          })
-        else
-          run_edit(selection, input, selected_provider, { session_id = active_session_id })
-        end
+        submit_edit(selection, provider, input, selected_provider, selection_state.active_session_id())
       end,
     })
     return
@@ -302,7 +343,7 @@ function M.continue_remaining()
           selection_state.append(text, selection_session_id)
         end,
         on_progress = function(text)
-          selection_state.append(text, selection_session_id)
+          selection_state.set_progress(text, selection_session_id)
         end,
         on_exit = function(result)
           selection_state.set_busy(false, selection_session_id)
