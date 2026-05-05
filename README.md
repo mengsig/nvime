@@ -12,6 +12,8 @@ It is a Neovim Lua plugin for getting real work done with Claude Code and Codex 
 
 This is an editor discipline tool, not a security sandbox. It prevents accidental YOLO use inside normal Neovim paths. It cannot stop an external terminal, a renamed binary, or a hostile plugin.
 
+![nvime dashboard](docs/dashboard.png)
+
 ## Install
 
 Use any Neovim package manager that can load this repository. With lazy.nvim:
@@ -299,15 +301,7 @@ Inside an open selection discussion, `p`/`<Tab>`/`P` switch the provider for
 that active discussion's next prompt, while earlier Claude/Codex messages remain
 in the shared scrollback for context.
 
-Inside an open selection discussion:
-
-- `i`, `I`, `a`, `A`, `o`, `O`: jump to the prompt
-- `?`: choose a configured prompt template
-- prompt `<CR>`: submit the current message
-- `p`, `<Tab>`: cycle Claude/Codex for the next selection prompt
-- `P`: choose Claude or Codex for the next selection prompt
-- `<Esc>`: return focus to the scrollback
-- `q`: close the floating window
+Selection discussion windows use the same in-window keys as the chat window above.
 
 ## Inline Diff Review
 
@@ -341,7 +335,7 @@ pane stays normally editable; the proposed pane maps `e` to jump back to the
 editable file and `r` to refresh. `q` closes the workspace from either pane and
 returns to the tab you came from.
 
-Compatibility aliases are also installed: `gr` rejects the current line change,
+Reject-only aliases are also installed: `gr` rejects the current line change,
 visual `gr` rejects selected line changes, `gR` rejects all, and `gX` rejects the current visual change block.
 
 `gc` sends the accepted lines, rejected lines, current line, and unresolved
@@ -416,8 +410,8 @@ When `review.allow_markdown_writes = false`, Codex review/docs mode uses
 - `vim.fn.systemlist`
 - `vim.uv.spawn`
 - `TermOpen` detection and kill for blocked terminals
-
 - command-line detection via `CmdlineLeave` when `guard.block_cmdline = true`
+
 Direct Claude/Codex use inside these paths is denied unless it is launched by `nvime` itself. Every allow/deny is logged to `.nvime/audit.jsonl` by default.
 
 ## Test
