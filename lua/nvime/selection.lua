@@ -4,6 +4,7 @@ local progress = require("nvime.progress")
 local prompts = require("nvime.prompts")
 local provider_api = require("nvime.provider")
 local render = require("nvime.render")
+local spinner = require("nvime.spinner")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
 
@@ -186,16 +187,6 @@ local function prompt_prefix()
   return "[" .. provider() .. " " .. mode() .. "]$ "
 end
 
-local function status_word()
-  local session = state.selection and state.selection.active_session_id and M.get_session(state.selection.active_session_id)
-  if session and session.busy then
-    return "running"
-  end
-  if state.selection and state.selection.busy then
-    return "running"
-  end
-  return "idle"
-end
 
 local function line_count(bufnr)
   return vim.api.nvim_buf_line_count(bufnr)
@@ -429,18 +420,12 @@ local function dimensions()
 end
 
 local function title()
-  local status = status_word()
-  local icon = status == "running" and ui.icon("active") or ui.icon("idle")
-  return "nvime.nvim  " .. provider() .. "  " .. mode() .. "  " .. icon .. " " .. status
+  return "nvime.nvim"
 end
 
 local function scroll_config()
   local dim = dimensions()
-  local active = active_session()
   local footer = " i input | ? prompts | <CR> send on prompt | p provider | P choose | q close "
-  if active and active.busy and active.progress and active.progress ~= "" then
-    footer = " " .. render.spinner_text() .. " " .. active.progress .. " | i input | ? prompts | <CR> send | q close "
-  end
   return {
     relative = "editor",
     width = dim.width,
@@ -466,7 +451,8 @@ local function configure_scrollback_window(winid)
   vim.wo[winid].spell = false
   vim.wo[winid].winblend = 0
   vim.wo[winid].winhighlight =
-    "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted"
+    "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted,WinBar:NvimeNormal"
+  vim.wo[winid].winbar = "%{%v:lua.require'nvime.selection'.winbar_text()%}"
 end
 
 local function extract_prompt_text(line)
@@ -514,16 +500,18 @@ local function decorate_input(bufnr)
   if not panel or not panel.input_start then
     return
   end
+  local busy_status = nil
   local session = active_session()
-  local busy = session and session.busy and session.progress and session.progress ~= ""
-  render.input(bufnr, input_ns, prompt_prefix(), panel.input_start, { show_ghost = not busy })
-  if busy then
-    vim.api.nvim_buf_set_extmark(bufnr, input_ns, panel.input_start - 1, 0, {
-      virt_text = { { render.spinner_text() .. " " .. session.progress, "NvimeStatusRunning" } },
-      virt_text_pos = "right_align",
-      priority = 200,
-    })
+  if session and session.busy then
+    local provider_name = session.provider or "?"
+    local detail = progress.compact(session.progress or "")
+    detail = detail:gsub("^" .. provider_name .. "%s*", "")
+    if detail == "" then
+      detail = "working"
+    end
+    busy_status = render.spinner_text() .. "  " .. detail
   end
+  render.input(bufnr, input_ns, prompt_prefix(), panel.input_start, { busy_status = busy_status })
 end
 
 local function refresh_header(bufnr)
@@ -593,12 +581,20 @@ local function reset_input(text, opts)
     local start = panel.input_start
     local count = line_count(bufnr)
     if not start or start < 1 or start > count then
-      local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-      if count == 1 and lines[1] == "" then
-        start = 1
-      else
-        start = count + 1
+      local existing = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      local fresh = count == 1 and existing[1] == ""
+      if fresh then
+        -- M.append assumes there are at least 2 blank lines above the prompt;
+        -- seed the fresh buffer with that headroom so streaming appends merge cleanly.
+        vim.api.nvim_buf_set_lines(bufnr, 0, count, false, {
+          "",
+          "",
+          prompt_prefix() .. (text or ""),
+        })
+        panel.input_start = 3
+        return
       end
+      start = count + 1
     end
     vim.api.nvim_buf_set_lines(bufnr, start - 1, count, false, {
       prompt_prefix() .. (text or ""),
@@ -624,7 +620,14 @@ local function scroll_to_bottom()
     return
   end
   local target = math.max(1, (panel.input_start or line_count(panel.bufnr)))
-  vim.api.nvim_win_set_cursor(panel.winid, { target, 0 })
+  local col = 0
+  if panel.input_active then
+    local ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
+    if ok then
+      col = cursor[2]
+    end
+  end
+  vim.api.nvim_win_set_cursor(panel.winid, { target, col })
 end
 
 local function open_or_configure_window(bufnr, winid, config, configure, enter)
@@ -759,7 +762,7 @@ local function attach_panel(bufnr)
     end
   end, opts)
   vim.keymap.set("n", "i", function()
-    require("nvime.selection").focus_input()
+    require("nvime.selection").focus_input({ preserve_cursor = true })
   end, opts)
   vim.keymap.set("n", "I", function()
     require("nvime.selection").focus_input()
@@ -791,6 +794,21 @@ local function attach_panel(bufnr)
   vim.keymap.set("i", "<CR>", function()
     vim.cmd.stopinsert()
     require("nvime.selection").submit_current()
+  end, opts)
+  vim.keymap.set("i", "<C-U>", function()
+    local panel = state.panels.selection
+    if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
+      return
+    end
+    local lnum = prompt_lnum(panel)
+    local prefix = prompt_prefix()
+    buffer_guard.suspend(panel.bufnr, function()
+      vim.api.nvim_buf_set_lines(panel.bufnr, lnum - 1, lnum, false, { prefix })
+    end)
+    buffer_guard.sync(panel.bufnr, panel)
+    if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+      pcall(vim.api.nvim_win_set_cursor, panel.winid, { lnum, #prefix })
+    end
   end, opts)
   vim.keymap.set("n", "<Esc>", function()
     focus_scrollback()
@@ -858,7 +876,9 @@ function M.open(opts)
   attach_input_guard(scroll_buf)
   refresh_header(scroll_buf)
   reset_input(current_input_text(), { force_follow = not was_open })
-  set_locked(scroll_buf, true)
+  if not state.panels.selection.input_active then
+    set_locked(scroll_buf, true)
+  end
 
   if opts.focus_input then
     M.focus_input()
@@ -878,7 +898,9 @@ function M.refresh()
   end
   refresh_header(panel.bufnr)
   reset_input(current_input_text())
-  set_locked(panel.bufnr, true)
+  if not panel.input_active then
+    set_locked(panel.bufnr, true)
+  end
   sync_active_panel_to_session()
 end
 
@@ -890,6 +912,14 @@ local function stop_spinner_timer()
     spinner_timer:close()
     spinner_timer = nil
   end
+end
+
+local function refresh_input_indicator()
+  local panel = state.panels.selection
+  if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
+    return
+  end
+  decorate_input(panel.bufnr)
 end
 
 local function ensure_spinner_timer()
@@ -904,11 +934,14 @@ local function ensure_spinner_timer()
   spinner_timer:start(120, 120, function()
     vim.schedule(function()
       local session = active_session()
-      if not session or not session.busy or not panel_is_open(session.id) then
+      local panel = state.panels.selection
+      local open = panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid)
+      if not session or not session.busy or not open then
         stop_spinner_timer()
+        refresh_input_indicator()
         return
       end
-      M.refresh()
+      refresh_input_indicator()
     end)
   end)
 end
@@ -926,8 +959,9 @@ function M.set_busy(value, session_id)
   end
   state.selection.busy = value == true
   if not session_id or (state.selection and state.selection.active_session_id == session_id) then
-    M.refresh()
+    refresh_input_indicator()
   end
+  spinner.update()
 end
 
 function M.set_progress(text, session_id)
@@ -948,8 +982,9 @@ function M.set_progress(text, session_id)
   session.progress = compact
   touch_session(session)
   if state.selection and state.selection.active_session_id == session.id then
-    M.refresh()
+    refresh_input_indicator()
   end
+  spinner.update()
 end
 
 function M.append(text, session_id)
@@ -989,7 +1024,9 @@ function M.append(text, session_id)
       end
       touch_session(session)
     end, decorate_scrollback, panel)
-    set_locked(bufnr, true)
+    if not panel.input_active then
+      set_locked(bufnr, true)
+    end
     local active_panel = state.panels.selection
     if state.selection and state.selection.active_session_id == session.id and active_panel and active_panel.session_id == session.id then
       active_panel.input_start = session.input_start
@@ -1084,10 +1121,18 @@ function M.focus_input(opts)
   set_locked(panel.input_bufnr, false)
   vim.api.nvim_set_current_win(panel.winid)
   local lnum = prompt_lnum(panel)
-  local append = opts.cursor == "end"
+  local prefix_col = #prompt_prefix()
   local end_col = prompt_end_col(panel)
-  local empty_prompt = end_col <= #prompt_prefix()
-  local col = (append or empty_prompt) and math.max(0, end_col - 1) or #prompt_prefix()
+  if opts.preserve_cursor then
+    local cur_ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
+    if cur_ok and cursor[1] == lnum and cursor[2] >= prefix_col then
+      pcall(vim.cmd, "startinsert")
+      return
+    end
+  end
+  local append = opts.cursor == "end"
+  local empty_prompt = end_col <= prefix_col
+  local col = (append or empty_prompt) and math.max(0, end_col - 1) or prefix_col
   pcall(vim.api.nvim_win_set_cursor, panel.winid, { lnum, col })
   pcall(vim.api.nvim_win_call, panel.winid, function()
     vim.fn.winrestview({ topline = math.max(1, lnum - vim.api.nvim_win_get_height(panel.winid) + 2) })
@@ -1187,6 +1232,41 @@ end
 
 function M.notify_finished(lane, session_id, code)
   notify_finished(lane, session_id, code or 0)
+end
+
+function M.winbar_text()
+  ui.ensure_highlights()
+  local session = active_session()
+  local provider_name = (session and session.provider) or provider()
+  local lane = (session and session.mode) or mode()
+  local provider_hl = provider_name == "claude" and "NvimeProviderClaude" or "NvimeProviderCodex"
+  local busy = session and session.busy
+  local status_hl = busy and "NvimeStatusRunning" or "NvimeStatusIdle"
+  local status_text = busy and (render.spinner_text() .. " running") or (ui.icon("idle") .. " idle")
+
+  local nvime_label = " nvime.nvim "
+  local version_label = " v0.1.0 "
+  local sep = "  "
+  local visible = nvime_label .. sep .. version_label .. sep .. provider_name .. sep .. lane .. sep .. status_text
+  local visible_width = vim.fn.strdisplaywidth(visible)
+
+  local panel = state.panels.selection
+  local win_width = vim.o.columns
+  if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+    win_width = vim.api.nvim_win_get_width(panel.winid)
+  end
+  local pad = math.max(0, math.floor((win_width - visible_width) / 2))
+
+  return string.rep(" ", pad)
+    .. "%#NvimeHeaderBlock#" .. nvime_label .. "%*"
+    .. sep
+    .. "%#NvimeHeaderBlockSecondary#" .. version_label .. "%*"
+    .. sep
+    .. "%#" .. provider_hl .. "#" .. provider_name .. "%*"
+    .. sep
+    .. "%#NvimeMuted#" .. lane .. "%*"
+    .. sep
+    .. "%#" .. status_hl .. "#" .. status_text .. "%*"
 end
 
 function M.sessions()

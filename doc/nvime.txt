@@ -144,8 +144,9 @@ COMMANDS                                                        *nvime-commands*
 
                                                         *:NvimeDiff*
 :NvimeDiff
-        Open the active diff in a three-pane review workspace: original
-        snapshot, full proposed result, and the live editable source buffer.
+        Open the active diff in a two-pane review workspace: full proposed
+        result on the left, the live editable source buffer with inline diff
+        overlays on the right.
 
                                                         *:NvimeAudit*
 :NvimeAudit
@@ -161,7 +162,7 @@ Inline diff mappings in the target file:
         block. Large contiguous replacements are split into smaller visual
         blocks by default. Review units remain line-level internally.
         :NvimeDiff
-                open the original/proposed/editable review workspace
+                open the proposed/editable review workspace
         ]n      next unresolved line
         [n      previous unresolved line
         ]b      next visual change block
@@ -188,7 +189,8 @@ Diff review workspace mappings:
         gA/gB   accept/reject all unresolved blocks
         gc      discuss active review state with the edit agent
         r       refresh the review panes
-        q       close the review workspace
+        q       close the review workspace from either pane and return to
+                the tab you came from
 
 ==============================================================================
 KEYMAPS                                                          *nvime-keymaps*

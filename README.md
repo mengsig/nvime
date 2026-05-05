@@ -175,7 +175,7 @@ require("nvime").setup({
 - `:NvimeProvider [claude|codex]` shows or changes the default provider.
 - `:NvimeAccept` accepts the current inline diff block.
 - `:NvimeReject` rejects the current inline diff block.
-- `:NvimeDiff` opens the active diff in a three-pane review workspace.
+- `:NvimeDiff` opens the active diff in a two-pane review workspace.
 - `:NvimeAudit` opens `.nvime/audit.jsonl`.
 
 ## Chat Panel
@@ -323,8 +323,8 @@ editable during review.
 
 Inline diff mappings in the target file:
 
-- `:NvimeDiff` / `<leader>nv`: open the review workspace with original,
-  proposed, and editable panes in native diff mode
+- `:NvimeDiff` / `<leader>nv`: open the review workspace with proposed and
+  editable panes in native diff mode
 - `]n` / `[n`: next or previous unresolved line
 - `]b` / `[b`: next or previous visual change block
 - `ga`: accept the current visual change block
@@ -335,10 +335,11 @@ Inline diff mappings in the target file:
 - `gB`: reject all unresolved blocks
 - `gc`: discuss the active diff state with the edit agent
 
-Inside the review workspace, the left pane is the pre-review snapshot, the
-middle pane is the full proposed result, and the right pane is the live source
-buffer. The right pane remains normally editable; preview panes map `e` to jump
-back to the editable file, `r` to refresh, and `q` to close the workspace.
+Inside the review workspace, the left pane shows the full proposed result and
+the right pane is the live source buffer with inline diff overlays. The right
+pane stays normally editable; the proposed pane maps `e` to jump back to the
+editable file and `r` to refresh. `q` closes the workspace from either pane and
+returns to the tab you came from.
 
 Compatibility aliases are also installed: `gr` rejects the current line change,
 visual `gr` rejects selected line changes, `gR` rejects all, and `gX` rejects the current visual change block.

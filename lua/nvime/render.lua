@@ -168,10 +168,32 @@ function M.input(bufnr, ns, prompt_prefix, start_lnum, opts)
         hl_group = "NvimeUserText",
       })
     elseif opts.show_ghost ~= false then
-      vim.api.nvim_buf_set_extmark(bufnr, ns, prompt_lnum - 1, 0, {
+      vim.api.nvim_buf_set_extmark(bufnr, ns, prompt_lnum - 1, #prompt_prefix, {
         virt_text = { { opts.ghost or "type a message", "NvimeInputGhost" } },
-        virt_text_pos = "right_align",
+        virt_text_pos = "eol",
         priority = 90,
+      })
+    end
+    if opts.divider ~= false then
+      local rule_width = opts.rule_width or vim.o.columns
+      local winid = vim.fn.bufwinid(bufnr)
+      if winid > 0 then
+        rule_width = vim.api.nvim_win_get_width(winid)
+      end
+      rule_width = math.max(20, rule_width - 2)
+      local virt_lines = {}
+      if opts.busy_status and opts.busy_status ~= "" then
+        local pad = math.max(0, rule_width - vim.fn.strdisplaywidth(opts.busy_status))
+        virt_lines[#virt_lines + 1] = {
+          { string.rep(" ", pad), "" },
+          { opts.busy_status, "NvimeStatusRunning" },
+        }
+      end
+      virt_lines[#virt_lines + 1] = { { string.rep("─", rule_width), "NvimeRule" } }
+      vim.api.nvim_buf_set_extmark(bufnr, ns, prompt_lnum - 1, 0, {
+        virt_lines = virt_lines,
+        virt_lines_above = true,
+        priority = 80,
       })
     end
   end

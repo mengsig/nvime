@@ -901,11 +901,14 @@ local function set_review_winbar(winid, label, session)
   local counts = count_block_statuses(session)
   local file = vim.fn.fnamemodify(session.file or "", ":t")
   vim.wo[winid].winbar = string.format(
-    " %s  %s  %dp %da %dr ",
+    " nvime.nvim  %s  %s  %s %d  %s %d  %s %d ",
     label,
     file,
+    ui.icon("pending"),
     counts.pending or 0,
+    ui.icon("success"),
     counts.accepted or 0,
+    ui.icon("error"),
     counts.rejected or 0
   )
 end
@@ -931,8 +934,6 @@ local function valid_review(session)
   return review
     and review.tabpage
     and vim.api.nvim_tabpage_is_valid(review.tabpage)
-    and review.original_winid
-    and vim.api.nvim_win_is_valid(review.original_winid)
     and review.proposed_winid
     and vim.api.nvim_win_is_valid(review.proposed_winid)
     and review.target_winid
@@ -944,9 +945,8 @@ local function set_review_widths(session)
     return
   end
   local total = math.max(42, vim.o.columns)
-  local width = math.floor((total - 6) / 3)
-  width = math.max(total >= 90 and 28 or 12, width)
-  pcall(vim.api.nvim_win_set_width, session.review.original_winid, width)
+  local width = math.floor((total - 2) / 2)
+  width = math.max(total >= 90 and 40 or 18, width)
   pcall(vim.api.nvim_win_set_width, session.review.proposed_winid, width)
   pcall(vim.api.nvim_win_set_width, session.review.target_winid, width)
 end
@@ -969,9 +969,7 @@ local function refresh_review_view(session)
   end
   local current_tab = vim.api.nvim_get_current_tabpage()
   local current_win = vim.api.nvim_get_current_win()
-  ensure_review_buffer(session, "original", original_lines(session))
   ensure_review_buffer(session, "proposed", proposed_lines(session))
-  set_review_winbar(session.review.original_winid, "original", session)
   set_review_winbar(session.review.proposed_winid, "proposed", session)
   set_review_winbar(session.review.target_winid, "editable", session)
   set_review_widths(session)
@@ -1038,7 +1036,7 @@ local function render_visual_group(session, group)
     { { clip_review_text(session, group_summary(group)), "NvimeDiffHunk" } },
     {
       {
-        clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gc discuss"),
+        clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gc discuss  q close"),
         "NvimeMuted",
       },
     },
@@ -1120,9 +1118,10 @@ local function render_session(session, opts)
   end
   if not opts.silent then
     if pending == 0 then
-      vim.notify("nvime diff: resolved", vim.log.levels.INFO)
+      local hint = session.review and "  press q to close" or ""
+      vim.notify("nvime diff: resolved" .. hint, vim.log.levels.INFO)
     else
-      vim.notify("nvime diff: " .. pending .. " pending  ]b/[b ga gb gA gB gc", vim.log.levels.INFO)
+      vim.notify("nvime diff: " .. pending .. " pending  ]b/[b ga gb gA gB gc  q close", vim.log.levels.INFO)
     end
   end
   refresh_review_view(session)
@@ -1264,6 +1263,33 @@ function M.start_session(selection, response, provider, prompt)
   }
 end
 
+local function install_target_close_map(session)
+  if not session.target_bufnr or not vim.api.nvim_buf_is_valid(session.target_bufnr) then
+    return
+  end
+  if session.review_close_map_installed then
+    return
+  end
+  pcall(vim.keymap.set, "n", "q", function()
+    require("nvime.diff").close_view()
+  end, {
+    buffer = session.target_bufnr,
+    silent = true,
+    desc = "close nvime diff review",
+  })
+  session.review_close_map_installed = true
+end
+
+local function uninstall_target_close_map(session)
+  if not session or not session.review_close_map_installed then
+    return
+  end
+  if session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
+    pcall(vim.keymap.del, "n", "q", { buffer = session.target_bufnr })
+  end
+  session.review_close_map_installed = false
+end
+
 function M.open_view()
   local session = state.current_diff
   if not session then
@@ -1278,25 +1304,21 @@ function M.open_view()
     build_blocks(session)
   end
 
-  local original_bufnr = ensure_review_buffer(session, "original", original_lines(session))
   local proposed_bufnr = ensure_review_buffer(session, "proposed", proposed_lines(session))
-  install_review_maps(original_bufnr)
   install_review_maps(proposed_bufnr)
 
   if valid_review(session) then
     vim.api.nvim_set_current_tabpage(session.review.tabpage)
     refresh_review_view(session)
+    install_target_close_map(session)
     focus_target(session)
     pcall(vim.cmd, "diffupdate")
     return
   end
 
+  session.review_caller_tab = vim.api.nvim_get_current_tabpage()
   vim.cmd("tabnew")
   local tabpage = vim.api.nvim_get_current_tabpage()
-  local original_winid = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(original_winid, original_bufnr)
-
-  vim.cmd("rightbelow vsplit")
   local proposed_winid = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(proposed_winid, proposed_bufnr)
 
@@ -1306,22 +1328,20 @@ function M.open_view()
 
   session.review = vim.tbl_extend("force", session.review or {}, {
     tabpage = tabpage,
-    original_winid = original_winid,
     proposed_winid = proposed_winid,
     target_winid = target_winid,
   })
 
-  configure_review_window(original_winid, "original", session)
   configure_review_window(proposed_winid, "proposed", session)
   configure_review_window(target_winid, "editable", session)
-  vim.api.nvim_set_current_win(original_winid)
-  vim.cmd("diffthis")
   vim.api.nvim_set_current_win(proposed_winid)
   vim.cmd("diffthis")
   vim.api.nvim_set_current_win(target_winid)
   vim.cmd("diffthis")
   pcall(vim.cmd, "wincmd =")
   set_review_widths(session)
+  install_target_close_map(session)
+  vim.api.nvim_set_current_win(target_winid)
   render_session(session, { silent = true })
 end
 
@@ -1352,20 +1372,20 @@ function M.close_view()
   if not review then
     return
   end
-  local current_tab = vim.api.nvim_get_current_tabpage()
+  uninstall_target_close_map(session)
   if review.tabpage and vim.api.nvim_tabpage_is_valid(review.tabpage) then
     pcall(vim.api.nvim_set_current_tabpage, review.tabpage)
     pcall(vim.cmd, "tabclose")
   end
-  for _, key in ipairs({ "original_bufnr", "proposed_bufnr" }) do
-    local bufnr = review[key]
-    if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
-      pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-    end
+  local proposed_bufnr = review.proposed_bufnr
+  if proposed_bufnr and vim.api.nvim_buf_is_valid(proposed_bufnr) then
+    pcall(vim.api.nvim_buf_delete, proposed_bufnr, { force = true })
   end
   session.review = nil
-  if vim.api.nvim_tabpage_is_valid(current_tab) then
-    pcall(vim.api.nvim_set_current_tabpage, current_tab)
+  local caller_tab = session.review_caller_tab
+  session.review_caller_tab = nil
+  if caller_tab and vim.api.nvim_tabpage_is_valid(caller_tab) then
+    pcall(vim.api.nvim_set_current_tabpage, caller_tab)
   end
 end
 

@@ -71,6 +71,9 @@ function M.enforce(opts)
 
   if lines_equal(current, expected) and not invalid then
     panel.guard_lines = copy_lines(current)
+    if opts.decorate then
+      opts.decorate(bufnr)
+    end
     return
   end
 

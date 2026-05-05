@@ -306,33 +306,11 @@ local function format_range(session)
   return string.format("%s:%s-%s", ui.truncate(path, 34), tostring(selected.line1 or "?"), tostring(selected.line2 or "?"))
 end
 
-local function status_text(session)
-  if session.busy then
-    return require("nvime.render").spinner_text() .. " running"
-  end
-  return ui.icon("idle") .. " idle"
-end
-
 local function native_text(session, provider_name)
   if session.provider_sessions and session.provider_sessions[provider_name] then
     return ui.icon("resume") .. " resume"
   end
   return ui.icon("local_session") .. " local"
-end
-
-local function format_session(index, session)
-  local mode = session.mode or "selection"
-  local provider = session.provider or "?"
-  return string.format(
-    "%2d  %-9s %-7s %-6s %-9s %-5s %s",
-    index,
-    status_text(session),
-    provider,
-    mode,
-    native_text(session, provider),
-    ui.relative_time(session.updated_at),
-    format_range(session)
-  )
 end
 
 local function requested_mode()
@@ -349,20 +327,6 @@ end
 
 local function is_dashboard()
   return requested_mode() == "dashboard"
-end
-
-local function format_chat_session(index, session)
-  local provider = session.provider or "?"
-  local title = session.title or ("Chat #" .. tostring(session.id or index))
-  return string.format(
-    "%2d  %-9s %-7s %-9s %-5s %s",
-    index,
-    status_text(session),
-    provider,
-    native_text(session, provider),
-    ui.relative_time(session.updated_at),
-    ui.truncate(title, 52)
-  )
 end
 
 local function count_running(sessions)
@@ -435,7 +399,7 @@ local function dashboard_tab()
   return panel.tab or "all"
 end
 
-local function add_dashboard_header(lines, marks)
+local function add_branded_header(lines, marks, subtitle)
   local width = render_width()
   add_centered_blocks(lines, marks, {
     { " nvime.nvim ", "NvimeHeaderBlock" },
@@ -446,7 +410,9 @@ local function add_dashboard_header(lines, marks)
     { " ? ", "NvimeKey" },
     { " for help", "NvimeMuted" },
   }, width)
-  add_centered_text(lines, marks, "review/docs chat  |  scoped ask  |  reviewed edit", width, "NvimeMuted")
+  if subtitle and subtitle ~= "" then
+    add_centered_text(lines, marks, subtitle, width, "NvimeMuted")
+  end
 end
 
 local function add_dashboard_tabs(lines, marks)
@@ -489,12 +455,15 @@ local function provider_label(session)
   return session.provider or "?"
 end
 
-local function session_primary_line(session, kind)
+local function session_primary_line(session, kind, index)
   local status_icon = session.busy and ui.icon("active") or ui.icon("idle")
   local title = session_title(session, kind)
   local provider = provider_label(session)
   local suffix = string.format("%s  %s  %s", provider, session_mode(session, kind), ui.relative_time(session.updated_at))
   local max_title = math.max(24, render_width() - #suffix - 12)
+  if index and index <= 9 then
+    return string.format(" %d  %s %s  %s", index, status_icon, ui.truncate(title, max_title), suffix)
+  end
   return string.format("  %s %s  %s", status_icon, ui.truncate(title, max_title), suffix)
 end
 
@@ -535,7 +504,8 @@ local function include_dashboard_session(tab, session, kind)
   return true
 end
 
-local function add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_row, detail_rows, sessions, kind, limit)
+local function add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_row, detail_rows, sessions, kind, limit, opts)
+  opts = opts or {}
   local added = 0
   for _, session in ipairs(sessions) do
     if added >= limit then
@@ -545,7 +515,8 @@ local function add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_
     row_to_session[row] = session.id
     row_to_kind[row] = kind
     number_to_row[#number_to_row + 1] = row
-    lines[row] = session_primary_line(session, kind)
+    local index = opts.show_numbers and #number_to_row or nil
+    lines[row] = session_primary_line(session, kind, index)
     detail_rows[#lines + 1] = true
     lines[#lines + 1] = session_detail_line(session, kind)
     added = added + 1
@@ -612,7 +583,7 @@ local function render(bufnr)
     local selection_sessions = selection.sessions()
     local tab = dashboard_tab()
     local filtered_chats, filtered_selections = filtered_dashboard_sessions(tab, chat_sessions, selection_sessions)
-    add_dashboard_header(lines, span_marks)
+    add_branded_header(lines, span_marks, "review/docs chat  |  scoped ask  |  reviewed edit")
     lines[#lines + 1] = ""
     add_dashboard_tabs(lines, span_marks)
     lines[#lines + 1] = ""
@@ -673,152 +644,118 @@ local function render(bufnr)
 
       if #filtered_chats == 0 and #filtered_selections == 0 then
         lines[#lines + 1] = "No saved nvime sessions match this tab."
+        meta_rows[#meta_rows + 1] = #lines
         lines[#lines + 1] = ""
         lines[#lines + 1] = "Press n for review/docs chat, or open a file and use a/e for scoped work."
+        meta_rows[#meta_rows + 1] = #lines
       end
     end
   elseif mode == "chat" then
     local sessions = chat.sessions()
-    lines = {
-      "General Conversations",
-      "  Mason-style command center for review/docs agents",
-      "",
-      string.format(
-        "  %s %d saved   %s %d running   %s provider %s",
-        ui.icon("chat"),
-        #sessions,
-        ui.icon("active"),
-        count_running(sessions),
-        ui.icon("review"),
-        (state.config and state.config.provider) or "claude"
-      ),
-      "",
-      "Actions",
-      "-------",
-    }
-    section_rows[#section_rows + 1] = 1
-    meta_rows[#meta_rows + 1] = 2
-    meta_rows[#meta_rows + 1] = 4
-    row_to_action[#lines + 1] = {
-      type = "new_chat",
-    }
+    add_branded_header(lines, span_marks, "review/docs chat lane")
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format(
+      "Status: %s %d saved   %s %d running   %s provider %s",
+      ui.icon("chat"),
+      #sessions,
+      ui.icon("active"),
+      count_running(sessions),
+      ui.icon("review"),
+      (state.config and state.config.provider) or "claude"
+    )
+    meta_rows[#meta_rows + 1] = #lines
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Actions"
+    section_rows[#section_rows + 1] = #lines
+    row_to_action[#lines + 1] = { type = "new_chat" }
     action_rows[#lines + 1] = true
     lines[#lines + 1] = " n  start new chat conversation"
     lines[#lines + 1] = ""
 
     if #sessions == 0 then
-      lines[#lines + 1] = "No general chat conversations yet."
-      lines[#lines + 1] = ""
-      lines[#lines + 1] = "Press n to start one, or <CR> on the new row."
-    else
-      lines[#lines + 1] = "Sessions"
+      lines[#lines + 1] = "General Conversations"
       section_rows[#section_rows + 1] = #lines
-      lines[#lines + 1] = "    status    agent   native    age   title"
+      lines[#lines + 1] = "  No general chat conversations yet."
       meta_rows[#meta_rows + 1] = #lines
-      for index, session in ipairs(sessions) do
-        local row = #lines + 1
-        row_to_session[row] = session.id
-        row_to_kind[row] = "chat"
-        number_to_row[index] = row
-        lines[#lines + 1] = format_chat_session(index, session)
-      end
+      lines[#lines + 1] = "  Press n to start one, or <CR> on the new row."
+      meta_rows[#meta_rows + 1] = #lines
+    else
+      lines[#lines + 1] = "General Conversations"
+      section_rows[#section_rows + 1] = #lines
+      add_count_mark(count_marks, #lines, #sessions)
+      add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_row, detail_rows, sessions, "chat", 20, { show_numbers = true })
     end
   elseif mode then
     local sessions = selection.sessions()
-    lines = {
-      "Selection Discussions",
-      "  Focused Ask/Edit workspaces scoped to one file range",
-      "",
-      string.format(
-        "  %s %d saved   %s %d running   %s lane %s",
-        ui.icon("selection"),
-        #sessions,
-        ui.icon("active"),
-        count_running(sessions),
-        ui.icon(mode),
-        mode
-      ),
-      "",
-      "Actions",
-      "-------",
-    }
-    section_rows[#section_rows + 1] = 1
-    meta_rows[#meta_rows + 1] = 2
-    meta_rows[#meta_rows + 1] = 4
-    row_to_action[#lines + 1] = {
-      type = "new",
-      mode = mode,
-    }
+    add_branded_header(lines, span_marks, "scoped " .. mode .. " lane")
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format(
+      "Status: %s %d saved   %s %d running   %s lane %s",
+      ui.icon("selection"),
+      #sessions,
+      ui.icon("active"),
+      count_running(sessions),
+      ui.icon(mode),
+      mode
+    )
+    meta_rows[#meta_rows + 1] = #lines
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Actions"
+    section_rows[#section_rows + 1] = #lines
+    row_to_action[#lines + 1] = { type = "new", mode = mode }
     action_rows[#lines + 1] = true
     lines[#lines + 1] = " n  start new " .. mode .. " session from current function"
     lines[#lines + 1] = ""
+
     if #sessions == 0 then
-      lines[#lines + 1] = "No highlighted-code discussions yet."
-      lines[#lines + 1] = ""
-      lines[#lines + 1] = "Select code and press visual <leader>nq or visual <leader>ne, or start from the current function above."
-    else
-      lines[#lines + 1] = "Sessions"
+      lines[#lines + 1] = "Selection Discussions"
       section_rows[#section_rows + 1] = #lines
-      lines[#lines + 1] = "    status    agent   lane   native    age   file:lines"
+      lines[#lines + 1] = "  No highlighted-code discussions yet."
       meta_rows[#meta_rows + 1] = #lines
-      for index, session in ipairs(sessions) do
-        local row = #lines + 1
-        row_to_session[row] = session.id
-        row_to_kind[row] = "selection"
-        number_to_row[index] = row
-        lines[#lines + 1] = format_session(index, session)
-      end
+      lines[#lines + 1] = "  Select code and press visual <leader>nq or visual <leader>ne, or start from the current function above."
+      meta_rows[#meta_rows + 1] = #lines
+    else
+      lines[#lines + 1] = "Selection Discussions"
+      section_rows[#section_rows + 1] = #lines
+      add_count_mark(count_marks, #lines, #sessions)
+      add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_row, detail_rows, sessions, "selection", 24, { show_numbers = true })
     end
   else
     local sessions = selection.sessions()
-    lines = {
-      "Selection Discussions",
-      "  Ask, Edit, and diff follow-up sessions from selected code",
-      "",
-      string.format(
-        "  %s %d saved   %s %d running   %s choose ask/edit",
-        ui.icon("selection"),
-        #sessions,
-        ui.icon("active"),
-        count_running(sessions),
-        ui.icon("key")
-      ),
-      "",
-      "Actions",
-      "-------",
-    }
-    section_rows[#section_rows + 1] = 1
-    meta_rows[#meta_rows + 1] = 2
-    meta_rows[#meta_rows + 1] = 4
-    row_to_action[#lines + 1] = {
-      type = "new",
-      mode = "ask",
-    }
+    add_branded_header(lines, span_marks, "ask + edit + diff follow-up")
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format(
+      "Status: %s %d saved   %s %d running   %s choose ask/edit",
+      ui.icon("selection"),
+      #sessions,
+      ui.icon("active"),
+      count_running(sessions),
+      ui.icon("key")
+    )
+    meta_rows[#meta_rows + 1] = #lines
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Actions"
+    section_rows[#section_rows + 1] = #lines
+    row_to_action[#lines + 1] = { type = "new", mode = "ask" }
     action_rows[#lines + 1] = true
     lines[#lines + 1] = " n  start new ask session from current function"
-    row_to_action[#lines + 1] = {
-      type = "new",
-      mode = "edit",
-    }
+    row_to_action[#lines + 1] = { type = "new", mode = "edit" }
     action_rows[#lines + 1] = true
     lines[#lines + 1] = " e  start new edit session from current function"
     lines[#lines + 1] = ""
+
     if #sessions == 0 then
-      lines[#lines + 1] = "No highlighted-code discussions yet."
-      lines[#lines + 1] = ""
-      lines[#lines + 1] = "Select code and press visual <leader>nq or visual <leader>ne, or start from the current function above."
-    else
-      lines[#lines + 1] = "Sessions"
+      lines[#lines + 1] = "Selection Discussions"
       section_rows[#section_rows + 1] = #lines
-      lines[#lines + 1] = "    status    agent   lane   native    age   file:lines"
+      lines[#lines + 1] = "  No highlighted-code discussions yet."
       meta_rows[#meta_rows + 1] = #lines
-      for index, session in ipairs(sessions) do
-        local row = #lines + 1
-        row_to_session[row] = session.id
-        row_to_kind[row] = "selection"
-        number_to_row[index] = row
-        lines[#lines + 1] = format_session(index, session)
-      end
+      lines[#lines + 1] = "  Select code and press visual <leader>nq or visual <leader>ne, or start from the current function above."
+      meta_rows[#meta_rows + 1] = #lines
+    else
+      lines[#lines + 1] = "Selection Discussions"
+      section_rows[#section_rows + 1] = #lines
+      add_count_mark(count_marks, #lines, #sessions)
+      add_dashboard_rows(lines, row_to_session, row_to_kind, number_to_row, detail_rows, sessions, "selection", 24, { show_numbers = true })
     end
   end
 
@@ -1000,7 +937,7 @@ local function open_selected()
         session_id = item.session_id,
       })
     else
-      selection.open_session(item.session_id, { focus_input = true })
+      selection.open_session(item.session_id)
     end
   end
 end

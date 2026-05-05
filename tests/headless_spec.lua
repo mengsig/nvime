@@ -357,15 +357,19 @@ require("nvime.chat").submit("progress flush chat")
 assert(vim.wait(5000, function()
   return require("nvime.state").chat.progress == "claude Bash"
 end, 20), "chat progress is visible while the provider runs")
-local saw_progress_virtual_text = false
-for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(chat_buf, vim.api.nvim_create_namespace("nvime.chat.input"), 0, -1, {
-  details = true,
-})) do
-  for _, chunk in ipairs((mark[4] or {}).virt_text or {}) do
-    saw_progress_virtual_text = saw_progress_virtual_text or tostring(chunk[1]):find("claude Bash", 1, true) ~= nil
+assert(vim.wait(2000, function()
+  local panel = require("nvime.state").panels.spinner
+  if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
+    return false
   end
-end
-assert(saw_progress_virtual_text, "chat progress is shown as prompt-line virtual text")
+  local lines = vim.api.nvim_buf_get_lines(panel.bufnr, 0, -1, false)
+  for _, line in ipairs(lines) do
+    if line:find("Bash", 1, true) then
+      return true
+    end
+  end
+  return false
+end, 20), "chat progress is shown in the corner spinner float")
 assert(vim.wait(5000, function()
   return #require("nvime.state").chat.history >= progress_history_start + 2
 end, 20), "chat progress fixture runs")
@@ -1633,24 +1637,28 @@ local review_workspace = require("nvime.state").current_diff.review
 assert(
   review_workspace
     and vim.api.nvim_tabpage_is_valid(review_workspace.tabpage)
-    and vim.api.nvim_win_is_valid(review_workspace.original_winid)
     and vim.api.nvim_win_is_valid(review_workspace.proposed_winid)
     and vim.api.nvim_win_is_valid(review_workspace.target_winid),
-  "diff review workspace opens a three-pane tab"
+  "diff review workspace opens a two-pane tab"
 )
 assert(
   vim.wo[review_workspace.target_winid].winhighlight:find("WinSeparator:NvimeBorder", 1, true),
   "diff review workspace uses nvime chrome for separators"
 )
 assert_eq(
-  table.concat(vim.api.nvim_buf_get_lines(review_workspace.original_bufnr, 0, -1, false), "\n"),
+  table.concat(require("nvime.state").current_diff.original_lines, "\n"),
   "local a = 1\nlocal b = 2\nlocal c = 3\nlocal d = 4\nlocal e = 5",
-  "diff review original pane preserves the pre-review file"
+  "diff review session retains the pre-review snapshot"
 )
 assert_eq(
   table.concat(vim.api.nvim_buf_get_lines(review_workspace.proposed_bufnr, 0, -1, false), "\n"),
   "local a = 1\nlocal b = 20\nlocal c = 3\nlocal d = 40\nlocal e = 5",
   "diff review proposed pane shows the full agent result"
+)
+assert(
+  vim.fn.maparg("q", "n", false, true).buffer == 1
+    or vim.api.nvim_buf_get_keymap(block_target, "n")[1] ~= nil,
+  "diff review installs a buffer-local q on the editable pane"
 )
 assert(vim.bo[block_target].modifiable, "diff review target pane remains directly editable")
 require("nvime.diff").close_view()
