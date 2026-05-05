@@ -1,5 +1,6 @@
 local agents = require("nvime.agents")
 local diff = require("nvime.diff")
+local git = require("nvime.git")
 local selection_state = require("nvime.selection")
 local state = require("nvime.state")
 local ts = require("nvime.treesitter")
@@ -14,19 +15,7 @@ local function current_path(bufnr)
 	if name == "" or vim.fn.filereadable(name) ~= 1 then
 		return nil
 	end
-	local abs = vim.fn.fnamemodify(name, ":p")
-	local root = vim.fn.systemlist({ "git", "-C", vim.fn.fnamemodify(name, ":h"), "rev-parse", "--show-toplevel" })[1]
-	if root and root ~= "" then
-		if vim.fs and vim.fs.relpath then
-			local rel = vim.fs.relpath(root, abs)
-			if rel then
-				return rel
-			end
-		elseif abs:sub(1, #root + 1) == root .. "/" then
-			return abs:sub(#root + 2)
-		end
-	end
-	return abs
+	return git.repo_relative_path(name)
 end
 
 local function build_prompt(selection, question)

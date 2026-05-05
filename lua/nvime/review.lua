@@ -1,12 +1,14 @@
 local agents = require("nvime.agents")
 local chat = require("nvime.chat")
+local git = require("nvime.git")
 
 local M = {}
 
 local function git_diff(args)
-  local cmd = { "git", "-C", vim.loop.cwd(), "diff", "--no-ext-diff", "--no-color", "--find-renames", "--find-copies", "--unified=80" }
+  local cwd = (vim.uv or vim.loop).cwd()
+  local cmd = { "git", "-C", cwd, "diff", "--no-ext-diff", "--no-color", "--find-renames", "--find-copies", "--unified=80" }
   vim.list_extend(cmd, args or {})
-  return table.concat(vim.fn.systemlist(cmd), "\n")
+  return table.concat(git.systemlist(cmd), "\n")
 end
 
 function M.start(opts)

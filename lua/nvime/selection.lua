@@ -1,4 +1,5 @@
 local buffer_guard = require("nvime.buffer_guard")
+local git = require("nvime.git")
 local progress = require("nvime.progress")
 local prompts = require("nvime.prompts")
 local provider_api = require("nvime.provider")
@@ -16,23 +17,6 @@ local INPUT_PROMPT_LINE = 1
 local sessions_loaded = false
 local save_pending = false
 
-local function systemlist(cmd)
-  local ok, result = pcall(vim.fn.systemlist, cmd)
-  if not ok then
-    return {}
-  end
-  return result or {}
-end
-
-local function git_root()
-  local cwd = vim.loop.cwd()
-  local result = systemlist({ "git", "-C", cwd, "rev-parse", "--show-toplevel" })
-  if vim.v.shell_error == 0 and result[1] and result[1] ~= "" then
-    return result[1]
-  end
-  return nil
-end
-
 local function sessions_config()
   return (state.config or {}).sessions or {}
 end
@@ -47,7 +31,7 @@ local function sessions_path()
     return vim.fn.fnamemodify(cfg.path, ":p")
   end
 
-  local root = git_root()
+  local root = git.root()
   if root then
     return root .. "/.nvime/selection-sessions.json"
   end
@@ -530,9 +514,10 @@ local function decorate_input(bufnr)
   if not panel or not panel.input_start then
     return
   end
-  render.input(bufnr, input_ns, prompt_prefix(), panel.input_start)
   local session = active_session()
-  if session and session.busy and session.progress and session.progress ~= "" then
+  local busy = session and session.busy and session.progress and session.progress ~= ""
+  render.input(bufnr, input_ns, prompt_prefix(), panel.input_start, { show_ghost = not busy })
+  if busy then
     vim.api.nvim_buf_set_extmark(bufnr, input_ns, panel.input_start - 1, 0, {
       virt_text = { { render.spinner_text() .. " " .. session.progress, "NvimeStatusRunning" } },
       virt_text_pos = "right_align",
@@ -1265,6 +1250,9 @@ function M.delete_sessions(ids)
           pcall(vim.api.nvim_win_close, panel.winid, true)
         end
         state.panels.selection = nil
+      end
+      if state.last_session and state.last_session.kind == "selection" and state.last_session.id == session.id then
+        state.last_session = nil
       end
     else
       kept[#kept + 1] = session

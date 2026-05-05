@@ -1,5 +1,6 @@
 local agents = require("nvime.agents")
 local diff = require("nvime.diff")
+local git = require("nvime.git")
 local selection_state = require("nvime.selection")
 local state = require("nvime.state")
 local ts = require("nvime.treesitter")
@@ -24,11 +25,7 @@ local function current_path(bufnr)
   if name == "" then
     return nil
   end
-  local root = vim.fn.systemlist({ "git", "-C", vim.fn.fnamemodify(name, ":h"), "rev-parse", "--show-toplevel" })[1]
-  if vim.v.shell_error == 0 and root and root ~= "" then
-    return vim.fn.fnamemodify(name, ":p"):sub(#root + 2)
-  end
-  return vim.fn.fnamemodify(name, ":p")
+  return git.repo_relative_path(name)
 end
 
 local function build_prompt(selection, intent)

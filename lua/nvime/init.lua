@@ -154,17 +154,17 @@ end
 
 local function parse_provider(args)
   local fargs = args.fargs or {}
-  local provider = nil
+  local provider_name = nil
   if fargs[1] == "claude" or fargs[1] == "codex" then
-    provider = table.remove(fargs, 1)
+    provider_name = table.remove(fargs, 1)
   end
-  return provider, table.concat(fargs, " ")
+  return provider_name, table.concat(fargs, " ")
 end
 
 local function command_opts(args)
-  local provider, rest = parse_provider(args)
+  local provider_name, rest = parse_provider(args)
   return {
-    provider = provider,
+    provider = provider_name,
     intent = rest,
     prompt = rest,
     line1 = args.line1,

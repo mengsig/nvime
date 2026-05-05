@@ -1,4 +1,5 @@
 local audit = require("nvime.audit")
+local git = require("nvime.git")
 local policy = require("nvime.policy")
 local state = require("nvime.state")
 
@@ -16,11 +17,8 @@ local function provider_config(provider)
 end
 
 local function repo_root()
-  local result = vim.fn.systemlist({ "git", "-C", vim.loop.cwd(), "rev-parse", "--show-toplevel" })
-  if vim.v.shell_error == 0 and result[1] and result[1] ~= "" then
-    return result[1]
-  end
-  return vim.loop.cwd()
+  local cwd = uv.cwd()
+  return git.root(cwd) or cwd
 end
 
 local function review_allows_markdown_writes()
@@ -187,6 +185,11 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
     cfg.cmd,
     "exec",
     "--json",
+  }
+  if not run_opts.persist_session then
+    args[#args + 1] = "--ephemeral"
+  end
+  vim.list_extend(args, {
     "--ignore-user-config",
     "--ignore-rules",
     "--skip-git-repo-check",
@@ -196,10 +199,7 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
     sandbox,
     "-C",
     cwd or repo_root(),
-  }
-  if not run_opts.persist_session then
-    table.insert(args, 5, "--ephemeral")
-  end
+  })
   return args
 end
 

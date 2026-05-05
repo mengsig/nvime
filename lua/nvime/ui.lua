@@ -59,9 +59,9 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeHighlightBlockBold", { fg = "#10141d", bg = "#56b6c2", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMutedBlock", { fg = "#10141d", bg = "#888888", default = true })
   vim.api.nvim_set_hl(0, "NvimeMutedBlockBold", { fg = "#10141d", bg = "#888888", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeTabActive", { fg = "#10141d", bg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeTabInactive", { fg = "#d7dde8", bg = "#3b414c", default = true })
-  vim.api.nvim_set_hl(0, "NvimeTabFaint", { fg = "#10141d", bg = "#555c66", default = true })
+  vim.api.nvim_set_hl(0, "NvimeTabActive", { fg = "#56b6c2", bold = true, underline = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeTabInactive", { fg = "#6f7a92", default = true })
+  vim.api.nvim_set_hl(0, "NvimeTabFaint", { fg = "#424b5e", default = true })
   vim.api.nvim_set_hl(0, "NvimeStatus", { fg = "#8bdc7c", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeStatusIdle", { fg = "#6f7a92", default = true })
   vim.api.nvim_set_hl(0, "NvimeStatusRunning", { fg = "#56b6c2", bold = true, default = true })
@@ -69,7 +69,7 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeStatusWarn", { fg = "#f4bf75", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeStatusError", { fg = "#ff6b7a", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeHelp", { fg = "#56b6c2", default = true })
-  vim.api.nvim_set_hl(0, "NvimeKey", { fg = "#10141d", bg = "#f4bf75", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeKey", { fg = "#f4bf75", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeRule", { fg = "#2f3540", default = true })
   vim.api.nvim_set_hl(0, "NvimeMuted", { fg = "#6f7a92", default = true })
   vim.api.nvim_set_hl(0, "NvimeFaint", { fg = "#424b5e", default = true })
@@ -318,76 +318,6 @@ function M.panel(name, title, filetype)
   vim.bo[bufnr].modifiable = modifiable
   vim.bo[bufnr].readonly = readonly
   return bufnr
-end
-
-function M.update_title(name, title)
-  local panel = state.panels[name]
-  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
-    return
-  end
-  local cfg = vim.api.nvim_win_get_config(panel.winid)
-  if cfg.relative ~= "" then
-    vim.api.nvim_win_set_config(panel.winid, float_config(title))
-  end
-end
-
-function M.clear(bufnr, lines)
-  local modifiable = vim.bo[bufnr].modifiable
-  local readonly = vim.bo[bufnr].readonly
-  vim.bo[bufnr].readonly = false
-  vim.bo[bufnr].modifiable = true
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines or {})
-  vim.bo[bufnr].modifiable = modifiable
-  vim.bo[bufnr].readonly = readonly
-end
-
-function M.append(bufnr, text)
-  if not bufnr then
-    return
-  end
-  if not text or text == "" then
-    return
-  end
-
-  vim.schedule(function()
-    if not vim.api.nvim_buf_is_valid(bufnr) then
-      return
-    end
-    local is_prompt = vim.bo[bufnr].buftype == "prompt"
-    local modifiable = vim.bo[bufnr].modifiable
-    local readonly = vim.bo[bufnr].readonly
-    vim.bo[bufnr].readonly = false
-    vim.bo[bufnr].modifiable = true
-    local line_count = vim.api.nvim_buf_line_count(bufnr)
-    local target = line_count - 1
-    if is_prompt then
-      target = math.max(0, line_count - 2)
-    end
-    local current = vim.api.nvim_buf_get_lines(bufnr, target, target + 1, false)[1] or ""
-    local parts = vim.split(text, "\n", { plain = true })
-    if target >= line_count - 1 and is_prompt then
-      vim.api.nvim_buf_set_lines(bufnr, line_count - 1, line_count - 1, false, { parts[1] })
-    else
-      vim.api.nvim_buf_set_lines(bufnr, target, target + 1, false, { current .. parts[1] })
-    end
-    if #parts > 1 then
-      local rest = {}
-      for i = 2, #parts do
-        rest[#rest + 1] = parts[i]
-      end
-      local insert_at = target + 1
-      if is_prompt then
-        insert_at = math.max(target + 1, vim.api.nvim_buf_line_count(bufnr) - 1)
-      end
-      vim.api.nvim_buf_set_lines(bufnr, insert_at, insert_at, false, rest)
-    end
-    local panel = state.panels.chat
-    if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) and panel.bufnr == bufnr then
-      vim.api.nvim_win_set_cursor(panel.winid, { vim.api.nvim_buf_line_count(bufnr), 0 })
-    end
-    vim.bo[bufnr].modifiable = modifiable
-    vim.bo[bufnr].readonly = readonly
-  end)
 end
 
 return M

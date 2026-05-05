@@ -25,8 +25,14 @@ function M.scrollback(bufnr, ns)
     if row < 0 or row >= #lines then
       return
     end
+    local line_len = #(lines[row + 1] or "")
+    start_col = math.max(0, math.min(start_col, line_len))
+    end_col = math.max(start_col, math.min(end_col, line_len))
+    if start_col == end_col then
+      return
+    end
     opts = opts or {}
-    opts.end_col = math.min(end_col, #(lines[row + 1] or ""))
+    opts.end_col = end_col
     opts.hl_group = group
     vim.api.nvim_buf_set_extmark(bufnr, ns, row, start_col, opts)
   end
@@ -134,10 +140,11 @@ function M.scrollback(bufnr, ns)
   end
 end
 
-function M.input(bufnr, ns, prompt_prefix, start_lnum)
+function M.input(bufnr, ns, prompt_prefix, start_lnum, opts)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
+  opts = opts or {}
   vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   start_lnum = start_lnum or 1
@@ -160,9 +167,9 @@ function M.input(bufnr, ns, prompt_prefix, start_lnum)
         end_col = #prompt_line,
         hl_group = "NvimeUserText",
       })
-    else
+    elseif opts.show_ghost ~= false then
       vim.api.nvim_buf_set_extmark(bufnr, ns, prompt_lnum - 1, 0, {
-        virt_text = { { "type a message", "NvimeInputGhost" } },
+        virt_text = { { opts.ghost or "type a message", "NvimeInputGhost" } },
         virt_text_pos = "right_align",
         priority = 90,
       })

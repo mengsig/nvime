@@ -265,9 +265,21 @@ local function open_help()
   vim.wo[winid].cursorline = false
   vim.wo[winid].winhighlight =
     "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle"
-  vim.api.nvim_buf_add_highlight(bufnr, ns, "NvimeHeader", 0, 0, -1)
+  local first_line = vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] or ""
+  vim.api.nvim_buf_set_extmark(bufnr, ns, 0, 0, {
+    end_col = #first_line,
+    hl_group = "NvimeHeader",
+  })
   for row = 2, 9 do
-    vim.api.nvim_buf_add_highlight(bufnr, ns, "NvimeKey", row, 2, 15)
+    local line = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ""
+    local gap_start = line:find("  ", 3, true)
+    local key_end = gap_start and gap_start - 1 or math.min(15, #line)
+    if key_end > 2 then
+      vim.api.nvim_buf_set_extmark(bufnr, ns, row, 2, {
+        end_col = key_end,
+        hl_group = "NvimeKey",
+      })
+    end
   end
   local opts = { buffer = bufnr, silent = true }
   vim.keymap.set("n", "q", function()
@@ -444,10 +456,10 @@ local function add_dashboard_tabs(lines, marks)
   local offset = #line
   lines[row] = line
   for index, tab in ipairs(DASHBOARD_TABS) do
-    local span = string.format(" (%d) %s ", index, tab.label)
-    lines[row] = lines[row] .. span .. " "
-    add_mark(marks, row, offset, offset + #span, tab.id == active and "NvimeTabActive" or "NvimeTabInactive")
-    offset = offset + #span + 1
+    local label = string.format("(%d) %s", index, tab.label)
+    lines[row] = lines[row] .. label .. "    "
+    add_mark(marks, row, offset, offset + #label, tab.id == active and "NvimeTabActive" or "NvimeTabInactive")
+    offset = offset + #label + 4
   end
   return row
 end
@@ -847,14 +859,18 @@ local function render(bufnr)
   end
   for row, _ in pairs(action_rows) do
     local line = lines[row] or ""
-    vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 1, {
-      end_col = math.min(4, #line),
-      hl_group = "NvimeKey",
-    })
-    vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 4, {
-      end_col = #line,
-      hl_group = "NvimeUserText",
-    })
+    local key_start, key_end = line:find("^%s+(%S+)")
+    if key_start and key_end then
+      local key_first_col = line:find("%S")
+      vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, key_first_col - 1, {
+        end_col = key_end,
+        hl_group = "NvimeKey",
+      })
+      vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, key_end, {
+        end_col = #line,
+        hl_group = "NvimeUserText",
+      })
+    end
   end
   for row, session_id in pairs(row_to_session) do
     local kind = row_to_kind[row] or (is_chat_mode() and "chat" or "selection")

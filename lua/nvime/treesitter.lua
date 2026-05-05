@@ -1,26 +1,14 @@
-local M = {}
+local git = require("nvime.git")
 
-local uv = vim.uv or vim.loop
+local M = {}
 
 local function is_valid_buf(bufnr)
   return bufnr and vim.api.nvim_buf_is_valid(bufnr)
 end
 
-local function systemlist(cmd)
-  local ok, result = pcall(vim.fn.systemlist, cmd)
-  if not ok then
-    return {}
-  end
-  return result or {}
-end
-
 local function repo_root()
-  local cwd = uv and uv.cwd and uv.cwd() or vim.fn.getcwd()
-  local result = systemlist({ "git", "-C", cwd, "rev-parse", "--show-toplevel" })
-  if vim.v.shell_error == 0 and result[1] and result[1] ~= "" then
-    return vim.trim(result[1])
-  end
-  return cwd
+  local cwd = (vim.uv or vim.loop).cwd()
+  return git.root(cwd) or cwd
 end
 
 local function normalize_path(path)

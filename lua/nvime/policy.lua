@@ -50,6 +50,30 @@ local function basename(value)
   return vim.fn.fnamemodify(value, ":t")
 end
 
+local function is_left_boundary(prev_char)
+  return prev_char == "" or prev_char:match("[^%w_./-]") ~= nil
+end
+
+local function is_right_boundary(next_char)
+  return next_char == "" or next_char:match("[^%w_-]") ~= nil
+end
+
+local function contains_bin(text, name)
+  local start = 1
+  while true do
+    local i, j = text:find(name, start, true)
+    if not i then
+      return false
+    end
+    local prev_char = i > 1 and text:sub(i - 1, i - 1) or ""
+    local next_char = j < #text and text:sub(j + 1, j + 1) or ""
+    if is_left_boundary(prev_char) and is_right_boundary(next_char) then
+      return true
+    end
+    start = j + 1
+  end
+end
+
 function M.detect(cmd)
   local text = flatten(cmd)
   local words = shell_words(cmd)
@@ -65,7 +89,7 @@ function M.detect(cmd)
 
   if not bin then
     for name, _ in pairs(blocked_bins) do
-      if text:match("(^|[^%w_./-])" .. name .. "([^%w_-]|$)") or text:match("^" .. name .. "([^%w_-]|$)") then
+      if contains_bin(text, name) then
         bin = name
         break
       end
