@@ -133,6 +133,7 @@ local function install_keymaps()
   local normal = keys.normal or {}
   local visual = keys.visual or {}
 
+  set_keymap("n", prefix .. (normal.dashboard or "<Space>"), "<Cmd>Nvime<CR>", "nvime dashboard")
   set_keymap("n", prefix .. (normal.chat or "c"), "<Cmd>NvimeChat<CR>", "nvime chat conversations")
   set_keymap("n", prefix .. (normal.review or "r"), "<Cmd>NvimeReview<CR>", "nvime review/docs")
   set_keymap("n", prefix .. (normal.edit or "e"), "<Cmd>NvimeChats edit<CR>", "nvime edit discussions")
@@ -141,6 +142,9 @@ local function install_keymaps()
   set_keymap("n", prefix .. (normal.discuss or "d"), function()
     require("nvime.edit").continue_remaining()
   end, "nvime discuss active inline diff")
+  set_keymap("n", prefix .. (normal.diff or "v"), function()
+    require("nvime.diff").open_view()
+  end, "nvime open diff review workspace")
   set_keymap("n", prefix .. (normal.last or "n"), M.open_last, "nvime reopen last conversation")
   set_keymap("n", prefix .. (normal.provider or "p"), provider.choose, "nvime choose provider")
 
@@ -255,6 +259,12 @@ function M.setup(opts)
     require("nvime.diff").reject_current_group()
   end, {
     desc = "Reject the current nvime inline diff block",
+  })
+
+  vim.api.nvim_create_user_command("NvimeDiff", function()
+    require("nvime.diff").open_view()
+  end, {
+    desc = "Open the active nvime diff review workspace",
   })
 
   install_keymaps()

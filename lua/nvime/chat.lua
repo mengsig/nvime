@@ -531,7 +531,7 @@ end
 local function title()
   local status = status_word()
   local icon = status == "running" and ui.icon("active") or ui.icon("idle")
-  return " nvime  " .. provider() .. "  review/docs  " .. icon .. " " .. status .. " "
+  return "nvime.nvim  " .. provider() .. "  review/docs  " .. icon .. " " .. status
 end
 
 local function scroll_config()

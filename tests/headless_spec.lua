@@ -42,11 +42,13 @@ end
 assert(vim.fn.maparg("<leader>nr", "n") ~= "", "default review keymap exists")
 assert(vim.fn.maparg("<leader>ne", "x") ~= "", "default visual edit keymap exists")
 assert(vim.fn.maparg("<leader>nq", "x") ~= "", "default visual ask keymap exists")
+assert(vim.fn.maparg("<leader>n<Space>", "n") == "<Cmd>Nvime<CR>", "default dashboard keymap opens command center")
 assert(vim.fn.maparg("<leader>nc", "n") == "<Cmd>NvimeChat<CR>", "default normal chat keymap opens chat picker")
 assert(vim.fn.maparg("<leader>ne", "n") == "<Cmd>NvimeChats edit<CR>", "default normal edit keymap opens edit picker")
 assert(vim.fn.maparg("<leader>nq", "n") == "<Cmd>NvimeChats ask<CR>", "default normal ask keymap opens ask picker")
 assert(vim.fn.maparg("<leader>nn", "n") ~= "", "default normal last-session keymap exists")
 assert(vim.fn.maparg("<leader>np", "n") ~= "", "default provider keymap exists")
+assert(vim.fn.maparg("<leader>nv", "n") ~= "", "default diff review keymap exists")
 assert_eq(require("nvime.progress").compact("[claude] tool: Bash: rg README"), "claude Bash", "claude progress footer keeps tool name")
 assert_eq(
   require("nvime.progress").compact([[[codex] tool: /usr/bin/zsh -lc "sed -n '1,260p' README.md"]]),
@@ -54,6 +56,15 @@ assert_eq(
   "codex command progress footer hides command text"
 )
 assert(vim.fn.exists(":Nvime") == 2, "Nvime command center command exists")
+assert(vim.fn.exists(":NvimeDiff") == 2, "Nvime diff review command exists")
+assert(
+  vim.fn.strdisplaywidth(require("nvime.ui").truncate("abcdef", 4)) <= 4,
+  "ui truncation respects display width"
+)
+assert(
+  vim.fn.strdisplaywidth(require("nvime.ui").truncate("ab◈cdef", 4)) <= 4,
+  "ui truncation respects display width for glyph labels"
+)
 
 vim.cmd("NvimeProvider codex")
 assert(require("nvime.state").config.provider == "codex", "provider command sets codex")
@@ -1617,6 +1628,33 @@ local block_session_result = require("nvime.diff").start_session({
 assert(block_session_result.status == "diff", "multi-line inline diff opens")
 assert_eq(#block_session_result.session.blocks, 2, "diff splits separated changes into line units")
 assert_eq(#block_session_result.session.visual_groups, 2, "separated changes render as separate readable blocks")
+require("nvime.diff").open_view()
+local review_workspace = require("nvime.state").current_diff.review
+assert(
+  review_workspace
+    and vim.api.nvim_tabpage_is_valid(review_workspace.tabpage)
+    and vim.api.nvim_win_is_valid(review_workspace.original_winid)
+    and vim.api.nvim_win_is_valid(review_workspace.proposed_winid)
+    and vim.api.nvim_win_is_valid(review_workspace.target_winid),
+  "diff review workspace opens a three-pane tab"
+)
+assert(
+  vim.wo[review_workspace.target_winid].winhighlight:find("WinSeparator:NvimeBorder", 1, true),
+  "diff review workspace uses nvime chrome for separators"
+)
+assert_eq(
+  table.concat(vim.api.nvim_buf_get_lines(review_workspace.original_bufnr, 0, -1, false), "\n"),
+  "local a = 1\nlocal b = 2\nlocal c = 3\nlocal d = 4\nlocal e = 5",
+  "diff review original pane preserves the pre-review file"
+)
+assert_eq(
+  table.concat(vim.api.nvim_buf_get_lines(review_workspace.proposed_bufnr, 0, -1, false), "\n"),
+  "local a = 1\nlocal b = 20\nlocal c = 3\nlocal d = 40\nlocal e = 5",
+  "diff review proposed pane shows the full agent result"
+)
+assert(vim.bo[block_target].modifiable, "diff review target pane remains directly editable")
+require("nvime.diff").close_view()
+vim.api.nvim_set_current_buf(block_target)
 vim.api.nvim_win_set_cursor(0, { 2, 0 })
 require("nvime.diff").accept_current()
 local block_lines = vim.api.nvim_buf_get_lines(block_target, 0, -1, false)

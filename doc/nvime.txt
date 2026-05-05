@@ -142,6 +142,11 @@ COMMANDS                                                        *nvime-commands*
 :NvimeReject
         Reject the current pending inline diff block in the target file.
 
+                                                        *:NvimeDiff*
+:NvimeDiff
+        Open the active diff in a three-pane review workspace: original
+        snapshot, full proposed result, and the live editable source buffer.
+
                                                         *:NvimeAudit*
 :NvimeAudit
         Open the audit log.
@@ -155,6 +160,8 @@ Inline diff mappings in the target file:
         above, current red lines below, and one compact controls header per
         block. Large contiguous replacements are split into smaller visual
         blocks by default. Review units remain line-level internally.
+        :NvimeDiff
+                open the original/proposed/editable review workspace
         ]n      next unresolved line
         [n      previous unresolved line
         ]b      next visual change block
@@ -173,10 +180,22 @@ Inline diff mappings in the target file:
         gc      discuss accepted/rejected/current/unresolved lines with the
                 edit agent
 
+Diff review workspace mappings:
+        e       focus the editable source pane
+        ]b/[b   next/previous visual change block
+        ]n/[n   next/previous unresolved line
+        ga/gb   accept/reject the current visual block
+        gA/gB   accept/reject all unresolved blocks
+        gc      discuss active review state with the edit agent
+        r       refresh the review panes
+        q       close the review workspace
+
 ==============================================================================
 KEYMAPS                                                          *nvime-keymaps*
 
 Default keymaps use <leader>n:
+        <leader>n<Space>
+                       open dashboard command center
         <leader>nc     open general chat conversation picker
         <leader>nr     run review/docs
         <leader>nq     ask picker: new current-function session or old chat
@@ -187,6 +206,7 @@ Default keymaps use <leader>n:
                        edit selected range
         <leader>na     open audit log
         <leader>nd     discuss active inline diff state
+        <leader>nv     open active diff review workspace
         <leader>nn     reopen last used nvime conversation
         <leader>np     choose Claude or Codex
 

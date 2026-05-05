@@ -115,12 +115,14 @@ require("nvime").setup({
     enabled = true,
     prefix = "<leader>n",
     normal = {
+      dashboard = "<Space>",
       chat = "c",
       review = "r",
       edit = "e",
       ask = "q",
       audit = "a",
       discuss = "d",
+      diff = "v",
       last = "n",
       provider = "p",
     },
@@ -173,6 +175,7 @@ require("nvime").setup({
 - `:NvimeProvider [claude|codex]` shows or changes the default provider.
 - `:NvimeAccept` accepts the current inline diff block.
 - `:NvimeReject` rejects the current inline diff block.
+- `:NvimeDiff` opens the active diff in a three-pane review workspace.
 - `:NvimeAudit` opens `.nvime/audit.jsonl`.
 
 ## Chat Panel
@@ -238,6 +241,7 @@ Inside the chat window:
 
 `nvime` ships one conservative `<leader>n` namespace:
 
+- `<leader>n<Space>`: open the dashboard command center
 - `<leader>nc`: open the general chat conversation picker
 - `<leader>nr`: run review/docs
 - `<leader>nq`: open the highlighted-code discussions picker
@@ -246,6 +250,7 @@ Inside the chat window:
 - visual `<leader>ne`: edit selected range
 - `<leader>na`: open audit log
 - `<leader>nd`: discuss the active inline diff state
+- `<leader>nv`: open the active diff review workspace
 - `<leader>nn`: reopen the last used nvime conversation
 - `<leader>np`: choose Claude or Codex
 
@@ -318,6 +323,8 @@ editable during review.
 
 Inline diff mappings in the target file:
 
+- `:NvimeDiff` / `<leader>nv`: open the review workspace with original,
+  proposed, and editable panes in native diff mode
 - `]n` / `[n`: next or previous unresolved line
 - `]b` / `[b`: next or previous visual change block
 - `ga`: accept the current visual change block
@@ -327,6 +334,11 @@ Inline diff mappings in the target file:
 - visual `gb`: reject every unresolved changed line touched by the visual range
 - `gB`: reject all unresolved blocks
 - `gc`: discuss the active diff state with the edit agent
+
+Inside the review workspace, the left pane is the pre-review snapshot, the
+middle pane is the full proposed result, and the right pane is the live source
+buffer. The right pane remains normally editable; preview panes map `e` to jump
+back to the editable file, `r` to refresh, and `q` to close the workspace.
 
 Compatibility aliases are also installed: `gr` rejects the current line change,
 visual `gr` rejects selected line changes, `gR` rejects all, and `gX` rejects the current visual change block.
