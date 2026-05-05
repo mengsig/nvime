@@ -123,6 +123,11 @@ M.defaults = {
         label = "Proceed with fix",
         prompt = "Please proceed with the concrete fix for this selection, keeping the change minimal and inside the selected range.",
       },
+      {
+        label = "Benchmark and optimize",
+        prompt = "Profile this selection on representative inputs, propose a faster candidate, verify behavior parity, and only patch if there is a measurable speedup. Include a one-line BENCH summary above the response block.",
+        lane = "perf",
+      },
     },
   },
 }

@@ -23,6 +23,82 @@ local function split_lines(text)
   return lines
 end
 
+local function count_pattern(text, pattern)
+  if type(text) ~= "string" or text == "" then
+    return 0
+  end
+  local _, n = text:gsub(pattern, "")
+  return n
+end
+
+local function bracket_balance(lines)
+  local text = table.concat(lines or {}, "\n")
+  return {
+    brace = count_pattern(text, "{") - count_pattern(text, "}"),
+    paren = count_pattern(text, "%(") - count_pattern(text, "%)"),
+    bracket = count_pattern(text, "%[") - count_pattern(text, "%]"),
+  }
+end
+
+local function bracket_drift(before, after)
+  before = before or {}
+  after = after or {}
+  return {
+    brace = (after.brace or 0) - (before.brace or 0),
+    paren = (after.paren or 0) - (before.paren or 0),
+    bracket = (after.bracket or 0) - (before.bracket or 0),
+  }
+end
+
+local function has_bracket_drift(drift)
+  return drift and (drift.brace ~= 0 or drift.paren ~= 0 or drift.bracket ~= 0)
+end
+
+local function bracket_drift_summary(drift)
+  if not drift then
+    return nil
+  end
+  local parts = {}
+  if drift.brace ~= 0 then
+    parts[#parts + 1] = string.format("{}: %+d", drift.brace)
+  end
+  if drift.paren ~= 0 then
+    parts[#parts + 1] = string.format("(): %+d", drift.paren)
+  end
+  if drift.bracket ~= 0 then
+    parts[#parts + 1] = string.format("[]: %+d", drift.bracket)
+  end
+  if #parts == 0 then
+    return nil
+  end
+  return table.concat(parts, "  ")
+end
+
+local function response_likely_truncated(response)
+  if type(response) ~= "string" or response == "" then
+    return false
+  end
+  local first_marker = response:find("NVIME_[A-Z_]+")
+  if not first_marker then
+    return false
+  end
+  local tail = response:sub(first_marker)
+  local fence_count = 0
+  local search_pos = 1
+  while true do
+    local s = tail:find("```", search_pos, true)
+    if not s then
+      break
+    end
+    fence_count = fence_count + 1
+    search_pos = s + 3
+  end
+  if fence_count == 0 then
+    return false
+  end
+  return fence_count % 2 == 1
+end
+
 local function fence_marker(line)
   local marker, rest = (line or ""):match("^%s*([`~]+)(.*)$")
   if not marker or #marker < 3 then
@@ -288,15 +364,44 @@ local function build_unranged_hunk(selection, text)
 end
 
 local function parse_hunks(lines)
+  -- Be lenient about hunk @@ counts. Both Claude and Codex regularly miscount
+  -- +new_count when emitting many added lines (off by 1-2). The previous
+  -- strict count enforcement silently truncated the body, which corrupted
+  -- the patched file. We now keep counting for context tracking but only
+  -- close the hunk on a clear file-level/response terminator, or on a fence
+  -- marker AFTER the declared counts have been met (so a fence appearing as
+  -- content is treated as a context line).
   local hunks = {}
   local current = nil
   local header = {}
   local old_seen = 0
   local new_seen = 0
 
+  local function recount(hunk)
+    local olds, news = 0, 0
+    for i = 2, #hunk.lines do
+      local prefix = hunk.lines[i]:sub(1, 1)
+      if prefix == " " or prefix == "-" then
+        olds = olds + 1
+      end
+      if prefix == " " or prefix == "+" then
+        news = news + 1
+      end
+    end
+    -- Replace the declared counts with what we actually consumed; this makes
+    -- a miscounted header from the agent harmless.
+    if olds > 0 or news > 0 then
+      hunk.old_count = olds
+      hunk.new_count = news
+    end
+  end
+
   for _, line in ipairs(lines) do
     local old_start, old_count, new_start, new_count = line:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
     if old_start then
+      if current then
+        recount(current)
+      end
       current = {
         old_start = tonumber(old_start),
         old_count = tonumber(old_count ~= "" and old_count or "1"),
@@ -320,8 +425,7 @@ local function parse_hunks(lines)
         or line:match("^%s*NVIME_[A-Z_]+%s*$")
         or ((old_done and new_done) and fence_marker(line))
       if is_file_header then
-        current = nil
-      elseif old_done and new_done then
+        recount(current)
         current = nil
       elseif prefix == " " or prefix == "-" or prefix == "+" or prefix == "\\" then
         current.lines[#current.lines + 1] = line
@@ -339,6 +443,10 @@ local function parse_hunks(lines)
     else
       header[#header + 1] = line
     end
+  end
+
+  if current then
+    recount(current)
   end
 
   return header, hunks
@@ -900,8 +1008,12 @@ local function set_review_winbar(winid, label, session)
   end
   local counts = count_block_statuses(session)
   local file = vim.fn.fnamemodify(session.file or "", ":t")
+  local warn = ""
+  if session and session.warnings and #session.warnings > 0 then
+    warn = "  " .. ui.icon("warning") .. " truncation suspected"
+  end
   vim.wo[winid].winbar = string.format(
-    " nvime.nvim  %s  %s  %s %d  %s %d  %s %d ",
+    " nvime.nvim  %s  %s  %s %d  %s %d  %s %d %s",
     label,
     file,
     ui.icon("pending"),
@@ -909,7 +1021,8 @@ local function set_review_winbar(winid, label, session)
     ui.icon("success"),
     counts.accepted or 0,
     ui.icon("error"),
-    counts.rejected or 0
+    counts.rejected or 0,
+    warn
   )
 end
 
@@ -1032,13 +1145,19 @@ local function render_visual_group(session, group)
   local old_line_rows = {}
   local has_old_lines = false
 
-  local virt_lines = {
-    { { clip_review_text(session, group_summary(group)), "NvimeDiffHunk" } },
+  local virt_lines = {}
+  if session.warnings and #session.warnings > 0 and (group.index or 1) == 1 then
+    for _, msg in ipairs(session.warnings) do
+      virt_lines[#virt_lines + 1] = {
+        { clip_review_text(session, "  " .. ui.icon("warning") .. " " .. msg), "NvimeError" },
+      }
+    end
+  end
+  virt_lines[#virt_lines + 1] = { { clip_review_text(session, group_summary(group)), "NvimeDiffHunk" } }
+  virt_lines[#virt_lines + 1] = {
     {
-      {
-        clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gc discuss  q close"),
-        "NvimeMuted",
-      },
+      clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gc discuss  q close"),
+      "NvimeMuted",
     },
   }
 
@@ -1122,6 +1241,15 @@ local function render_session(session, opts)
       vim.notify("nvime diff: resolved" .. hint, vim.log.levels.INFO)
     else
       vim.notify("nvime diff: " .. pending .. " pending  ]b/[b ga gb gA gB gc  q close", vim.log.levels.INFO)
+    end
+    if session.warnings and #session.warnings > 0 and not session.warnings_announced then
+      session.warnings_announced = true
+      vim.notify(
+        "nvime diff: SUSPICIOUS PATCH — "
+          .. table.concat(session.warnings, "; ")
+          .. ". Review carefully before accepting.",
+        vim.log.levels.ERROR
+      )
     end
   end
   refresh_review_view(session)
@@ -1255,6 +1383,25 @@ function M.start_session(selection, response, provider, prompt)
     prompt = prompt,
     applied = {},
   }
+
+  local warnings = {}
+  local before_balance = bracket_balance(session.original_lines)
+  session.original_balance = before_balance
+  local proposed_ok, proposed = pcall(proposed_lines, session)
+  if proposed_ok and proposed then
+    local after_balance = bracket_balance(proposed)
+    local drift = bracket_drift(before_balance, after_balance)
+    if has_bracket_drift(drift) then
+      session.bracket_drift = drift
+      warnings[#warnings + 1] = "delimiter imbalance — " .. (bracket_drift_summary(drift) or "?")
+    end
+  end
+  if response_likely_truncated(response) then
+    session.response_truncated = true
+    warnings[#warnings + 1] = "agent response did not close its diff fence; output may be truncated"
+  end
+  session.warnings = warnings
+
   state.current_diff = session
   render_session(session)
   return {
@@ -1663,6 +1810,20 @@ function M.accept_all()
   local session = state.current_diff
   if not session then
     return
+  end
+  if session.warnings and #session.warnings > 0 and not session.warnings_overridden then
+    local choice = vim.fn.confirm(
+      "nvime diff has truncation warnings:\n  - "
+        .. table.concat(session.warnings, "\n  - ")
+        .. "\n\nAccept all anyway?",
+      "&Accept all\n&Cancel",
+      2
+    )
+    if choice ~= 1 then
+      vim.notify("nvime accept-all cancelled (truncation warning)", vim.log.levels.INFO)
+      return
+    end
+    session.warnings_overridden = true
   end
   M.accept_blocks(pending_blocks(session))
 end

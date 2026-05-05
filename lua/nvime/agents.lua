@@ -180,6 +180,12 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
   local sandbox = "read-only"
   if lane == "review" and review_allows_markdown_writes() then
     sandbox = "workspace-write"
+  elseif lane == "perf" then
+    -- perf lane writes scratch files under /tmp; codex's read-only sandbox
+    -- forbids /tmp writes, so we elevate to workspace-write. The agent's cwd
+    -- is set to a fresh /tmp directory below so this elevation cannot reach
+    -- the user's repo.
+    sandbox = "workspace-write"
   end
   local args = {
     cfg.cmd,
@@ -625,7 +631,17 @@ function M.run(opts)
     resume_session_id = opts.resume_session_id,
   }
   local workspace = prepare_markdown_workspace(lane, opts.allow_markdown_workspace, opts.markdown_workspace)
-  local cwd = workspace and workspace.cwd or repo_root()
+  local perf_workspace = nil
+  if lane == "perf" and provider == "codex" then
+    -- Empty scratch cwd outside the repo so codex's workspace-write sandbox
+    -- can never escalate into the user's working tree.
+    local tmp = vim.fn.tempname() .. "/perf"
+    vim.fn.mkdir(tmp, "p")
+    perf_workspace = { cwd = tmp, tmp = vim.fn.fnamemodify(tmp, ":h") }
+  end
+  local cwd = (perf_workspace and perf_workspace.cwd)
+    or (workspace and workspace.cwd)
+    or repo_root()
   local args = build_args(provider, cfg, lane, prompt, cwd, run_opts)
   local stdin = input
   if provider == "codex" then
@@ -695,6 +711,9 @@ function M.run(opts)
         result.nvime_provider_session_id = observed_session_id
         local ok, err = pcall(on_exit, result)
         cleanup_workspace(workspace)
+        if perf_workspace and perf_workspace.tmp then
+          pcall(vim.fn.delete, perf_workspace.tmp, "rf")
+        end
         if not ok then
           error(err)
         end

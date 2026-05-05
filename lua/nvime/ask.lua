@@ -200,7 +200,7 @@ run = function(selection, question, provider, session_opts)
 				if not ok then
 					selection_state.append("\n[nvime] " .. tostring(diff_result) .. "\n", session_id)
 				elseif diff_result and diff_result.status == "no_change" then
-					selection_state.append("\n[nvime] no patch opened: " .. diff_result.message .. "\n", session_id)
+					selection_state.append("\n[nvime] no patch opened.\n", session_id)
 				elseif diff_result and diff_result.session then
 					diff_result.session.selection_session_id = session_id
 					opened_diff = true

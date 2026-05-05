@@ -1514,6 +1514,11 @@ local lazy_install_result = require("nvime.diff").start_session({
   source = "test",
 }, "NVIME_DIFF\n```diff\n--- a/lazy-install.md\n+++ b/lazy-install.md\n@@ -6,6 +6,7 @@\n```\n\n-With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you.\n+With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you,\n+and it is where you can pass overrides.\n If the plugin is loaded directly from `runtimepath`, `plugin/nvime.lua`\n registers the defaults. Call `require(\"nvime\").setup({ ... })` only when you\n want to override them.\n```", "codex", "")
 assert_eq(lazy_install_result.status, "diff", "agent diff with unprefixed context lines still opens a patch")
+assert(
+  lazy_install_result.session.warnings and #lazy_install_result.session.warnings > 0,
+  "malformed (unclosed-fence) diff surfaces a truncation warning"
+)
+lazy_install_result.session.warnings_overridden = true
 require("nvime.diff").accept_all()
 local lazy_install_lines = vim.api.nvim_buf_get_lines(lazy_install_target, 0, -1, false)
 assert_eq(
@@ -1830,5 +1835,77 @@ assert_eq(
   string.format("line_%02d", first_large_group_size + 1),
   "accept_current_group leaves later visual blocks pending"
 )
+
+do
+  vim.cmd.edit(tmp .. "/truncate-zig.zig")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+    "pub fn keep() void {",
+    "    return;",
+    "}",
+    "",
+    "pub fn rewrite() i32 {",
+    "    var x: i32 = 1;",
+    "    return x;",
+    "}",
+  })
+  local target = vim.api.nvim_get_current_buf()
+  local response = table.concat({
+    "NVIME_DIFF",
+    "```diff",
+    "--- a/truncate-zig.zig",
+    "+++ b/truncate-zig.zig",
+    "@@ -5,4 +5,8 @@",
+    "-pub fn rewrite() i32 {",
+    "-    var x: i32 = 1;",
+    "-    return x;",
+    "-}",
+    "+pub fn rewrite() i32 {",
+    "+    var x: i32 = 1;",
+    "+    if (x > 0) {",
+    "+        x += 1;",
+    "```",
+  }, "\n")
+  local result = require("nvime.diff").start_session({
+    bufnr = target,
+    line1 = 5,
+    line2 = 8,
+    path = "truncate-zig.zig",
+    source = "test",
+  }, response, "claude", "")
+  assert_eq(result.status, "diff", "truncated diff still opens for review")
+  assert(
+    result.session.warnings and #result.session.warnings > 0,
+    "truncated diff (missing closing braces) raises a truncation warning"
+  )
+  local warning_text = table.concat(result.session.warnings, " | ")
+  assert(
+    warning_text:find("delimiter imbalance", 1, true),
+    "delimiter imbalance is named in the truncation warning: " .. warning_text
+  )
+  require("nvime.diff").reject_all()
+end
+
+do
+  vim.cmd.edit(tmp .. "/balanced.lua")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+    "local function add(a, b)",
+    "  return a + b",
+    "end",
+  })
+  local target = vim.api.nvim_get_current_buf()
+  local result = require("nvime.diff").start_session({
+    bufnr = target,
+    line1 = 1,
+    line2 = 3,
+    path = "balanced.lua",
+    source = "test",
+  }, "NVIME_REPLACEMENT\n```lua\nlocal function add(a, b)\n  return (a + b)\nend\n```", "claude", "")
+  assert_eq(result.status, "diff", "balanced replacement opens cleanly")
+  assert(
+    not (result.session.warnings and #result.session.warnings > 0),
+    "balanced replacement does not raise a false-positive truncation warning"
+  )
+  require("nvime.diff").reject_all()
+end
 
 print("nvime headless spec passed")

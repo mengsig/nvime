@@ -42,8 +42,9 @@ function M.choose(scope, callback)
     format_item = prompt_label,
   }, function(choice)
     local text = prompt_text(choice)
+    local lane = (type(choice) == "table") and choice.lane or nil
     if text and text ~= "" then
-      callback(text)
+      callback(text, lane)
     end
   end)
 end

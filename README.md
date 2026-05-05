@@ -152,7 +152,7 @@ require("nvime").setup({
 
 Chat, selection, and discussion picker windows currently use floating scratch
 buffers. `ui.layout` and `ui.side` are reserved defaults and do not select a
-split layout in v0.1.0.
+split layout in v0.2.0.
 
 To disable shipped keymaps:
 

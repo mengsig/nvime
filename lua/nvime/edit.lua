@@ -28,14 +28,79 @@ local function current_path(bufnr)
   return git.repo_relative_path(name)
 end
 
-local function build_prompt(selection, intent)
+local function selection_body_and_fence(selection)
   local lines = ts.lines(selection)
   local selected_body = table.concat(lines, "\n")
   local selected_display = selected_body
   if vim.trim(selected_body) == "" then
     selected_display = "(selected range is empty or blank)"
   end
-  local selected_fence = code_fence_for(selected_display)
+  return selected_display, code_fence_for(selected_display)
+end
+
+local function build_perf_prompt(selection, intent)
+  local selected_display, fence = selection_body_and_fence(selection)
+  return table.concat({
+    "NVIME PERF EDIT MODE.",
+    "You are a constrained patch worker focused on computational cost and scalability.",
+    "Goal: produce a measurably faster or more memory-frugal version of the selected code, with behavior preserved on all inputs the original accepts.",
+    "If you cannot prove a real win with numbers, return NVIME_NO_CHANGE.",
+    "",
+    "Mandatory workflow before answering:",
+    "  1. Read the selected code carefully. Identify the asymptotic and constant-factor cost.",
+    "  2. Pick at least one representative bench input (small, medium, large where appropriate).",
+    "  3. Use Bash to create a scratch directory under /tmp (e.g. mktemp -d /tmp/nvime-bench.XXXXXX). NEVER write inside the user's repository.",
+    "  4. Write the original selected code and your candidate replacement to two separate files in that scratch dir.",
+    "  5. Construct a behavior parity check: feed both implementations the same fixed and randomized inputs and assert outputs are equal (and exception-shape if the function is documented to raise).",
+    "  6. Run a microbenchmark appropriate for the language (python -m timeit, hyperfine, time, perf_hooks, os.clock) with at least 3 trials per side. Use sufficiently large input that timing dominates noise.",
+    "  7. Compare. Only if candidate is correct AND faster by at least the threshold the intent implies (default ~30% wallclock or asymptotic improvement), produce NVIME_DIFF.",
+    "  8. If correctness fails, behavior diverges, candidate is slower, or the gain is within measurement noise, return NVIME_NO_CHANGE with the measured numbers.",
+    "",
+    "Keep the candidate minimal. Your replacement must be the SMALLEST change that achieves the goal. Do not preserve undocumented edge cases (unhashable elements, exotic exception shapes, non-list iterables when the docstring talks about lists) at the cost of code complexity. Prefer one or two lines over ten.",
+    "Match the original's documented behavior, not its accidental behavior. If the original raises X on empty input and the docstring/intent does not require it, do not write fallback code in the candidate just to keep raising X.",
+    "Forbidden:",
+    "  - writing to any path under the repo root or any ancestor directory (use only /tmp/nvime-bench.* paths);",
+    "  - deleting any file you did not create in the scratch dir;",
+    "  - importing heavy external dependencies (numpy/numba/etc.) unless the intent explicitly authorizes them;",
+    "  - changes outside the selected range or in another file;",
+    "  - any change whose only justification is style;",
+    "  - candidates with try/except / type-dispatch fallbacks added solely to preserve corner cases the original happened to support.",
+    "",
+    "Response format:",
+    "  - You MAY emit one short summary line BEFORE the NVIME_* marker, of the form:",
+    "      BENCH: orig=<t1>s cand=<t2>s speedup=<x>x n=<size>",
+    "    No other prose anywhere.",
+    "  - Then exactly one machine-readable response block:",
+    "",
+    "NVIME_NO_CHANGE",
+    "<one short reason; include the measured numbers if available>",
+    "",
+    "NVIME_REPLACEMENT",
+    "```",
+    "<full replacement for the selected range only, with surrounding indentation preserved>",
+    "```",
+    "",
+    "NVIME_DIFF",
+    "```diff",
+    "--- a/" .. selection.path,
+    "+++ b/" .. selection.path,
+    "@@ -<line>,<count> +<line>,<count> @@",
+    "<minimal changed hunk lines only>",
+    "```",
+    "",
+    "File: " .. selection.path,
+    "Allowed range: " .. selection.line1 .. "-" .. selection.line2 .. " (" .. selection.source .. ")",
+    "Intent: " .. intent,
+    "",
+    "Selected code:",
+    fence,
+    selected_display,
+    fence,
+  }, "\n")
+end
+
+local function build_prompt(selection, intent)
+  local selected_display, selected_fence = selection_body_and_fence(selection)
   local ask = selection_state.last_ask_for(selection)
   local prior_context = {}
   if ask and selection_state.same_range(selection, ask.selection) then
@@ -122,10 +187,10 @@ local function looks_like_question(intent)
     or text:find("review", 1, true)
 end
 
-local function submit_edit(selection, fallback_provider, input, selected_provider, session_id)
+local function submit_edit(selection, fallback_provider, input, selected_provider, session_id, lane)
   selected_provider = selected_provider or fallback_provider
   local active_session_id = session_id or selection_state.active_session_id()
-  if looks_like_question(input) then
+  if lane ~= "perf" and looks_like_question(input) then
     require("nvime.ask").start({
       selection = selection,
       provider = selected_provider,
@@ -133,7 +198,7 @@ local function submit_edit(selection, fallback_provider, input, selected_provide
       session_id = active_session_id,
     })
   else
-    run_edit(selection, input, selected_provider, { session_id = active_session_id })
+    run_edit(selection, input, selected_provider, { session_id = active_session_id, lane = lane })
   end
 end
 
@@ -145,8 +210,8 @@ local function arm_edit_followup(selection, provider, session_id, open_panel)
     session_id = session_id,
     focus_input = false,
     open = open_panel ~= false,
-    on_submit = function(input, selected_provider)
-      submit_edit(selection, provider, input, selected_provider, session_id)
+    on_submit = function(input, selected_provider, lane)
+      submit_edit(selection, provider, input, selected_provider, session_id, lane)
     end,
   })
 end
@@ -165,13 +230,14 @@ run_edit = function(selection, intent, provider, session_opts)
   selection_state.append_response_header(provider, "edit", session_id)
 
   local response = {}
-  local prompt = build_prompt(selection, intent)
+  local lane = (session_opts.lane == "perf") and "perf" or "edit"
+  local prompt = (lane == "perf") and build_perf_prompt(selection, intent) or build_prompt(selection, intent)
   local agent_session = selection_state.agent_run_opts(session_id, provider)
   state.selection.last_edit_prompt = prompt
   selection_state.set_busy(true, session_id)
   agents.run({
     provider = provider,
-    lane = "edit",
+    lane = lane,
     prompt = prompt,
     persist_session = agent_session.persist_session,
     resume_session_id = agent_session.resume_session_id,
@@ -194,7 +260,7 @@ run_edit = function(selection, intent, provider, session_opts)
         if not ok then
           selection_state.append("\n[nvime] " .. tostring(diff_result) .. "\n", session_id)
         elseif diff_result and diff_result.status == "no_change" then
-          selection_state.append("\n[nvime] no patch opened: " .. diff_result.message .. "\n", session_id)
+          selection_state.append("\n[nvime] no patch opened.\n", session_id)
         elseif diff_result and diff_result.session then
           diff_result.session.selection_session_id = session_id
           opened_diff = true
@@ -242,8 +308,8 @@ function M.start(opts)
         selection = selection,
         session_id = session_opts.session_id,
         new_session = session_opts.new_session,
-        on_submit = function(input, selected_provider)
-          submit_edit(selection, proceed_provider, input, selected_provider, selection_state.active_session_id())
+        on_submit = function(input, selected_provider, lane)
+          submit_edit(selection, proceed_provider, input, selected_provider, selection_state.active_session_id(), lane)
         end,
       })
       return
@@ -278,8 +344,8 @@ function M.start(opts)
       selection = selection,
       session_id = opts.session_id,
       new_session = opts.new_session,
-      on_submit = function(input, selected_provider)
-        submit_edit(selection, provider, input, selected_provider, selection_state.active_session_id())
+      on_submit = function(input, selected_provider, lane)
+        submit_edit(selection, provider, input, selected_provider, selection_state.active_session_id(), lane)
       end,
     })
     return
@@ -366,7 +432,7 @@ function M.continue_remaining()
             if not ok then
               selection_state.append("\n[nvime] " .. tostring(diff_result) .. "\n", selection_session_id)
             elseif diff_result and diff_result.status == "no_change" then
-              selection_state.append("\n[nvime] no updated patch opened: " .. diff_result.message .. "\n", selection_session_id)
+              selection_state.append("\n[nvime] no updated patch opened.\n", selection_session_id)
             elseif diff_result and diff_result.session then
               diff_result.session.selection_session_id = selection_session_id
               opened_diff = true
