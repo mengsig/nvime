@@ -7,7 +7,8 @@ CONTENTS                                                        *nvime-contents*
 2. Commands                                      |nvime-commands|
 3. Keymaps                                       |nvime-keymaps|
 4. Configuration                                 |nvime-configuration|
-5. Policy                                        |nvime-policy|
+5. Protocol                                      |nvime-protocol|
+6. Policy                                        |nvime-policy|
 
 ==============================================================================
 OVERVIEW                                                        *nvime-overview*
@@ -17,6 +18,8 @@ lanes. The edit lane is intentionally narrow: one visual range or one
 Tree-sitter function, one current file, written intent, reviewed diff.
 The selected range may be blank when the user's intent is to generate or insert
 new current-file code/text.
+
+Requires Neovim 0.10 or newer.
 
 nvime is a Neovim guardrail, not a host security sandbox.
 
@@ -134,9 +137,15 @@ COMMANDS                                                        *nvime-commands*
         If no intent is supplied inline, nvime asks on the guarded prompt line
         instead of opening a popup prompt.
 
-                                                        *:NvimeAccept*
+	                                                        *:NvimeAccept*
 :NvimeAccept
-        Accept the current pending inline diff block in the target file.
+	        Accept the current pending inline diff block in the target file.
+
+	                                                        *:NvimeAccept!*
+:NvimeAccept!
+	        Force-accept the current pending or conflicted inline diff block.
+	        This bypasses the live-content guard and writes a
+	        block_force_applied audit event.
 
                                                         *:NvimeReject*
 :NvimeReject
@@ -169,8 +178,9 @@ Inline diff mappings in the target file:
         [b      previous visual change block
         ga      accept the current visual change block
         v_ga    accept unresolved changed lines touched by the visual range
-        gA      accept all unresolved blocks
-        gb      reject the current visual change block
+	        gA      accept all unresolved blocks
+	        gA!     force-accept all unresolved/conflicted blocks
+	        gb      reject the current visual change block
         v_gb    reject unresolved changed lines touched by the visual range
         gB      reject all unresolved blocks
         gr      reject the current unresolved line (alias)
@@ -256,10 +266,19 @@ Native provider resume:
 
 Disable defaults with:
 >
+	        require("nvime").setup({
+	          keys = { enabled = false },
+	        })
+<
+
+Force re-initialization:
+>
         require("nvime").setup({
-          keys = { enabled = false },
+          force = true,
         })
 <
+        Repeated identical setup() calls are ignored. Use force = true only
+        when you intentionally want to rebuild wrappers, commands, and keymaps.
 
 ==============================================================================
 CONFIGURATION                                              *nvime-configuration*
@@ -319,8 +338,60 @@ Common options:
 <
 
 Default audit path:
-        .nvime/audit.jsonl in the current git root, or
-        stdpath("state")/nvime/audit.jsonl when there is no git root.
+	        .nvime/audit.jsonl in the current git root, or
+	        stdpath("state")/nvime/audit.jsonl when there is no git root.
+
+==============================================================================
+PROTOCOL                                                      *nvime-protocol*
+
+The edit lane accepts exactly one machine-readable response block:
+
+>
+        NVIME_NO_CHANGE
+        <brief explanation>
+
+        NVIME_REPLACEMENT
+        ```
+        <full replacement for the selected range only>
+        ```
+
+        NVIME_DIFF
+        ```diff
+        --- a/path
+        +++ b/path
+        @@ -line,count +line,count @@
+        <minimal changed hunk lines only>
+        ```
+<
+
+Top-level edit rules from the prompt contract:
+        - You are a constrained patch worker, not a reviewer.
+        - Return exactly one machine-readable response block.
+        - You may only propose changes for the selected range in the current
+          file.
+        - Do not edit files directly.
+        - Prefer NVIME_DIFF for any change to existing nonblank text.
+        - NVIME_DIFF must include --- a/path, +++ b/path, and ranged @@
+          headers.
+
+Top-level perf rules from the prompt contract:
+        - Focus on computational cost and scalability.
+        - If you cannot prove a real win with numbers, return
+          NVIME_NO_CHANGE.
+        - Use Bash scratch files under /tmp and never write inside the user's
+          repository.
+        - Only produce NVIME_DIFF when the candidate is correct and faster.
+        - Perf mode may emit one BENCH line before the NVIME_* marker.
+
+NVIME_DIFF should include current-file headers and ranged hunk headers. If a
+diff body is missing ranged headers, nvime tries to anchor the old lines inside
+the selected range and rebuild a current-file hunk. If that anchor fails, no
+patch opens. Question-shaped edit intents such as "review", "verify",
+"nitpick", or "does this look right?" are routed to |:NvimeAsk| unless they also
+include an explicit patch verb such as "fix", "add", "remove", "replace",
+"implement", or "update".
+
+The full protocol is documented in PROTOCOL.md at the repository root.
 
 ==============================================================================
 POLICY                                                            *nvime-policy*

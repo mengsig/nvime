@@ -33,5 +33,4 @@ doc/tags
 *.swn
 REVIEW.md
 scripts/screenshot-ui
-IMPROVEMENTS.md
 bench/

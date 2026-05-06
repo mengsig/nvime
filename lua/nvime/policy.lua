@@ -9,15 +9,17 @@ local blocked_bins = {
 }
 
 local dangerous_patterns = {
-  "%-%-dangerously%-skip%-permissions",
-  "%-%-allow%-dangerously%-skip%-permissions",
-  "%-%-permission%-mode%s+bypassPermissions",
-  "%-%-permission%-mode=bypassPermissions",
-  "%-%-dangerously%-bypass%-approvals%-and%-sandbox",
-  "%-%-sandbox%s+danger%-full%-access",
-  "%-%-sandbox=danger%-full%-access",
-  "%-s%s+danger%-full%-access",
+  "%-%-dangerously%-skip%-permissions%f[^%w_-]",
+  "%-%-allow%-dangerously%-skip%-permissions%f[^%w_-]",
+  "%-%-permission%-mode%s+bypassPermissions%f[^%w_-]",
+  "%-%-permission%-mode=bypassPermissions%f[^%w_-]",
+  "%-%-dangerously%-bypass%-approvals%-and%-sandbox%f[^%w_-]",
+  "%-%-sandbox%s+danger%-full%-access%f[^%w_-]",
+  "%-%-sandbox=danger%-full%-access%f[^%w_-]",
+  "%-s%s+danger%-full%-access%f[^%w_-]",
 }
+
+M._dangerous_patterns = dangerous_patterns
 
 local function flatten(cmd)
   if type(cmd) == "string" then
@@ -353,6 +355,33 @@ function M.install()
   install_terminal_detector()
 
   state.guard_installed = true
+end
+
+function M.restore()
+  if state.raw.vim_system then
+    vim.system = state.raw.vim_system
+  end
+  if state.raw.jobstart then
+    vim.fn.jobstart = state.raw.jobstart
+  end
+  if state.raw.termopen then
+    vim.fn.termopen = state.raw.termopen
+  end
+  if state.raw.system then
+    vim.fn.system = state.raw.system
+  end
+  if state.raw.systemlist then
+    vim.fn.systemlist = state.raw.systemlist
+  end
+  if state.raw.uv_spawn then
+    local uv = vim.uv or vim.loop
+    if uv then
+      uv.spawn = state.raw.uv_spawn
+    end
+  end
+  pcall(vim.api.nvim_del_augroup_by_name, "NvimeGuard")
+  state.raw = {}
+  state.guard_installed = false
 end
 
 return M

@@ -45,6 +45,12 @@ local function sessions_path()
 	return vim.fn.stdpath("state") .. "/nvime/chat-sessions.json"
 end
 
+local function notify_persist_error(err)
+	vim.schedule(function()
+		vim.notify("nvime could not persist chat sessions: " .. tostring(err), vim.log.levels.WARN)
+	end)
+end
+
 local function now()
 	return os.time()
 end
@@ -94,18 +100,34 @@ local function save_sessions_now()
 	vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
 	local fd, err = io.open(path, "w")
 	if not fd then
-		vim.schedule(function()
-			vim.notify("nvime could not persist chat sessions: " .. tostring(err), vim.log.levels.WARN)
-		end)
+		notify_persist_error(err)
 		return
 	end
-	fd:write(vim.json.encode({
-		version = 1,
-		next_session_id = state.chat.next_session_id or 1,
-		sessions = out,
-	}))
-	fd:write("\n")
-	fd:close()
+	local ok, write_err = pcall(function()
+		local encoded = vim.json.encode({
+			version = 1,
+			next_session_id = state.chat.next_session_id or 1,
+			sessions = out,
+		})
+		local wrote, err1 = fd:write(encoded)
+		if not wrote then
+			error(err1 or "write failed")
+		end
+		wrote, err1 = fd:write("\n")
+		if not wrote then
+			error(err1 or "write failed")
+		end
+	end)
+	local close_ok, closed, close_err = pcall(function()
+		return fd:close()
+	end)
+	if not ok then
+		notify_persist_error(write_err)
+	elseif not close_ok then
+		notify_persist_error(closed)
+	elseif not closed then
+		notify_persist_error(close_err)
+	end
 end
 
 local function schedule_save_sessions()

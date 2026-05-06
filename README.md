@@ -16,6 +16,8 @@ This is an editor discipline tool, not a security sandbox. It prevents accidenta
 
 ## Install
 
+Requires Neovim 0.10 or newer.
+
 Use any Neovim package manager that can load this repository. With lazy.nvim:
 
 ```lua
@@ -39,6 +41,9 @@ With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you.
 If the plugin is loaded directly from `runtimepath`, `plugin/nvime.lua`
 registers the defaults. Call `require("nvime").setup({ ... })` only when you
 want to override them.
+Repeated identical `setup()` calls are ignored. Use
+`force = true` in the setup opts when you intentionally want to re-initialize
+wrappers, commands, and keymaps.
 
 ## Configuration
 
@@ -176,6 +181,8 @@ require("nvime").setup({
 - `:NvimeEdit [claude|codex] <intent>` uses the Tree-sitter function at the cursor.
 - `:NvimeProvider [claude|codex]` shows or changes the default provider.
 - `:NvimeAccept` accepts the current inline diff block.
+- `:NvimeAccept!` force-accepts the current inline diff block when the live
+  target text no longer matches the hunk nvime reviewed.
 - `:NvimeReject` rejects the current inline diff block.
 - `:NvimeDiff` opens the active diff in a two-pane review workspace.
 - `:NvimeAudit` opens `.nvime/audit.jsonl`.
@@ -324,6 +331,8 @@ Inline diff mappings in the target file:
 - `ga`: accept the current visual change block
 - visual `ga`: accept every unresolved changed line touched by the visual range
 - `gA`: accept all unresolved blocks
+- `gA!`: force-accept all unresolved blocks, bypassing live-content conflict
+  checks and writing a `block_force_applied` audit event
 - `gb`: reject the current visual change block
 - visual `gb`: reject every unresolved changed line touched by the visual range
 - `gB`: reject all unresolved blocks
@@ -334,6 +343,11 @@ the right pane is the live source buffer with inline diff overlays. The right
 pane stays normally editable; the proposed pane maps `e` to jump back to the
 editable file and `r` to refresh. `q` closes the workspace from either pane and
 returns to the tab you came from.
+
+Before applying a hunk, nvime compares the live target lines with the original
+lines in the reviewed patch. If they differ, the block is marked as a conflict
+instead of silently overwriting intervening edits. Use `:NvimeAccept!` or `gA!`
+only when you intentionally want to overwrite that live text.
 
 Reject-only aliases are also installed: `gr` rejects the current line change,
 visual `gr` rejects selected line changes, `gR` rejects all, and `gX` rejects the current visual change block.
@@ -397,6 +411,9 @@ codex exec --json --ephemeral --ignore-user-config --ignore-rules \
 `nvime` never uses Claude/Codex bypass flags by default.
 When `review.allow_markdown_writes = false`, Codex review/docs mode uses
 `-s read-only` instead.
+
+The edit-lane response protocol is documented in [PROTOCOL.md](PROTOCOL.md).
+In help, see `:help nvime-protocol`.
 
 
 ## Guardrails

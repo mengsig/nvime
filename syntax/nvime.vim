@@ -32,5 +32,6 @@ highlight default link NvimeCodeFence PreProc
 highlight default link NvimeDiffAdd DiffAdd
 highlight default link NvimeDiffDelete DiffDelete
 highlight default link NvimeDiffHunk DiffChange
+highlight default link NvimeConflict WarningMsg
 
 let b:current_syntax = "nvime"

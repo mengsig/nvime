@@ -1,3 +1,4 @@
+local audit = require("nvime.audit")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
 
@@ -245,6 +246,10 @@ local function copy_lines(lines)
     out[#out + 1] = line
   end
   return out
+end
+
+local function is_unresolved(block)
+  return block and (block.status == "pending" or block.status == "conflict")
 end
 
 local function extract_unified(text)
@@ -569,16 +574,20 @@ local function group_summary(group)
   local id_text = first_id == last_id and tostring(first_id) or (first_id .. "-" .. last_id)
   local old_total = 0
   local new_total = 0
+  local has_conflict = false
   for _, block in ipairs(group.blocks) do
     old_total = old_total + block.old_count
     new_total = new_total + #block.new_lines
+    has_conflict = has_conflict or block.status == "conflict"
   end
-  local range_text = group.first == group.last and ("line " .. group.first) or ("lines " .. group.first .. "-" .. group.last)
+  local range_text = group.first == group.last and ("line " .. group.first)
+    or ("lines " .. group.first .. "-" .. group.last)
   local segment = ""
   if group.index and group.total and group.total > 1 then
     segment = string.format("block %d/%d  ", group.index, group.total)
   end
-  return string.format("nvime %schange %s  %s  -%d +%d", segment, id_text, range_text, old_total, new_total)
+  local kind = has_conflict and "conflict" or "change"
+  return string.format("nvime %s%s %s  %s  -%d +%d", segment, kind, id_text, range_text, old_total, new_total)
 end
 
 local function parse_hunk_blocks(hunk, next_id)
@@ -664,6 +673,7 @@ local function update_hunk_status(hunk)
   local pending = 0
   local accepted = 0
   local rejected = 0
+  local conflict = 0
   for _, block in ipairs(hunk.blocks or {}) do
     if block.status == "pending" then
       pending = pending + 1
@@ -671,9 +681,13 @@ local function update_hunk_status(hunk)
       accepted = accepted + 1
     elseif block.status == "rejected" then
       rejected = rejected + 1
+    elseif block.status == "conflict" then
+      conflict = conflict + 1
     end
   end
-  if pending > 0 then
+  if conflict > 0 then
+    hunk.status = "conflict"
+  elseif pending > 0 then
     hunk.status = "pending"
   elseif accepted > 0 and rejected > 0 then
     hunk.status = "mixed"
@@ -778,6 +792,9 @@ local function install_buffer_maps(session)
   vim.keymap.set("n", "gA", function()
     require("nvime.diff").accept_all()
   end, opts)
+  vim.keymap.set("n", "gA!", function()
+    require("nvime.diff").accept_all({ force = true })
+  end, opts)
   vim.keymap.set("n", "gB", function()
     require("nvime.diff").reject_all()
   end, opts)
@@ -847,7 +864,7 @@ local function pending_visual_groups(session)
   local current = nil
   local blocks = {}
   for _, block in ipairs(session.blocks or {}) do
-    if block.status == "pending" then
+    if is_unresolved(block) then
       blocks[#blocks + 1] = block
     end
   end
@@ -865,8 +882,7 @@ local function pending_visual_groups(session)
     local size = block_visual_size(block)
     local max_size = max_visual_block_lines()
     local soft_size = math.max(4, math.floor(max_size * 0.65))
-    local starts_new =
-      not current
+    local starts_new = not current
       or block.hunk ~= current.hunk
       or first > current.last + 1
       or current.size >= max_size
@@ -907,6 +923,7 @@ local function count_block_statuses(session)
     pending = 0,
     accepted = 0,
     rejected = 0,
+    conflict = 0,
     mixed = 0,
     total = 0,
   }
@@ -1012,8 +1029,12 @@ local function set_review_winbar(winid, label, session)
   if session and session.warnings and #session.warnings > 0 then
     warn = "  " .. ui.icon("warning") .. " truncation suspected"
   end
+  local conflict = ""
+  if (counts.conflict or 0) > 0 then
+    conflict = string.format("  %s %d", ui.icon("warning"), counts.conflict)
+  end
   vim.wo[winid].winbar = string.format(
-    " nvime.nvim  %s  %s  %s %d  %s %d  %s %d %s",
+    " nvime.nvim  %s  %s  %s %d  %s %d  %s %d%s %s",
     label,
     file,
     ui.icon("pending"),
@@ -1022,6 +1043,7 @@ local function set_review_winbar(winid, label, session)
     counts.accepted or 0,
     ui.icon("error"),
     counts.rejected or 0,
+    conflict,
     warn
   )
 end
@@ -1119,6 +1141,9 @@ local function install_review_maps(bufnr)
   vim.keymap.set("n", "gA", function()
     require("nvime.diff").accept_all()
   end, opts)
+  vim.keymap.set("n", "gA!", function()
+    require("nvime.diff").accept_all({ force = true })
+  end, opts)
   vim.keymap.set("n", "gB", function()
     require("nvime.diff").reject_all()
   end, opts)
@@ -1156,12 +1181,14 @@ local function render_visual_group(session, group)
   virt_lines[#virt_lines + 1] = { { clip_review_text(session, group_summary(group)), "NvimeDiffHunk" } }
   virt_lines[#virt_lines + 1] = {
     {
-      clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gc discuss  q close"),
+      clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gA! force all  gc discuss  q close"),
       "NvimeMuted",
     },
   }
 
+  local has_conflict = false
   for _, block in ipairs(group.blocks) do
+    has_conflict = has_conflict or block.status == "conflict"
     for _, line in ipairs(block.new_lines) do
       new_lines[#new_lines + 1] = line
     end
@@ -1169,15 +1196,30 @@ local function render_visual_group(session, group)
       has_old_lines = true
       local block_line = block_start_line(session, block)
       for i = 0, block.old_count - 1 do
-        old_line_rows[#old_line_rows + 1] = block_line + i
+        old_line_rows[#old_line_rows + 1] = {
+          line = block_line + i,
+          hl = block.status == "conflict" and "NvimeConflict" or "NvimeDiffDelete",
+        }
       end
     end
   end
 
+  if has_conflict then
+    virt_lines[#virt_lines + 1] = {
+      {
+        clip_review_text(
+          session,
+          "  " .. ui.icon("warning") .. " conflict: live text changed; use :NvimeAccept! or gA! to force"
+        ),
+        "NvimeConflict",
+      },
+    }
+  end
   if #new_lines > 0 then
     virt_lines[#virt_lines + 1] = { { "  proposed", "NvimeMuted" } }
   else
-    virt_lines[#virt_lines + 1] = { { clip_review_text(session, "  proposed: remove highlighted line(s)"), "NvimeMuted" } }
+    virt_lines[#virt_lines + 1] =
+      { { clip_review_text(session, "  proposed: remove highlighted line(s)"), "NvimeMuted" } }
   end
   for _, line in ipairs(new_lines) do
     virt_lines[#virt_lines + 1] = { { clip_review_text(session, "+ " .. line), "NvimeDiffAdd" } }
@@ -1188,11 +1230,11 @@ local function render_visual_group(session, group)
     virt_lines[#virt_lines + 1] = { { "  insertion point below", "NvimeMuted" } }
   end
 
-  for _, line in ipairs(old_line_rows) do
-    local row = line - 1
+  for _, item in ipairs(old_line_rows) do
+    local row = item.line - 1
     if row >= 0 and row < count then
       vim.api.nvim_buf_set_extmark(session.target_bufnr, ns, row, 0, {
-        line_hl_group = "NvimeDiffDelete",
+        line_hl_group = item.hl,
       })
     end
   end
@@ -1231,7 +1273,7 @@ local function render_session(session, opts)
 
   local pending = 0
   for _, block in ipairs(session.blocks) do
-    if block.status == "pending" then
+    if is_unresolved(block) then
       pending = pending + 1
     end
   end
@@ -1268,7 +1310,8 @@ local function build_single_hunk(selection, replacement_text)
   end
 
   local suffix = 0
-  while suffix < (#original - prefix)
+  while
+    suffix < (#original - prefix)
     and suffix < (#replacement - prefix)
     and original[#original - suffix] == replacement[#replacement - suffix]
   do
@@ -1564,7 +1607,7 @@ end
 local function pending_blocks(session)
   local blocks = {}
   for _, block in ipairs(session.blocks or {}) do
-    if block.status == "pending" then
+    if is_unresolved(block) then
       blocks[#blocks + 1] = block
     end
   end
@@ -1627,22 +1670,65 @@ local function current_group(session)
   return nil
 end
 
-local function apply_block(session, block, start_line_override)
-  if not block or block.status ~= "pending" then
+local function mark_conflict(session, block, start_index, end_index, live_lines)
+  block.status = "conflict"
+  block.conflict = {
+    start_line = start_index + 1,
+    expected = copy_lines(block.old_lines),
+    actual = copy_lines(live_lines),
+  }
+  update_hunk_status(block.hunk)
+  audit.write({
+    event = "block_conflict",
+    file = session.file,
+    block_id = block.id,
+    start_line = start_index + 1,
+    end_line = end_index,
+  })
+  vim.notify("nvime diff conflict: live text changed; use :NvimeAccept! or gA! to force", vim.log.levels.WARN)
+end
+
+local function live_block_matches(session, block, start_index, end_index)
+  if
+    session.original_changedtick
+    and vim.api.nvim_buf_get_changedtick(session.target_bufnr) == session.original_changedtick
+  then
+    return true
+  end
+  local live_lines = vim.api.nvim_buf_get_lines(session.target_bufnr, start_index, end_index, false)
+  if same_lines(live_lines, block.old_lines or {}) then
+    return true
+  end
+  return false, live_lines
+end
+
+local function apply_block(session, block, start_line_override, opts)
+  opts = opts or {}
+  if not block or (block.status ~= "pending" and not (opts.force and block.status == "conflict")) then
     return 0
   end
   local replacement = block.new_lines
   local start_line = start_line_override or block_start_line(session, block)
   local start_index = math.max(0, math.min(start_line - 1, target_line_count(session)))
   local end_index = math.max(start_index, math.min(start_index + block.old_count, target_line_count(session)))
-  vim.api.nvim_buf_set_lines(
-    session.target_bufnr,
-    start_index,
-    end_index,
-    false,
-    replacement
-  )
+  if not opts.force then
+    local matches, live_lines = live_block_matches(session, block, start_index, end_index)
+    if not matches then
+      mark_conflict(session, block, start_index, end_index, live_lines)
+      return 0
+    end
+  else
+    audit.write({
+      event = "block_force_applied",
+      file = session.file,
+      block_id = block.id,
+      start_line = start_index + 1,
+      end_line = end_index,
+    })
+  end
+  vim.api.nvim_buf_set_lines(session.target_bufnr, start_index, end_index, false, replacement)
   block.status = "accepted"
+  block.conflict = nil
   session.applied[#session.applied + 1] = {
     old_start = block.old_start,
     delta = #block.new_lines - block.old_count,
@@ -1652,13 +1738,15 @@ local function apply_block(session, block, start_line_override)
 end
 
 local function reject_block(block)
-  if block and block.status == "pending" then
+  if is_unresolved(block) then
     block.status = "rejected"
+    block.conflict = nil
     update_hunk_status(block.hunk)
   end
 end
 
-function M.accept_blocks(blocks)
+function M.accept_blocks(blocks, opts)
+  opts = opts or {}
   local session = state.current_diff
   if not session then
     vim.notify("No active nvime diff session", vim.log.levels.WARN)
@@ -1671,7 +1759,7 @@ function M.accept_blocks(blocks)
 
   local plan = {}
   for _, block in ipairs(blocks) do
-    if block and block.status == "pending" then
+    if block and (block.status == "pending" or (opts.force and block.status == "conflict")) then
       plan[#plan + 1] = {
         block = block,
         start_line = block_start_line(session, block),
@@ -1686,7 +1774,7 @@ function M.accept_blocks(blocks)
   end)
   local offset = 0
   for _, item in ipairs(plan) do
-    offset = offset + apply_block(session, item.block, item.start_line + offset)
+    offset = offset + apply_block(session, item.block, item.start_line + offset, opts)
   end
   render_session(session)
 end
@@ -1708,7 +1796,7 @@ function M.reject_blocks(blocks)
   render_session(session)
 end
 
-function M.accept_hunks(hunks)
+function M.accept_hunks(hunks, opts)
   local session = state.current_diff
   if not session then
     vim.notify("No active nvime diff session", vim.log.levels.WARN)
@@ -1722,12 +1810,12 @@ function M.accept_hunks(hunks)
   local blocks = {}
   for _, hunk in ipairs(hunks) do
     for _, block in ipairs(hunk.blocks or {}) do
-      if block.status == "pending" then
+      if is_unresolved(block) then
         blocks[#blocks + 1] = block
       end
     end
   end
-  M.accept_blocks(blocks)
+  M.accept_blocks(blocks, opts)
 end
 
 function M.reject_hunks(hunks)
@@ -1780,7 +1868,7 @@ function M.reject_selection()
   M.reject_blocks(blocks_in_range(session, first, last))
 end
 
-function M.accept_current_group()
+function M.accept_current_group(opts)
   local session = state.current_diff
   if not session then
     return
@@ -1790,7 +1878,7 @@ function M.accept_current_group()
     vim.notify("No pending nvime change block selected", vim.log.levels.WARN)
     return
   end
-  M.accept_blocks(group.blocks)
+  M.accept_blocks(group.blocks, opts)
 end
 
 function M.reject_current_group()
@@ -1806,12 +1894,13 @@ function M.reject_current_group()
   M.reject_blocks(group.blocks)
 end
 
-function M.accept_all()
+function M.accept_all(opts)
+  opts = opts or {}
   local session = state.current_diff
   if not session then
     return
   end
-  if session.warnings and #session.warnings > 0 and not session.warnings_overridden then
+  if session.warnings and #session.warnings > 0 and not session.warnings_overridden and not opts.force then
     local choice = vim.fn.confirm(
       "nvime diff has truncation warnings:\n  - "
         .. table.concat(session.warnings, "\n  - ")
@@ -1825,7 +1914,7 @@ function M.accept_all()
     end
     session.warnings_overridden = true
   end
-  M.accept_blocks(pending_blocks(session))
+  M.accept_blocks(pending_blocks(session), opts)
 end
 
 function M.reject_all()
@@ -1929,12 +2018,7 @@ local function block_state_lines(label, blocks)
     return lines
   end
   for _, block in ipairs(blocks) do
-    lines[#lines + 1] = string.format(
-      "line %d (%s) at original line %d:",
-      block.id,
-      block.status,
-      block.old_start
-    )
+    lines[#lines + 1] = string.format("line %d (%s) at original line %d:", block.id, block.status, block.old_start)
     lines[#lines + 1] = "```diff"
     for _, line in ipairs(block.old_lines) do
       lines[#lines + 1] = "-" .. line

@@ -49,6 +49,16 @@ assert(vim.fn.maparg("<leader>nq", "n") == "<Cmd>NvimeChats ask<CR>", "default n
 assert(vim.fn.maparg("<leader>nn", "n") ~= "", "default normal last-session keymap exists")
 assert(vim.fn.maparg("<leader>np", "n") ~= "", "default provider keymap exists")
 assert(vim.fn.maparg("<leader>nv", "n") ~= "", "default diff review keymap exists")
+;(function()
+  local state = require("nvime.state")
+  vim.keymap.set("n", "<leader>nc", "<Cmd>let g:nvime_user_chat_map = 1<CR>", { silent = true })
+  require("nvime").setup(state.config)
+  assert_eq(vim.fn.maparg("<leader>nc", "n"), "<Cmd>let g:nvime_user_chat_map = 1<CR>", "identical setup does not clobber user maps")
+  local forced_config = vim.deepcopy(state.config)
+  forced_config.force = true
+  require("nvime").setup(forced_config)
+  assert_eq(vim.fn.maparg("<leader>nc", "n"), "<Cmd>NvimeChat<CR>", "force setup re-installs nvime maps")
+end)()
 assert_eq(require("nvime.progress").compact("[claude] tool: Bash: rg README"), "claude Bash", "claude progress footer keeps tool name")
 assert_eq(
   require("nvime.progress").compact([[[codex] tool: /usr/bin/zsh -lc "sed -n '1,260p' README.md"]]),
@@ -1208,11 +1218,69 @@ assert(
 require("nvime.diff").reject_all()
 require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 
-local blocked_job = vim.fn.jobstart({ fake_claude, "-p", "should be blocked" })
-assert_eq(blocked_job, -1, "direct jobstart block")
+;(function()
+  local policy = require("nvime.policy")
+  local copied_claude = tmp .. "/clyde"
+  vim.fn.writefile(vim.fn.readfile(fake_claude), copied_claude)
+  vim.fn.setfperm(copied_claude, "rwxr-xr-x")
+  local detect_cases = {
+    { { fake_claude, "-p", "hi" }, "path command" },
+    { "./claude -p hi", "relative path command" },
+    { "/tmp/bin/claude -p hi", "absolute path command" },
+    { "~/bin/claude -p hi", "home path command" },
+    { "bash -c 'claude --dangerously-skip-permissions'", "quoted shell command" },
+    { "env CLAUDE_API_KEY=x claude -p hi", "env wrapper command" },
+    { "printf x | xargs claude", "xargs indirection command" },
+    { 'vim.fn.execute("!claude -p hi")', "execute bang command" },
+    { ":silent !claude -p hi", "silent bang command" },
+  }
+  for _, case in ipairs(detect_cases) do
+    assert(policy.detect(case[1]), "policy detects " .. case[2])
+  end
+  assert(policy.detect({ copied_claude, "-p", "hi" }) == nil, "renamed binaries remain a documented guard limitation")
 
-local blocked_system = vim.system({ fake_claude, "-p", "should be blocked" }):wait()
-assert_eq(blocked_system.code, 126, "direct vim.system block")
+  local dangerous_cases = {
+    { "--dangerously-skip-permissions", "--dangerously-skip-permissions-extra" },
+    { "--allow-dangerously-skip-permissions", "--allow-dangerously-skip-permissions-extra" },
+    { "--permission-mode bypassPermissions", "--permission-mode bypassPermissionss" },
+    { "--permission-mode=bypassPermissions", "--permission-mode=bypassPermissionss" },
+    { "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-approvals-and-sandboxed" },
+    { "--sandbox danger-full-access", "--sandbox danger-full-accessory" },
+    { "--sandbox=danger-full-access", "--sandbox=danger-full-accessory" },
+    { "-s danger-full-access", "-s danger-full-accessory" },
+  }
+  for _, case in ipairs(dangerous_cases) do
+    local detected = policy.detect("claude " .. case[1])
+    assert(detected and detected.dangerous, "policy flags dangerous arg: " .. case[1])
+    local near = policy.detect("claude " .. case[2])
+    assert(near and not near.dangerous, "policy does not flag near miss: " .. case[2])
+  end
+
+  local blocked_job = vim.fn.jobstart({ fake_claude, "-p", "should be blocked" })
+  assert_eq(blocked_job, -1, "direct jobstart block")
+
+  local blocked_system = vim.system({ fake_claude, "-p", "should be blocked" }):wait()
+  assert_eq(blocked_system.code, 126, "direct vim.system block")
+
+  local blocked_termopen = vim.fn.termopen({ fake_claude, "-p", "should be blocked" })
+  assert_eq(blocked_termopen, -1, "direct termopen block")
+
+  local blocked_fn_system = vim.fn.system({ fake_claude, "-p", "should be blocked" })
+  assert(blocked_fn_system:find("nvime blocked command", 1, true), "direct system block")
+
+  local blocked_fn_systemlist = vim.fn.systemlist({ fake_claude, "-p", "should be blocked" })
+  assert(blocked_fn_systemlist[1]:find("nvime blocked command", 1, true), "direct systemlist block")
+
+  local uv = vim.uv or vim.loop
+  local uv_handle, uv_err, uv_name = uv.spawn(fake_claude, { args = { "-p", "should be blocked" } }, function() end)
+  assert(uv_handle == nil and tostring(uv_err):find("nvime blocked command", 1, true) and uv_name == "EPERM", "direct uv.spawn block")
+
+  local term_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(term_buf, "term://claude -p should-be-blocked")
+  vim.api.nvim_exec_autocmds("TermOpen", { buffer = term_buf })
+  local term_audit = table.concat(vim.fn.readfile(audit_path), "\n")
+  assert(term_audit:find('"surface":"terminal"', 1, true), "TermOpen detector records blocked terminal")
+end)()
 
 vim.cmd.edit(tmp .. "/sample.lua")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
@@ -1394,6 +1462,36 @@ local audit = table.concat(vim.fn.readfile(audit_path), "\n")
 assert(audit:find('"event":"blocked"', 1, true), "audit records blocked direct invocation")
 assert(audit:find('"event":"agent_start"', 1, true), "audit records trusted agent start")
 assert(audit:find('"event":"agent_exit"', 1, true), "audit records trusted agent exit")
+
+;(function()
+  local state = require("nvime.state")
+  local audit_mod = require("nvime.audit")
+  state.config.audit.log_prompts = false
+  audit_mod.write({
+    event = "redaction_fixture",
+    tool = fake_claude,
+    argv = fake_claude .. " -p secret prompt text --output-format stream-json",
+    prompt = "secret prompt text",
+    input = "secret stdin text",
+    response = "secret response text",
+  })
+  state.config.audit.log_prompts = true
+  local redacted = table.concat(vim.fn.readfile(audit_path), "\n")
+  assert(redacted:find('"event":"redaction_fixture"', 1, true), "audit redaction fixture is written")
+  assert(not redacted:find("secret prompt text", 1, true), "audit redacts prompt text")
+  assert(not redacted:find("secret stdin text", 1, true), "audit redacts input text")
+  assert(not redacted:find("secret response text", 1, true), "audit redacts response text")
+  assert(redacted:find("%[redacted%]"), "audit redacts provider argv when prompt logging is off")
+
+  local old_path = state.config.audit.path
+  state.config.audit.path = tmp
+  local ok, write_err = pcall(audit_mod.write, { event = "unwritable_fixture" })
+  assert(ok, "audit write failure does not throw: " .. tostring(write_err))
+  assert(state.audit_write_disabled == true, "audit disables further writes after an unwritable path")
+  state.audit_write_disabled = false
+  state.audit_write_warned = false
+  state.config.audit.path = old_path
+end)()
 
 local ok, err = pcall(require("nvime.diff").start_session, {
   bufnr = target,
@@ -1744,6 +1842,48 @@ assert(vim.wait(1000, function()
   local accept_all_lines = vim.api.nvim_buf_get_lines(accept_all_target, 0, -1, false)
   return table.concat(accept_all_lines, "\n") == "LEFT\nmiddle\nRIGHT"
 end, 20), "normal gA accepts all unresolved blocks")
+assert(vim.fn.maparg("gA!", "n") ~= "", "force accept-all mapping is installed")
+
+do
+  vim.cmd.edit(tmp .. "/conflict.lua")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+    "one",
+    "two",
+  })
+  local conflict_target = vim.api.nvim_get_current_buf()
+  local conflict_result = require("nvime.diff").start_session({
+    bufnr = conflict_target,
+    line1 = 1,
+    line2 = 2,
+    path = "conflict.lua",
+    source = "test",
+  }, "--- a/conflict.lua\n+++ b/conflict.lua\n@@ -1,2 +1,2 @@\n-one\n+ONE\n two", "claude", "")
+  vim.api.nvim_buf_set_lines(conflict_target, 0, 1, false, { "manual one" })
+  require("nvime.diff").accept_all()
+  assert_eq(conflict_result.session.blocks[1].status, "conflict", "drifted live text marks the block conflicted")
+  assert_eq(
+    vim.api.nvim_buf_get_lines(conflict_target, 0, 1, false)[1],
+    "manual one",
+    "normal accept refuses to overwrite drifted live text"
+  )
+  local saw_conflict_hl = false
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(conflict_target, vim.api.nvim_create_namespace("nvime.diff.inline"), 0, -1, {
+    details = true,
+  })) do
+    local details = mark[4] or {}
+    saw_conflict_hl = saw_conflict_hl or details.line_hl_group == "NvimeConflict"
+  end
+  assert(saw_conflict_hl, "conflicted blocks render with a distinct highlight")
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.cmd("NvimeAccept!")
+  assert_eq(
+    vim.api.nvim_buf_get_lines(conflict_target, 0, 1, false)[1],
+    "ONE",
+    "NvimeAccept! force applies a conflicted block"
+  )
+  local conflict_audit = table.concat(vim.fn.readfile(audit_path), "\n")
+  assert(conflict_audit:find('"event":"block_force_applied"', 1, true), "force accept is audited")
+end
 
 vim.cmd.edit(tmp .. "/deny.lua")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {

@@ -174,7 +174,31 @@ local function command_opts(args)
 end
 
 function M.setup(opts)
-  state.config = config.resolve(opts or state.config or {})
+  if vim.fn.has("nvim-0.10") == 0 then
+    vim.notify("nvime requires Neovim 0.10+", vim.log.levels.ERROR)
+    return
+  end
+
+  local user_opts = opts
+  opts = opts or {}
+  local force = opts.force == true
+  if force then
+    opts = vim.deepcopy(opts)
+    opts.force = nil
+  end
+
+  local resolved = config.resolve(user_opts == nil and (state.config or {}) or opts)
+  local setup_signature = vim.inspect(resolved)
+  if state.setup_done and not force and state.setup_signature == setup_signature then
+    return
+  end
+
+  if force or (state.guard_installed and resolved.guard and resolved.guard.enabled == false) then
+    policy.restore()
+  end
+
+  state.config = resolved
+  state.setup_signature = setup_signature
 
   if state.config.guard.enabled then
     policy.install()
@@ -202,9 +226,9 @@ function M.setup(opts)
   })
 
   vim.api.nvim_create_user_command("NvimeAsk", function(args)
-    local opts = command_opts(args)
-    opts.question = opts.prompt
-    require("nvime.ask").start(opts)
+    local command = command_opts(args)
+    command.question = command.prompt
+    require("nvime.ask").start(command)
   end, {
     nargs = "*",
     range = true,
@@ -249,9 +273,12 @@ function M.setup(opts)
     desc = "Open the nvime audit log",
   })
 
-  vim.api.nvim_create_user_command("NvimeAccept", function()
-    require("nvime.diff").accept_current_group()
+  vim.api.nvim_create_user_command("NvimeAccept", function(args)
+    require("nvime.diff").accept_current_group({
+      force = args.bang,
+    })
   end, {
+    bang = true,
     desc = "Accept the current nvime inline diff block",
   })
 
