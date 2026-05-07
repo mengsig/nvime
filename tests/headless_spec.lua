@@ -1632,7 +1632,11 @@ assert(
   "edit prompt uses a strict machine-readable patch contract"
 )
 assert(
-  require("nvime.state").selection.last_edit_prompt:find("ONLY prose allowed before the block is a single `RATIONALE:`", 1, true),
+  require("nvime.state").selection.last_edit_prompt:find(
+    "ONLY prose allowed before the block is a single `RATIONALE:`",
+    1,
+    true
+  ),
   "edit prompt allows exactly one RATIONALE line and forbids any other prose"
 )
 assert(
@@ -2424,13 +2428,18 @@ do
   require("nvime.diff").reject_all()
 
   -- NVIME_NO_CHANGE response also carries a rationale field
-  local no_change_result = require("nvime.diff").start_session({
-    bufnr = target,
-    line1 = 1,
-    line2 = 3,
-    path = "rationale.lua",
-    source = "test",
-  }, "RATIONALE: bug: none; patch: none; why: code already correct.\nNVIME_NO_CHANGE\nalready handles this", "claude", "")
+  local no_change_result = require("nvime.diff").start_session(
+    {
+      bufnr = target,
+      line1 = 1,
+      line2 = 3,
+      path = "rationale.lua",
+      source = "test",
+    },
+    "RATIONALE: bug: none; patch: none; why: code already correct.\nNVIME_NO_CHANGE\nalready handles this",
+    "claude",
+    ""
+  )
   assert_eq(no_change_result.status, "no_change", "no_change still recognized after rationale")
   assert(
     no_change_result.rationale and no_change_result.rationale:find("already correct", 1, true),
@@ -2585,10 +2594,7 @@ end
   }
   for _, c in ipairs(lenient_cases) do
     local v = critic._parse_verdict(c[1])
-    assert(
-      v and v.decision == c[2],
-      "critic parser fails on: " .. vim.inspect(c[1]) .. " → got " .. vim.inspect(v)
-    )
+    assert(v and v.decision == c[2], "critic parser fails on: " .. vim.inspect(c[1]) .. " → got " .. vim.inspect(v))
   end
   assert(critic._parse_verdict("not a verdict") == nil, "critic: garbage returns nil")
   assert(critic._parse_verdict("APPROVED for landing") == nil, "critic: word boundary stops APPROVED")
@@ -2599,11 +2605,17 @@ end
   vim.api.nvim_buf_set_lines(0, 0, -1, false, { "local x = 1", "local y = 2" })
   local rollback_target = vim.api.nvim_get_current_buf()
   local rollback_result = require("nvime.diff").start_session({
-    bufnr = rollback_target, line1 = 1, line2 = 2, path = "rollback_target.lua", source = "test",
+    bufnr = rollback_target,
+    line1 = 1,
+    line2 = 2,
+    path = "rollback_target.lua",
+    source = "test",
   }, "NVIME_REPLACEMENT\n```lua\nlocal a = 1\nlocal b = 2\n```", "claude", "")
   assert(rollback_result.session, "rollback test: session opened")
   local captured = nil
-  rollback_result.session.on_resolved = function(s) captured = s end
+  rollback_result.session.on_resolved = function(s)
+    captured = s
+  end
   require("nvime.diff").accept_all()
   assert(captured and captured.original_lines, "rollback test: original_lines exposed in summary")
   assert(captured.original_lines[1] == "local x = 1", "rollback test: snapshot preserved")
@@ -2627,10 +2639,12 @@ end
     local nl_dir = tmp .. "/nl-plans"
     vim.fn.mkdir(nl_dir .. "/0099-nl/", "p")
     local nl_data = {
-      version = 1, id = "0099-nl",
+      version = 1,
+      id = "0099-nl",
       title = "Title\nwith newline",
       why = "Multi-line\nwhy",
-      created_at = os.time(), updated_at = os.time(),
+      created_at = os.time(),
+      updated_at = os.time(),
       files_estimated = {},
       acceptance = { { id = 1, text = "Multi-line\nacceptance", status = "pending" } },
       steps = {
@@ -2676,7 +2690,9 @@ end
 
     -- anchor missing AND a useful symbol in the intent: symbol fallback wins
     local big = {}
-    for i = 1, 100 do big[i] = "filler line " .. i end
+    for i = 1, 100 do
+      big[i] = "filler line " .. i
+    end
     big[80] = "  local function mark_conflict(session, block)"
     local sl1, sl2, sn = plan._reanchor_range(big, 30, 40, nil, "Make `mark_conflict`'s audit field consistent.")
     assert(sl1 == 80, "symbol fallback found mark_conflict at line 80")
@@ -2717,14 +2733,25 @@ end
     local stale_dir = tmp .. "/stale-resume-plans"
     vim.fn.mkdir(stale_dir .. "/0001-stale/", "p")
     local stale_data = {
-      version = 1, id = "0001-stale", title = "Stale", why = "test",
-      created_at = os.time(), updated_at = os.time(),
-      files_estimated = {}, acceptance = {},
+      version = 1,
+      id = "0001-stale",
+      title = "Stale",
+      why = "test",
+      created_at = os.time(),
+      updated_at = os.time(),
+      files_estimated = {},
+      acceptance = {},
       provider_sessions = { claude = "stale-session-id" },
       steps = {
-        { id = 1, intent = "Do something", file = "stale_target.lua",
+        {
+          id = 1,
+          intent = "Do something",
+          file = "stale_target.lua",
           range = { line1 = 1, line2 = 3 },
-          depends_on = {}, tests = {}, status = "pending" },
+          depends_on = {},
+          tests = {},
+          status = "pending",
+        },
       },
     }
     local sd = io.open(stale_dir .. "/0001-stale/plan.json", "w")
@@ -2753,7 +2780,9 @@ end
       return { kill = function() end }
     end
 
-    package.loaded["nvime.git"].root = function() return tmp end
+    package.loaded["nvime.git"].root = function()
+      return tmp
+    end
 
     vim.cmd("edit " .. tmp .. "/stale_target.lua")
     plan.execute_step("0001-stale", 1)
@@ -2762,9 +2791,7 @@ end
       state.plan.loaded = false
       state.plan.plans = nil
       local p = plan.get("0001-stale")
-      return p
-        and p.provider_sessions
-        and not p.provider_sessions.claude
+      return p and p.provider_sessions and not p.provider_sessions.claude
     end)
 
     state.plan.loaded = false
@@ -2787,9 +2814,14 @@ end
   local cont_path = plans_dir .. "/0002-continuity/plan.json"
   local cont_fd = io.open(cont_path, "w")
   cont_fd:write(vim.json.encode({
-    version = 1, id = "0002-continuity", title = "Continuity", why = "test",
-    created_at = os.time(), updated_at = os.time(),
-    files_estimated = {}, acceptance = {},
+    version = 1,
+    id = "0002-continuity",
+    title = "Continuity",
+    why = "test",
+    created_at = os.time(),
+    updated_at = os.time(),
+    files_estimated = {},
+    acceptance = {},
     provider_sessions = { claude = "session-from-disk" },
     steps = {},
   }))
