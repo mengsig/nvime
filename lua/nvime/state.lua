@@ -26,6 +26,13 @@ local M = {
     next_session_id = 1,
     sessions = {},
   },
+  plan = {
+    plans = nil,
+    loaded = false,
+    active_id = nil,
+    active_run = nil,
+    last_opened = nil,
+  },
 }
 
 return M

@@ -116,10 +116,22 @@ function M.statusline()
     end
   end
   local total = #chat_sessions + #selection_sessions
-  if running > 0 then
-    return string.format("nvime %d/%d running", running, total)
+  local plan_label = ""
+  local ok_plan, plan = pcall(require, "nvime.plan")
+  if ok_plan then
+    local components = plan.statusline_components()
+    if components and components.total and components.total > 0 then
+      if components.in_progress > 0 then
+        plan_label = string.format(" plans %d⇢", components.in_progress)
+      else
+        plan_label = string.format(" plans %d", components.total)
+      end
+    end
   end
-  return string.format("nvime %d", total)
+  if running > 0 then
+    return string.format("nvime %d/%d running%s", running, total, plan_label)
+  end
+  return string.format("nvime %d%s", total, plan_label)
 end
 
 local function install_keymaps()
@@ -148,6 +160,9 @@ local function install_keymaps()
   end, "nvime open diff review workspace")
   set_keymap("n", prefix .. (normal.last or "n"), M.open_last, "nvime reopen last conversation")
   set_keymap("n", prefix .. (normal.provider or "p"), provider.choose, "nvime choose provider")
+  set_keymap("n", prefix .. (normal.plan or "P"), function()
+    require("nvime.plan").picker()
+  end, "nvime plans")
 
   set_keymap("x", prefix .. (visual.edit or "e"), visual_edit, "nvime edit visual selection")
   set_keymap("x", prefix .. (visual.ask or "q"), visual_ask, "nvime ask about visual selection")
@@ -355,6 +370,23 @@ function M.setup(opts)
     require("nvime.diff").open_view()
   end, {
     desc = "Open the active nvime diff review workspace",
+  })
+
+  vim.api.nvim_create_user_command("NvimePlan", function(args)
+    require("nvime.plan").command(args)
+  end, {
+    nargs = "*",
+    complete = function(arg_lead, line)
+      local items = require("nvime.plan").complete_subcommands(arg_lead, line)
+      local out = {}
+      for _, item in ipairs(items) do
+        if arg_lead == "" or item:find(arg_lead, 1, true) == 1 then
+          out[#out + 1] = item
+        end
+      end
+      return out
+    end,
+    desc = "Open the nvime plan picker, draft a plan, or run a step",
   })
 
   install_keymaps()

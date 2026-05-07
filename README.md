@@ -7,6 +7,7 @@ It is a Neovim Lua plugin for getting real work done with Claude Code and Codex 
 - review/docs lane: broad repo inspection, shell/test output, Markdown docs writes only
 - edit lane: one selected range or Tree-sitter detected function, one current file, written intent required
 - generation lane: selected blank ranges can become new code/text, and selected non-code ranges such as `.gitignore` can be completed
+- plan lane: the agent drafts a structured roadmap (`.nvime/plans/<id>/plan.json` + `plan.md`) that you navigate, execute step-by-step through the existing edit lane, and mark complete — the contract for "agent writes code, but only where you reviewed and approved the architecture"
 - diff review: agent output becomes a current-file inline diff; accepted lines or blocks are applied by `nvime`
 - guardrail lane: direct `claude`/`codex` launches from common Neovim process APIs are blocked and audited
 

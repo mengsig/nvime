@@ -81,6 +81,70 @@ read-only Ask lane before any edit prompt is sent. Examples include prompts with
 "iterate throughout", unless they also contain an explicit patch verb such as
 "fix", "add", "remove", "replace", "implement", or "update".
 
+## NVIME_PLAN
+
+Use this only in the plan author lane. The agent investigates the codebase
+read-only, writes a structured plan file under `.nvime/plans/<plan-id>/`, and
+emits exactly one marker block confirming what was written:
+
+````text
+NVIME_PLAN
+```json
+{ "id": "0001-add-provider-registry", "summary": "...", "step_count": 6, "files_estimated": ["lua/nvime/policy.lua"] }
+```
+````
+
+The marker payload is a confirmation, not the plan body. The plan itself lives
+on disk at `.nvime/plans/<plan-id>/plan.json` plus an optional human-readable
+`.nvime/plans/<plan-id>/plan.md`. nvime synchronizes those files out of the
+agent's temp workspace and refuses to sync anything outside `.nvime/plans/`.
+
+`plan.json` schema (version 1):
+
+```json
+{
+  "version": 1,
+  "id": "0001-add-provider-registry",
+  "title": "Add provider registry",
+  "why": "Reduces hardcoded \"claude\"/\"codex\" branches across 7 callsites.",
+  "created_at": 1735000000,
+  "files_estimated": ["lua/nvime/providers/claude.lua", "lua/nvime/policy.lua"],
+  "acceptance": [
+    { "id": 1, "text": "scripts/test passes", "status": "pending" }
+  ],
+  "steps": [
+    {
+      "id": 1,
+      "intent": "Extract claude adapter to lua/nvime/providers/claude.lua",
+      "file": "lua/nvime/providers/claude.lua",
+      "range": "new",
+      "depends_on": [],
+      "tests": ["./scripts/test"],
+      "status": "pending",
+      "notes": "Move build_args, parser, and tool list helpers."
+    }
+  ]
+}
+```
+
+Steps must:
+
+- target exactly ONE file per step (the same file the executor lane will open);
+- use `"range": "new"` for new files or `"range": { "line1": N, "line2": M }`
+  for edits to existing files;
+- be sized so the future edit-lane diff review is reasonable (~5-100 lines);
+- declare `depends_on` so the runner can refuse out-of-order execution;
+- declare `tests` as shell commands the user can run to verify the step.
+
+Step `status` is one of `pending`, `in_progress`, `done`, `blocked`,
+`abandoned`.
+
+The executor lane (`:NvimePlan run <id> [step]`) does not invent a new
+prompt: it opens the step's file, visual-selects the step's range, and calls
+the existing edit lane with the step's intent (prefixed with a small
+constant-size plan-context block). Diff review remains the existing inline
+flow with content-match guards.
+
 ## Top-Level Prompt Rules
 
 Normal edit mode says:
@@ -100,3 +164,12 @@ Perf edit mode says:
 - "NEVER write inside the user's repository."
 - "Only if candidate is correct AND faster ... produce NVIME_DIFF."
 - "You MAY emit one short BENCH line before the NVIME_* marker."
+
+Plan author mode says:
+
+- "You are an architect drafting a structured implementation plan."
+- "You MUST NOT modify any source code."
+- "You MAY create or edit files only inside `.nvime/plans/<plan-id>/`."
+- "Decompose into ORDERED steps. Each step targets exactly ONE file and ONE range."
+- "Acceptance items must be CHECKABLE — prefer commands and observable behavior."
+- "Emit one final NVIME_PLAN marker confirming the plan id, summary, step count, and files."

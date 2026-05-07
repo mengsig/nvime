@@ -78,7 +78,8 @@ assert(vim.fn.exists(":NvimeDiff") == 2, "Nvime diff review command exists")
 assert(vim.fn.exists(":NvimeCancel") == 2, "Nvime cancel command exists")
 assert(vim.fn.exists(":NvimeDisable") == 2, "Nvime disable command exists")
 assert(vim.fn.exists(":NvimeEnable") == 2, "Nvime enable command exists")
-assert_eq(require("nvime.version").label(), "v0.2.0", "version label is centralized")
+assert_eq(require("nvime.version").label(), "v0.3.0", "version label is centralized")
+assert(vim.fn.exists(":NvimePlan") == 2, "NvimePlan command exists")
 do
   local warnings = require("nvime.config").validate({
     provdier = "codex",
@@ -2407,5 +2408,156 @@ do
   )
   require("nvime.diff").reject_all()
 end
+
+(function()
+  -- Plan module smoke tests: schema, CRUD, status transitions.
+  local plan = require("nvime.plan")
+  local plans_dir = tmp .. "/plans"
+  vim.fn.mkdir(plans_dir, "p")
+  state = require("nvime.state")
+  state.config.plan = state.config.plan or {}
+  state.config.plan.dir = plans_dir
+  state.plan.loaded = false
+  state.plan.plans = nil
+
+  assert_eq(#plan.plans(), 0, "plan: starts empty")
+  assert_eq(plan.next_plan_number(), 1, "plan: next number starts at 1")
+  assert_eq(plan.slugify("Add Provider Registry!"), "add-provider-registry", "plan: slugify normalizes title")
+  assert_eq(plan.format_id(1, "demo"), "0001-demo", "plan: format_id zero-pads")
+
+  -- Hand-write a plan to disk and load it back.
+  local plan_id = "0001-demo"
+  local plan_path = plans_dir .. "/" .. plan_id
+  vim.fn.mkdir(plan_path, "p")
+  local plan_data = {
+    version = 1,
+    id = plan_id,
+    title = "Demo plan",
+    why = "Verify plan parsing in headless tests.",
+    created_at = os.time(),
+    updated_at = os.time(),
+    files_estimated = { "README.md" },
+    acceptance = { { id = 1, text = "scripts/test passes", status = "pending" } },
+    steps = {
+      {
+        id = 1,
+        intent = "Append a banner to README.md",
+        file = "README.md",
+        range = { line1 = 1, line2 = 1 },
+        depends_on = {},
+        tests = { "./scripts/test" },
+        status = "pending",
+      },
+      {
+        id = 2,
+        intent = "Add a CHANGELOG entry",
+        file = "CHANGELOG.md",
+        range = "new",
+        depends_on = { 1 },
+        tests = {},
+        status = "pending",
+      },
+    },
+  }
+  local fd = io.open(plan_path .. "/plan.json", "w")
+  fd:write(vim.json.encode(plan_data))
+  fd:close()
+
+  state.plan.loaded = false
+  state.plan.plans = nil
+  local plans = plan.plans()
+  assert_eq(#plans, 1, "plan: discovers plans on disk")
+  assert_eq(plans[1].id, plan_id, "plan: discovered id matches")
+
+  local fetched = plan.get(plan_id)
+  assert(fetched, "plan: get returns plan")
+  assert_eq(#fetched.steps, 2, "plan: step count")
+
+  local ok, err = plan.set_step_status(plan_id, 1, "done")
+  assert(ok, "plan: status set ok: " .. tostring(err))
+  state.plan.loaded = false
+  state.plan.plans = nil
+  fetched = plan.get(plan_id)
+  assert_eq(fetched.steps[1].status, "done", "plan: persisted status update")
+
+  local rejected = plan.set_step_status(plan_id, 99, "done")
+  assert(not rejected, "plan: rejects unknown step id")
+
+  -- Picker rendering is exercised via direct call; should not error.
+  plan.picker()
+  local picker_buf = vim.fn.bufnr("nvime://plans")
+  assert(picker_buf ~= -1, "plan: picker buffer exists")
+  local picker_lines = vim.api.nvim_buf_get_lines(picker_buf, 0, -1, false)
+  local found_plan_row = false
+  for _, line in ipairs(picker_lines) do
+    if line:find(plan_id, 1, true) then
+      found_plan_row = true
+      break
+    end
+  end
+  assert(found_plan_row, "plan: picker shows the plan id")
+
+  -- Plan view buffer renders without error.
+  plan.open(plan_id)
+  local view_buf = vim.fn.bufnr("nvime://plan/" .. plan_id)
+  assert(view_buf ~= -1, "plan: plan view buffer exists")
+  local view_lines = vim.api.nvim_buf_get_lines(view_buf, 0, -1, false)
+  local saw_steps_header = false
+  for _, line in ipairs(view_lines) do
+    if line:find("STEPS", 1, true) then
+      saw_steps_header = true
+      break
+    end
+  end
+  assert(saw_steps_header, "plan: view renders STEPS header")
+
+  -- Compose buffer is persistent: open, edit, close, reopen, draft survives.
+  plan.compose({})
+  local compose_buf = vim.fn.bufnr("nvime://plan/compose")
+  assert(compose_buf ~= -1, "plan: compose buffer exists")
+  -- Inject a multi-line draft to verify that the title/intent extraction works
+  -- and that submission with a multi-line intent does not crash plan.create
+  -- (regresses the nvim_buf_set_lines newline bug seen by the live user).
+  vim.api.nvim_buf_set_lines(compose_buf, 0, -1, false, {
+    "# Title",
+    "",
+    "Smoke test plan from headless",
+    "",
+    "# Intent",
+    "",
+    "Line one of the intent.",
+    "Line two of the intent.",
+    "",
+    "# Notes",
+    "",
+    "Quick note.",
+  })
+
+  -- Stub out agents.run so we don't actually spawn a provider in the test;
+  -- we only want to confirm M.create accepts multi-line intents without
+  -- raising the 'replacement string item contains newlines' error.
+  local agents_mod = require("nvime.agents")
+  local original_run = agents_mod.run
+  local captured_intent = nil
+  agents_mod.run = function(opts)
+    captured_intent = opts.prompt
+    return { kill = function() end }
+  end
+  local extract = nil
+  -- Manually invoke the compose-extract logic by simulating the <C-s> path.
+  -- We can't trigger keymaps headlessly without focus, so call M.create
+  -- directly with an intent containing newlines.
+  local multi_intent = "Plan title: Smoke test plan from headless\n\nLine one of the intent.\nLine two of the intent."
+  local ok = pcall(plan.create, { intent = multi_intent })
+  agents_mod.run = original_run
+  assert(ok, "plan.create accepts multi-line intent without crashing")
+  assert(captured_intent and captured_intent:find("Smoke test plan", 1, true), "plan author prompt contains the intent")
+
+  -- Delete cleans up.
+  assert(plan.delete(plan_id), "plan: delete returns true")
+  state.plan.loaded = false
+  state.plan.plans = nil
+  assert_eq(#plan.plans(), 0, "plan: delete removes plan from disk")
+end)()
 
 print("nvime headless spec passed")

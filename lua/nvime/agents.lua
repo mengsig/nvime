@@ -104,6 +104,22 @@ local function claude_review_tools(markdown_writes)
   return tools
 end
 
+local function claude_plan_tools()
+  local tools = claude_read_tools({
+    allow_shell = true,
+    allow_web = review_allows_web(),
+  })
+  return tools .. ",Write,Edit,MultiEdit"
+end
+
+local function claude_plan_disallowed()
+  local disallowed = { "NotebookEdit" }
+  if not review_allows_web() then
+    disallowed[#disallowed + 1] = claude_web_disallowed_tools()
+  end
+  return table.concat(disallowed, ",")
+end
+
 local function claude_selection_tools()
   return claude_read_tools({
     allow_shell = selection_allows_shell(),
@@ -144,6 +160,18 @@ local function claude_args(cfg, lane, prompt, run_opts)
       "--disallowedTools",
       disallowed,
     })
+  elseif lane == "plan" then
+    local tools = claude_plan_tools()
+    vim.list_extend(args, {
+      "--permission-mode",
+      "dontAsk",
+      "--tools",
+      tools,
+      "--allowedTools",
+      tools,
+      "--disallowedTools",
+      claude_plan_disallowed(),
+    })
   else
     local tools = claude_selection_tools()
     vim.list_extend(args, {
@@ -179,6 +207,10 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
 
   local sandbox = "read-only"
   if lane == "review" and review_allows_markdown_writes() then
+    sandbox = "workspace-write"
+  elseif lane == "plan" then
+    -- plan lane writes plan.json/plan.md inside a temp workspace whose
+    -- writable scope is .nvime/plans/<id>/. Sync-back filters non-plan paths.
     sandbox = "workspace-write"
   elseif lane == "perf" then
     -- perf lane writes scratch files under /tmp; codex's read-only sandbox
@@ -228,6 +260,14 @@ local excluded_workspace_dirs = {
   ["__pycache__"] = true,
 }
 
+local plan_excluded_workspace_dirs = {
+  [".git"] = true,
+  ["node_modules"] = true,
+  [".direnv"] = true,
+  [".venv"] = true,
+  ["__pycache__"] = true,
+}
+
 local function mkdir_p(path)
   vim.fn.mkdir(path, "p")
 end
@@ -258,7 +298,8 @@ local function copy_file(src, dst)
   vim.fn.writefile(vim.fn.readfile(src, "b"), dst, "b")
 end
 
-local function copy_tree(src, dst)
+local function copy_tree(src, dst, excluded)
+  excluded = excluded or excluded_workspace_dirs
   mkdir_p(dst)
   local scanner = uv.fs_scandir(src)
   if not scanner then
@@ -271,12 +312,21 @@ local function copy_tree(src, dst)
     end
     local source = src .. "/" .. name
     local target = dst .. "/" .. name
-    if kind == "directory" and not excluded_workspace_dirs[name] then
-      copy_tree(source, target)
+    if kind == "directory" and not excluded[name] then
+      copy_tree(source, target, excluded)
     elseif kind == "file" then
       copy_file(source, target)
     end
   end
+end
+
+local function copy_plans_into_workspace(root, cwd)
+  local src = root .. "/.nvime/plans"
+  if vim.fn.isdirectory(src) ~= 1 then
+    return
+  end
+  local dst = cwd .. "/.nvime/plans"
+  copy_tree(src, dst, plan_excluded_workspace_dirs)
 end
 
 local function is_markdown(path)
@@ -312,6 +362,70 @@ local function collect_markdown(root, base, out)
       out[#out + 1] = rel
     end
   end
+end
+
+local function collect_plan_files(root, base, out)
+  local scanner = uv.fs_scandir(root)
+  if not scanner then
+    return
+  end
+  while true do
+    local name, kind = uv.fs_scandir_next(scanner)
+    if not name then
+      break
+    end
+    local path = root .. "/" .. name
+    local rel = base == "" and name or (base .. "/" .. name)
+    if kind == "directory" then
+      collect_plan_files(path, rel, out)
+    elseif kind == "file" then
+      out[#out + 1] = rel
+    end
+  end
+end
+
+local function prepare_plan_workspace(lane)
+  if lane ~= "plan" then
+    return nil
+  end
+  local root = repo_root()
+  local tmp = vim.fn.tempname()
+  local cwd = tmp .. "/workspace"
+  copy_tree(root, cwd, plan_excluded_workspace_dirs)
+  -- copy_tree above intentionally excludes the .git tree; everything else
+  -- including .nvime/plans is now in the workspace. .nvime/plans gets a
+  -- mirror so the agent can refine prior plans.
+  copy_plans_into_workspace(root, cwd)
+  ensure_workspace_git_root(cwd)
+  return {
+    root = root,
+    tmp = tmp,
+    cwd = cwd,
+    lane = lane,
+  }
+end
+
+local function sync_plan_workspace(workspace)
+  if not workspace or workspace.lane ~= "plan" then
+    return {}
+  end
+  local rels = {}
+  local plan_dir = workspace.cwd .. "/.nvime/plans"
+  if vim.fn.isdirectory(plan_dir) == 1 then
+    collect_plan_files(plan_dir, ".nvime/plans", rels)
+  end
+  table.sort(rels)
+
+  local synced = {}
+  for _, rel in ipairs(rels) do
+    local source = workspace.cwd .. "/" .. rel
+    local target = workspace.root .. "/" .. rel
+    if vim.fn.filereadable(source) == 1 and not same_file(source, target) then
+      copy_file(source, target)
+      synced[#synced + 1] = rel
+    end
+  end
+  return synced
 end
 
 local function prepare_markdown_workspace(lane, allow_workspace, requested_workspace)
@@ -638,6 +752,7 @@ function M.run(opts)
     resume_session_id = opts.resume_session_id,
   }
   local workspace = prepare_markdown_workspace(lane, opts.allow_markdown_workspace, opts.markdown_workspace)
+  local plan_workspace = prepare_plan_workspace(lane)
   local perf_workspace = nil
   if lane == "perf" and provider == "codex" then
     -- Empty scratch cwd outside the repo so codex's workspace-write sandbox
@@ -646,7 +761,10 @@ function M.run(opts)
     vim.fn.mkdir(tmp, "p")
     perf_workspace = { cwd = tmp, tmp = vim.fn.fnamemodify(tmp, ":h") }
   end
-  local cwd = (perf_workspace and perf_workspace.cwd) or (workspace and workspace.cwd) or repo_root()
+  local cwd = (perf_workspace and perf_workspace.cwd)
+    or (plan_workspace and plan_workspace.cwd)
+    or (workspace and workspace.cwd)
+    or repo_root()
   local args = build_args(provider, cfg, lane, prompt, cwd, run_opts)
   local stdin = input
   if provider == "codex" then
@@ -702,6 +820,7 @@ function M.run(opts)
       drain()
       vim.schedule(function()
         local synced = sync_markdown_workspace(workspace)
+        local synced_plans = sync_plan_workspace(plan_workspace)
         audit.write({
           event = "agent_exit",
           lane = lane,
@@ -711,11 +830,16 @@ function M.run(opts)
           signal = result.signal,
           provider_session_id = observed_session_id,
           synced_markdown = synced,
+          synced_plan_files = synced_plans,
         })
         result.nvime_synced_markdown = synced
+        result.nvime_synced_plan_files = synced_plans
         result.nvime_provider_session_id = observed_session_id
         local ok, err = pcall(on_exit, result)
         cleanup_workspace(workspace)
+        if plan_workspace and plan_workspace.tmp then
+          pcall(vim.fn.delete, plan_workspace.tmp, "rf")
+        end
         if perf_workspace and perf_workspace.tmp then
           pcall(vim.fn.delete, perf_workspace.tmp, "rf")
         end

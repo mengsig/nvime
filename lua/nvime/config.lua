@@ -61,6 +61,13 @@ M.defaults = {
   chat = {
     max_history_messages = 24,
   },
+  plan = {
+    enabled = true,
+    dir = nil, -- defaults to <git-root>/.nvime/plans
+    auto_open = true, -- open the rendered plan view after authoring
+    auto_in_progress = true, -- mark a step in_progress when its edit lane fires
+    inject_context_chars = 480, -- per-step plan context block budget
+  },
   sessions = {
     enabled = true,
     path = nil,
@@ -81,6 +88,7 @@ M.defaults = {
       diff = "v",
       last = "n",
       provider = "p",
+      plan = "P",
     },
     visual = {
       edit = "e",
@@ -129,6 +137,20 @@ M.defaults = {
         lane = "perf",
       },
     },
+    plan = {
+      {
+        label = "Investigate before planning",
+        prompt = "Before drafting steps, read the relevant files, run any cheap checks (./scripts/test, lints), and confirm the actual code path. Cite real files and line ranges in the plan.",
+      },
+      {
+        label = "Refactor with diff budget",
+        prompt = "Decompose this refactor into the smallest reviewable steps. Each step must touch one file and stay under ~80 changed lines. Acceptance criteria must be checkable shell commands.",
+      },
+      {
+        label = "Bug investigation plan",
+        prompt = "Identify the root cause, the exact files and ranges to change, and a regression test. Steps should be ordered fix-first, test-second.",
+      },
+    },
   },
 }
 
@@ -151,6 +173,7 @@ local optional_types = {
   ["sessions.path"] = { "string", "nil" },
   ["sessions.chat_path"] = { "string", "nil" },
   ["ui.spinner_frames"] = { "table", "nil" },
+  ["plan.dir"] = { "string", "nil" },
 }
 
 local function type_label(value)

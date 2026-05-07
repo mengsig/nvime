@@ -9,6 +9,7 @@ CONTENTS                                                        *nvime-contents*
 4. Configuration                                 |nvime-configuration|
 5. Protocol                                      |nvime-protocol|
 6. Policy                                        |nvime-policy|
+7. Plan                                          |nvime-plan|
 
 ==============================================================================
 OVERVIEW                                                        *nvime-overview*
@@ -180,6 +181,22 @@ COMMANDS                                                        *nvime-commands*
 :NvimeProvider [claude|codex]
         Show or set the default provider used by nvime commands and chat.
 
+                                                        *:NvimePlan*
+:NvimePlan
+:NvimePlan new [intent]
+:NvimePlan open <id>
+:NvimePlan run <id> [step]
+:NvimePlan refresh
+:NvimePlan delete <id>
+:NvimePlan discuss <id>
+        Drive the plan author and executor lanes (see |nvime-plan|). With no
+        args, opens the plan picker. `new` drafts a plan via the plan author
+        agent — restricted to writing files under .nvime/plans/<id>/. `open`
+        opens the plan view buffer. `run` executes a step (the next pending
+        step if no step argument is given) by opening the step's file/range
+        and routing through |:NvimeEdit| with the existing inline diff
+        review.
+
 Inline diff mappings in the target file:
         Pending diffs are shown as readable change blocks: proposed green lines
         above, current red lines below, and one compact controls header per
@@ -238,6 +255,7 @@ Default keymaps use <leader>n:
         <leader>nv     open active diff review workspace
         <leader>nn     reopen last used nvime conversation
         <leader>np     choose Claude or Codex
+        <leader>nP     open the plan picker
 
 Command center mappings:
         <CR>, o, i      open the cursor row
@@ -353,6 +371,13 @@ Common options:
           diff = {
             max_visual_block_lines = 12,
           },
+          plan = {
+            enabled = true,
+            dir = nil,                  -- defaults to <git-root>/.nvime/plans
+            auto_open = true,           -- open the plan view after authoring
+            auto_in_progress = true,    -- mark a step in_progress on execute
+            inject_context_chars = 480, -- plan-context block budget per step
+          },
         })
 <
 
@@ -416,6 +441,54 @@ include an explicit patch verb such as "fix", "add", "remove", "replace",
 "implement", or "update".
 
 The full protocol is documented in PROTOCOL.md at the repository root.
+
+==============================================================================
+PLAN                                                                *nvime-plan*
+
+The plan lane decomposes a code change into ordered steps that are executed
+through the existing edit lane. The agent that drafts the plan runs in a
+hardened sub-lane:
+
+    plan_author   read tools + Bash + Web + Write/Edit/MultiEdit, but the
+                  workspace is a temp copy whose only files synced back to the
+                  repo are those under .nvime/plans/<plan-id>/. Anything written
+                  outside that directory is silently dropped on agent exit.
+
+    plan_exec    not its own agent lane; instead, opening a step's file/range
+                  and routing through |:NvimeEdit|. The step's intent is
+                  prefixed with a constant-size plan-context block (plan id,
+                  why, step position, acceptance) so the patch worker has the
+                  architectural context without paying multi-step token cost.
+
+Plan storage:
+    .nvime/plans/<NNNN-slug>/plan.json    machine-readable contract
+    .nvime/plans/<NNNN-slug>/plan.md      human-readable narrative
+    .nvime/plans/index.json               index used by the picker
+
+Plan view buffer mappings (nvime://plan/<id>):
+    <CR>        execute the step under the cursor (opens file, fires edit lane)
+    gx          mark the step under the cursor as done
+    gp          mark the step as pending
+    gB          mark the step as blocked
+    gT          run the step's tests in a split terminal
+    ]s, [s      next/previous step
+    gA          execute the next pending step
+    gd          discuss/refine the step (re-enters plan author lane)
+    gr          replan from this point
+    o           open the step's file
+    c           copy the step intent
+    q, <Esc>    close the plan view
+    ?           show keymap help
+
+Plan picker buffer mappings (nvime://plans):
+    <CR>        open the plan under the cursor
+    n           draft a new plan
+    R           refine the plan under the cursor
+    dd          delete the plan under the cursor
+    r           refresh
+    q, <Esc>    close
+
+The full plan author response protocol is documented in PROTOCOL.md.
 
 ==============================================================================
 POLICY                                                            *nvime-policy*

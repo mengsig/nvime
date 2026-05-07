@@ -154,6 +154,22 @@ function M.check()
   else
     report("ok", "no blocked guard events recorded in the last 24 hours")
   end
+
+  local ok_plan, plan = pcall(require, "nvime.plan")
+  if ok_plan then
+    local plans_dir = plan.plans_dir()
+    if check_writable_dir(plans_dir) then
+      report("ok", "plan directory is writable: " .. plans_dir)
+    else
+      report("warn", "plan directory is not writable: " .. plans_dir)
+    end
+    local plans = plan.plans()
+    if #plans == 0 then
+      report("info", "no plans yet — run :NvimePlan new to draft one")
+    else
+      report("info", string.format("%d plan(s) on disk", #plans))
+    end
+  end
 end
 
 return M
