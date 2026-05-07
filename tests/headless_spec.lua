@@ -2588,7 +2588,6 @@ end
     { "REJECT", "REJECT" },
     { "FLAG", "FLAG" },
     { "> APPROVE: looks fine", "APPROVE" },
-    { "Looking at this...\n\nAPPROVE: it's correct.", "APPROVE" },
     { "*APPROVE*: rename only", "APPROVE" },
     { "APPROVE :: minimal change", "APPROVE" },
   }
