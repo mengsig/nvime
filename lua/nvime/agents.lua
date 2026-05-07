@@ -618,6 +618,13 @@ local function consume_chunks(provider, on_text, on_progress, on_session_id, opt
 end
 
 function M.run(opts)
+  opts = opts or {}
+  if state.disabled then
+    vim.schedule(function()
+      vim.notify("nvime is disabled; run :NvimeEnable to re-enable it", vim.log.levels.WARN)
+    end)
+    return nil
+  end
   local provider, cfg = provider_config(opts.provider)
   local lane = opts.lane or "review"
   local prompt = opts.prompt or ""
@@ -639,9 +646,7 @@ function M.run(opts)
     vim.fn.mkdir(tmp, "p")
     perf_workspace = { cwd = tmp, tmp = vim.fn.fnamemodify(tmp, ":h") }
   end
-  local cwd = (perf_workspace and perf_workspace.cwd)
-    or (workspace and workspace.cwd)
-    or repo_root()
+  local cwd = (perf_workspace and perf_workspace.cwd) or (workspace and workspace.cwd) or repo_root()
   local args = build_args(provider, cfg, lane, prompt, cwd, run_opts)
   local stdin = input
   if provider == "codex" then
@@ -693,7 +698,7 @@ function M.run(opts)
       system_opts.stdin = stdin
     end
 
-    return vim.system(args, system_opts, function(result)
+    local handle = vim.system(args, system_opts, function(result)
       drain()
       vim.schedule(function()
         local synced = sync_markdown_workspace(workspace)
@@ -719,6 +724,15 @@ function M.run(opts)
         end
       end)
     end)
+    if type(opts.on_handle) == "function" then
+      local ok, err = pcall(opts.on_handle, handle)
+      if not ok then
+        vim.schedule(function()
+          vim.notify("nvime could not store agent handle: " .. tostring(err), vim.log.levels.WARN)
+        end)
+      end
+    end
+    return handle
   end)
 end
 

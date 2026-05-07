@@ -147,6 +147,21 @@ COMMANDS                                                        *nvime-commands*
 	        This bypasses the live-content guard and writes a
 	        block_force_applied audit event.
 
+                                                        *:NvimeCancel*
+:NvimeCancel
+        Cancel the active nvime agent run.
+
+                                                        *:NvimeDisable*
+:NvimeDisable
+        Cancel running nvime agents, restore wrapped Neovim APIs, and stop
+        persisting sessions while disabled. Stored wrapper references captured
+        by other plugins before disable are not rewritten.
+
+                                                        *:NvimeEnable*
+:NvimeEnable
+        Re-enable nvime after |:NvimeDisable| and reinstall guard wrappers when
+        guard.enabled is true.
+
                                                         *:NvimeReject*
 :NvimeReject
         Reject the current pending inline diff block in the target file.
@@ -180,6 +195,7 @@ Inline diff mappings in the target file:
         v_ga    accept unresolved changed lines touched by the visual range
 	        gA      accept all unresolved blocks
 	        gA!     force-accept all unresolved/conflicted blocks
+        gu      undo the most recently accepted block when unchanged
 	        gb      reject the current visual change block
         v_gb    reject unresolved changed lines touched by the visual range
         gB      reject all unresolved blocks
@@ -196,6 +212,7 @@ Diff review workspace mappings:
         ]b/[b   next/previous visual change block
         ]n/[n   next/previous unresolved line
         ga/gb   accept/reject the current visual block
+        gu      undo the most recently accepted block when unchanged
         gA/gB   accept/reject all unresolved blocks
         gc      discuss active review state with the edit agent
         r       refresh the review panes
@@ -241,6 +258,7 @@ Chat buffer mappings:
         <Esc>          focus the scrollback (leave the prompt)
         ?              choose a configured prompt template
         prompt <CR>    submit the current message
+        <C-c>          cancel the active chat/review agent
         p              cycle provider for the next chat prompt
         <Tab>          cycle provider for the next chat prompt
         P              choose Claude or Codex for the next chat prompt
@@ -252,6 +270,7 @@ Selection workflow mappings:
         <Esc>          focus the scrollback (leave the prompt)
         ?              choose a configured prompt template
         prompt <CR>    submit the current question/intent
+        <C-c>          cancel the active Ask/Edit/Discuss agent
         p              cycle provider for this discussion's next prompt
         <Tab>          cycle provider for this discussion's next prompt
         P              choose Claude or Codex for this discussion's next prompt
@@ -336,6 +355,11 @@ Common options:
           },
         })
 <
+
+Unknown config keys and obvious type mismatches are reported with vim.notify
+when setup runs. |:checkhealth| nvime checks the active provider commands,
+writable state directory, guard wrapper state, Tree-sitter parsers for loaded
+buffers, and blocked guard events from the last day.
 
 Default audit path:
 	        .nvime/audit.jsonl in the current git root, or

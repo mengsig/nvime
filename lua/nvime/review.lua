@@ -6,7 +6,8 @@ local M = {}
 
 local function git_diff(args)
   local cwd = (vim.uv or vim.loop).cwd()
-  local cmd = { "git", "-C", cwd, "diff", "--no-ext-diff", "--no-color", "--find-renames", "--find-copies", "--unified=80" }
+  local cmd =
+    { "git", "-C", cwd, "diff", "--no-ext-diff", "--no-color", "--find-renames", "--find-copies", "--unified=80" }
   vim.list_extend(cmd, args or {})
   return table.concat(git.systemlist(cmd), "\n")
 end
@@ -31,7 +32,8 @@ function M.start(opts)
   chat.append("[" .. provider .. " response]\n" .. string.rep("-", 78) .. "\n\n", session_id)
   chat.set_busy(true, session_id)
   local agent_session = chat.agent_run_opts(provider, session_id)
-  agents.run({
+  local handle
+  handle = agents.run({
     provider = provider,
     lane = "review",
     prompt = prompt,
@@ -46,8 +48,28 @@ function M.start(opts)
     on_progress = function(text)
       chat.set_progress(text, session_id)
     end,
+    on_handle = function(agent_handle)
+      handle = agent_handle
+      chat.attach_process(session_id, agent_handle)
+    end,
     on_exit = function(result)
+      local session = chat.get_session(session_id)
+      local cancelled = session
+        and (
+          (handle and session.cancelled_handles and session.cancelled_handles[handle] == true)
+          or (not handle and session.cancelled == true)
+        )
+      if session and handle and session.cancelled_handles then
+        session.cancelled_handles[handle] = nil
+      end
+      chat.clear_process(session_id, handle)
       chat.set_busy(false, session_id)
+      if session and cancelled then
+        session.cancelled = false
+      end
+      if cancelled then
+        return
+      end
       local synced = result.nvime_synced_markdown or {}
       if #synced > 0 then
         vim.notify("nvime synced markdown: " .. table.concat(synced, ", "), vim.log.levels.INFO)
@@ -57,6 +79,9 @@ function M.start(opts)
       end
     end,
   })
+  if not handle then
+    chat.set_busy(false, session_id)
+  end
 end
 
 return M

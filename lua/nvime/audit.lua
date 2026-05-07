@@ -3,8 +3,29 @@ local state = require("nvime.state")
 
 local M = {}
 
-local function git_value(args)
-  local root = git.root()
+local GIT_CACHE_TTL = 30
+local root_cache = {}
+local ref_cache = {}
+
+local function now()
+  return os.time()
+end
+
+local function cached_git_root(cwd)
+  cwd = cwd or vim.loop.cwd()
+  local cached = root_cache[cwd]
+  if cached and cached.expires_at > now() then
+    return cached.value
+  end
+  local value = git.root(cwd)
+  root_cache[cwd] = {
+    value = value,
+    expires_at = now() + GIT_CACHE_TTL,
+  }
+  return value
+end
+
+local function git_value(root, args)
   if not root then
     return nil
   end
@@ -17,6 +38,24 @@ local function git_value(args)
   return nil
 end
 
+local function cached_git_meta(root)
+  if not root then
+    return nil, nil
+  end
+  local cached = ref_cache[root]
+  if cached and cached.expires_at > now() then
+    return cached.ref, cached.branch
+  end
+  local ref = git_value(root, { "rev-parse", "--short", "HEAD" })
+  local branch = git_value(root, { "branch", "--show-current" })
+  ref_cache[root] = {
+    ref = ref,
+    branch = branch,
+    expires_at = now() + GIT_CACHE_TTL,
+  }
+  return ref, branch
+end
+
 local function audit_path()
   local config = state.config or {}
   local audit = config.audit or {}
@@ -24,7 +63,7 @@ local function audit_path()
     return vim.fn.fnamemodify(audit.path, ":p")
   end
 
-  local root = git.root()
+  local root = cached_git_root(vim.loop.cwd())
   if root then
     return root .. "/.nvime/audit.jsonl"
   end
@@ -67,6 +106,11 @@ function M.path()
   return audit_path()
 end
 
+function M.clear_cache()
+  root_cache = {}
+  ref_cache = {}
+end
+
 function M.write(event)
   local config = state.config or {}
   if config.audit and config.audit.enabled == false then
@@ -79,9 +123,10 @@ function M.write(event)
   event = redact(event or {})
   event.ts = event.ts or os.date("!%Y-%m-%dT%H:%M:%SZ")
   event.cwd = event.cwd or vim.loop.cwd()
-  event.git_root = event.git_root or git.root()
-  event.git_ref = event.git_ref or git_value({ "rev-parse", "--short", "HEAD" })
-  event.git_branch = event.git_branch or git_value({ "branch", "--show-current" })
+  event.git_root = event.git_root or cached_git_root(event.cwd)
+  local git_ref, git_branch = cached_git_meta(event.git_root)
+  event.git_ref = event.git_ref or git_ref
+  event.git_branch = event.git_branch or git_branch
   event.nvim_pid = event.nvim_pid or vim.fn.getpid()
 
   local path = audit_path()

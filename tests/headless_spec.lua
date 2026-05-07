@@ -48,18 +48,26 @@ assert(vim.fn.maparg("<leader>ne", "n") == "<Cmd>NvimeChats edit<CR>", "default 
 assert(vim.fn.maparg("<leader>nq", "n") == "<Cmd>NvimeChats ask<CR>", "default normal ask keymap opens ask picker")
 assert(vim.fn.maparg("<leader>nn", "n") ~= "", "default normal last-session keymap exists")
 assert(vim.fn.maparg("<leader>np", "n") ~= "", "default provider keymap exists")
-assert(vim.fn.maparg("<leader>nv", "n") ~= "", "default diff review keymap exists")
-;(function()
+assert(vim.fn.maparg("<leader>nv", "n") ~= "", "default diff review keymap exists");
+(function()
   local state = require("nvime.state")
   vim.keymap.set("n", "<leader>nc", "<Cmd>let g:nvime_user_chat_map = 1<CR>", { silent = true })
   require("nvime").setup(state.config)
-  assert_eq(vim.fn.maparg("<leader>nc", "n"), "<Cmd>let g:nvime_user_chat_map = 1<CR>", "identical setup does not clobber user maps")
+  assert_eq(
+    vim.fn.maparg("<leader>nc", "n"),
+    "<Cmd>let g:nvime_user_chat_map = 1<CR>",
+    "identical setup does not clobber user maps"
+  )
   local forced_config = vim.deepcopy(state.config)
   forced_config.force = true
   require("nvime").setup(forced_config)
   assert_eq(vim.fn.maparg("<leader>nc", "n"), "<Cmd>NvimeChat<CR>", "force setup re-installs nvime maps")
 end)()
-assert_eq(require("nvime.progress").compact("[claude] tool: Bash: rg README"), "claude Bash", "claude progress footer keeps tool name")
+assert_eq(
+  require("nvime.progress").compact("[claude] tool: Bash: rg README"),
+  "claude Bash",
+  "claude progress footer keeps tool name"
+)
 assert_eq(
   require("nvime.progress").compact([[[codex] tool: /usr/bin/zsh -lc "sed -n '1,260p' README.md"]]),
   "codex tool",
@@ -67,10 +75,37 @@ assert_eq(
 )
 assert(vim.fn.exists(":Nvime") == 2, "Nvime command center command exists")
 assert(vim.fn.exists(":NvimeDiff") == 2, "Nvime diff review command exists")
-assert(
-  vim.fn.strdisplaywidth(require("nvime.ui").truncate("abcdef", 4)) <= 4,
-  "ui truncation respects display width"
-)
+assert(vim.fn.exists(":NvimeCancel") == 2, "Nvime cancel command exists")
+assert(vim.fn.exists(":NvimeDisable") == 2, "Nvime disable command exists")
+assert(vim.fn.exists(":NvimeEnable") == 2, "Nvime enable command exists")
+assert_eq(require("nvime.version").label(), "v0.2.0", "version label is centralized")
+do
+  local warnings = require("nvime.config").validate({
+    provdier = "codex",
+    ui = {
+      width = "wide",
+    },
+    providers = {
+      localai = {
+        cmd = 42,
+      },
+    },
+  })
+  assert(#warnings >= 3, "config validation warns on unknown keys and wrong types")
+end
+do
+  local state = require("nvime.state")
+  local wrapped_system = vim.system
+  require("nvime").disable()
+  assert(state.disabled == true, "disable marks nvime disabled")
+  assert(state.guard_installed == false, "disable restores guard wrappers")
+  assert(vim.system ~= wrapped_system, "disable restores the raw vim.system function")
+  require("nvime").enable()
+  assert(state.disabled == false, "enable marks nvime enabled")
+  assert(state.guard_installed == true, "enable reinstalls guard wrappers")
+  require("nvime.health").check()
+end
+assert(vim.fn.strdisplaywidth(require("nvime.ui").truncate("abcdef", 4)) <= 4, "ui truncation respects display width")
 assert(
   vim.fn.strdisplaywidth(require("nvime.ui").truncate("ab◈cdef", 4)) <= 4,
   "ui truncation respects display width for glyph labels"
@@ -94,10 +129,13 @@ assert(
   "dashboard has visual decorations"
 )
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("?", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local help = require("nvime.state").panels.chats_help
-  return help and help.winid and vim.api.nvim_win_is_valid(help.winid)
-end, 20), "dashboard help overlay opens")
+assert(
+  vim.wait(1000, function()
+    local help = require("nvime.state").panels.chats_help
+    return help and help.winid and vim.api.nvim_win_is_valid(help.winid)
+  end, 20),
+  "dashboard help overlay opens"
+)
 pcall(vim.api.nvim_win_close, require("nvime.state").panels.chats_help.winid, true)
 require("nvime.state").panels.chats_help = nil
 pcall(vim.api.nvim_win_close, dashboard_panel.winid, true)
@@ -109,17 +147,26 @@ assert(chat == stale_chat, "reuses pre-existing nvime named buffer")
 
 vim.cmd("NvimeChat")
 local chat_picker_panel = require("nvime.state").panels.chats
-assert(chat_picker_panel and vim.api.nvim_win_is_valid(chat_picker_panel.winid), "NvimeChat opens the general chat picker")
+assert(
+  chat_picker_panel and vim.api.nvim_win_is_valid(chat_picker_panel.winid),
+  "NvimeChat opens the general chat picker"
+)
 local chat_picker_lines = table.concat(vim.api.nvim_buf_get_lines(chat_picker_panel.bufnr, 0, -1, false), "\n")
 assert(chat_picker_lines:find("General Conversations", 1, true), "chat picker is scoped to general conversations")
 assert(chat_picker_lines:find("start new chat conversation", 1, true), "chat picker offers a new chat session")
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("n", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local panel = require("nvime.state").panels.chat
-  return panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid)
-end, 20), "chat picker n opens a new general chat")
+assert(
+  vim.wait(1000, function()
+    local panel = require("nvime.state").panels.chat
+    return panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid)
+  end, 20),
+  "chat picker n opens a new general chat"
+)
 assert(vim.api.nvim_get_mode().mode ~= "i", "chat picker n opens general chat in normal mode")
-assert(vim.bo[require("nvime.state").panels.chat.bufnr].modifiable == false, "newly opened chat is locked until prompt focus")
+assert(
+  vim.bo[require("nvime.state").panels.chat.bufnr].modifiable == false,
+  "newly opened chat is locked until prompt focus"
+)
 
 local stale_chat_input = vim.api.nvim_create_buf(false, true)
 vim.api.nvim_buf_set_name(stale_chat_input, "nvime://chat-input")
@@ -138,8 +185,14 @@ assert(not chat_lines:find("====", 1, true), "chat does not write rule text into
 assert(vim.bo[chat_buf].modifiable == false, "chat buffer is locked until the input is focused")
 local input_lines = table.concat(vim.api.nvim_buf_get_lines(chat_buf, chat_panel.input_start - 1, -1, false), "\n")
 assert(input_lines:find("[claude]$ ", 1, true), "chat input has a terminal prompt")
-assert(#vim.api.nvim_buf_get_extmarks(chat_buf, vim.api.nvim_create_namespace("nvime.chat"), 0, -1, {}) > 0, "chat has decorations")
-assert(#vim.api.nvim_buf_get_extmarks(chat_input, vim.api.nvim_create_namespace("nvime.chat.input"), 0, -1, {}) > 0, "chat input has decorations")
+assert(
+  #vim.api.nvim_buf_get_extmarks(chat_buf, vim.api.nvim_create_namespace("nvime.chat"), 0, -1, {}) > 0,
+  "chat has decorations"
+)
+assert(
+  #vim.api.nvim_buf_get_extmarks(chat_input, vim.api.nvim_create_namespace("nvime.chat.input"), 0, -1, {}) > 0,
+  "chat input has decorations"
+)
 
 local fast_append_done = false
 local fast_append_ok = false
@@ -154,24 +207,31 @@ fast_timer:start(0, 0, function()
   fast_timer:stop()
   fast_timer:close()
 end)
-assert(vim.wait(1000, function()
-  return fast_append_done
-end, 20), "fast-event chat append callback ran")
+assert(
+  vim.wait(1000, function()
+    return fast_append_done
+  end, 20),
+  "fast-event chat append callback ran"
+)
 assert(fast_append_ok, tostring(fast_append_err))
-assert(vim.wait(1000, function()
-  return table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n"):find("chat fast-event append", 1, true)
-end, 20), "chat append schedules UI work from fast events")
+assert(
+  vim.wait(1000, function()
+    return table
+      .concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
+      :find("chat fast-event append", 1, true)
+  end, 20),
+  "chat append schedules UI work from fast events"
+)
 chat_panel = require("nvime.state").panels.chat
 chat_win = chat_panel.winid
 chat_input = chat_panel.input_bufnr
-chat_input_win = chat_panel.input_winid
-
-;(function()
+chat_input_win = chat_panel.input_winid;
+(function()
   local dedupe_claude = tmp .. "/dedupe-claude"
   vim.fn.writefile({
     "#!/usr/bin/env sh",
-    "printf '%s\\n' '{\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"Hey!\"}}}'",
-    "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Hey!\"}]}}'",
+    'printf \'%s\\n\' \'{"event":{"delta":{"type":"text_delta","text":"Hey!"}}}\'',
+    'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"text","text":"Hey!"}]}}\'',
   }, dedupe_claude)
   vim.fn.setfperm(dedupe_claude, "rwxr-xr-x")
   local dedupe_old_claude_cmd = require("nvime.state").config.providers.claude.cmd
@@ -189,9 +249,12 @@ chat_input_win = chat_panel.input_winid
       dedupe_done = true
     end,
   })
-  assert(vim.wait(5000, function()
-    return dedupe_done
-  end, 20), "agent dedupe fixture exits")
+  assert(
+    vim.wait(5000, function()
+      return dedupe_done
+    end, 20),
+    "agent dedupe fixture exits"
+  )
   assert_eq(table.concat(dedupe_chunks), "Hey!", "claude streamed delta and final aggregate are not duplicated")
   require("nvime.state").config.providers.claude.cmd = dedupe_old_claude_cmd
 end)()
@@ -206,33 +269,48 @@ vim.ui.select = function(items, _opts, on_choice)
 end
 require("nvime.chat").choose_prompt()
 chat_panel = require("nvime.state").panels.chat
-local templated_chat_prompt = vim.api.nvim_buf_get_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false)[1] or ""
+local templated_chat_prompt = vim.api.nvim_buf_get_lines(
+  chat_buf,
+  chat_panel.input_start - 1,
+  chat_panel.input_start,
+  false
+)[1] or ""
 assert(templated_chat_prompt:find("Please review this repository", 1, true), "chat prompt picker fills the prompt line")
 vim.api.nvim_buf_set_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false, { "[claude]$ " })
 vim.ui.select = old_select
 pcall(vim.cmd.stopinsert)
 require("nvime.chat").prompt()
 vim.api.nvim_buf_set_lines(chat_buf, 0, -1, false, { "oops" })
-assert(vim.wait(1000, function()
-  local guarded = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
-  return guarded:find("oops", 1, true) == nil and guarded:find("[claude]$ ", 1, true) ~= nil
-end, 20), "chat guard restores edits outside the prompt line")
+assert(
+  vim.wait(1000, function()
+    local guarded = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
+    return guarded:find("oops", 1, true) == nil and guarded:find("[claude]$ ", 1, true) ~= nil
+  end, 20),
+  "chat guard restores edits outside the prompt line"
+)
 local append_prompt_line = "[claude]$ Hey, please iterate throughout"
 vim.api.nvim_buf_set_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false, { append_prompt_line })
 pcall(vim.cmd.stopinsert)
 vim.api.nvim_win_set_cursor(chat_win, { chat_panel.input_start, #"[claude]$ " })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("A", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  return vim.api.nvim_win_get_cursor(chat_win)[2] >= (#append_prompt_line - 2)
-end, 20), "chat A appends at the end of the live prompt line")
+assert(
+  vim.wait(1000, function()
+    return vim.api.nvim_win_get_cursor(chat_win)[2] >= (#append_prompt_line - 2)
+  end, 20),
+  "chat A appends at the end of the live prompt line"
+)
 pcall(vim.cmd.stopinsert)
 vim.api.nvim_buf_set_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false, { "[claude]$ " })
 vim.api.nvim_win_set_cursor(chat_win, { chat_panel.input_start, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("Ityped<Esc>", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local line = vim.api.nvim_buf_get_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false)[1] or ""
-  return line == "[claude]$ typed"
-end, 20), "chat I inserts after the prompt prefix on an empty prompt")
+assert(
+  vim.wait(1000, function()
+    local line = vim.api.nvim_buf_get_lines(chat_buf, chat_panel.input_start - 1, chat_panel.input_start, false)[1]
+      or ""
+    return line == "[claude]$ typed"
+  end, 20),
+  "chat I inserts after the prompt prefix on an empty prompt"
+)
 pcall(vim.cmd.stopinsert)
 
 local chat_scroll_lines = {}
@@ -240,18 +318,26 @@ for index = 1, 40 do
   chat_scroll_lines[#chat_scroll_lines + 1] = "chat scroll fixture " .. index
 end
 require("nvime.chat").append(table.concat(chat_scroll_lines, "\n") .. "\n")
-assert(vim.wait(1000, function()
-  return table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n"):find("chat scroll fixture 40", 1, true)
-end, 20), "chat scroll fixture is appended")
+assert(
+  vim.wait(1000, function()
+    return table
+      .concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
+      :find("chat scroll fixture 40", 1, true)
+  end, 20),
+  "chat scroll fixture is appended"
+)
 require("nvime.state").panels.chat.input_active = false
 vim.api.nvim_win_set_cursor(chat_win, { 2, 0 })
 vim.api.nvim_win_call(chat_win, function()
   vim.fn.winrestview({ topline = 1 })
 end)
 require("nvime.chat").append("chat locked output\n")
-assert(vim.wait(1000, function()
-  return table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n"):find("chat locked output", 1, true)
-end, 20), "chat locked output is appended")
+assert(
+  vim.wait(1000, function()
+    return table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n"):find("chat locked output", 1, true)
+  end, 20),
+  "chat locked output is appended"
+)
 local chat_locked_view = vim.api.nvim_win_call(chat_win, vim.fn.winsaveview)
 assert_eq(vim.api.nvim_win_get_cursor(chat_win)[1], 2, "chat output preserves cursor when user scrolled away")
 assert_eq(chat_locked_view.topline, 1, "chat output preserves topline when user scrolled away")
@@ -261,10 +347,13 @@ vim.api.nvim_win_call(chat_win, function()
   vim.fn.winrestview({ topline = math.max(1, chat_bottom_lnum - vim.api.nvim_win_get_height(chat_win) + 2) })
 end)
 require("nvime.chat").append("chat following output\n")
-assert(vim.wait(1000, function()
-  return table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n"):find("chat following output", 1, true)
-    and vim.api.nvim_win_get_cursor(chat_win)[1] >= require("nvime.state").panels.chat.input_start
-end, 20), "chat output follows when cursor is at the prompt")
+assert(
+  vim.wait(1000, function()
+    return table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n"):find("chat following output", 1, true)
+      and vim.api.nvim_win_get_cursor(chat_win)[1] >= require("nvime.state").panels.chat.input_start
+  end, 20),
+  "chat output follows when cursor is at the prompt"
+)
 
 require("nvime.provider").cycle()
 local cycled_lines = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
@@ -283,9 +372,11 @@ local chat_transcript = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1,
 assert(not chat_transcript:find("chat exited", 1, true), "chat transcript omits successful exit status")
 local saw_code_fence = false
 local saw_code_line = false
-for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(chat_buf, vim.api.nvim_create_namespace("nvime.chat"), 0, -1, {
-  details = true,
-})) do
+for _, mark in
+  ipairs(vim.api.nvim_buf_get_extmarks(chat_buf, vim.api.nvim_create_namespace("nvime.chat"), 0, -1, {
+    details = true,
+  }))
+do
   local details = mark[4] or {}
   saw_code_fence = saw_code_fence or details.hl_group == "NvimeCodeFence"
   saw_code_line = saw_code_line or details.hl_group == "NvimeCode"
@@ -320,10 +411,14 @@ end
 assert(delete_chat_row ~= nil, "chat picker has a deletable chat row")
 vim.api.nvim_win_set_cursor(persisted_chat_picker.winid, { delete_chat_row, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("dd", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  return not table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.chats.bufnr, 0, -1, false), "\n")
-    :find("delete me", 1, true)
-end, 20), "chat picker dd deletes the selected chat session")
+assert(
+  vim.wait(1000, function()
+    return not table
+      .concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.chats.bufnr, 0, -1, false), "\n")
+      :find("delete me", 1, true)
+  end, 20),
+  "chat picker dd deletes the selected chat session"
+)
 assert(require("nvime.chat").session_count() >= 1, "deleting one chat keeps older conversations")
 require("nvime.chat").save_sessions()
 require("nvime.chat").reload_sessions()
@@ -337,15 +432,21 @@ assert(
 local reloaded_chat = require("nvime.chat").sessions()[1]
 vim.api.nvim_set_current_win(reloaded_chat_picker.winid)
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("1", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local panel = require("nvime.state").panels.chat
-  return require("nvime.chat").active_session_id() == reloaded_chat.id
-    and panel
-    and panel.winid
-    and vim.api.nvim_win_is_valid(panel.winid)
-end, 20), "chat picker numeric shortcut opens the first conversation")
+assert(
+  vim.wait(1000, function()
+    local panel = require("nvime.state").panels.chat
+    return require("nvime.chat").active_session_id() == reloaded_chat.id
+      and panel
+      and panel.winid
+      and vim.api.nvim_win_is_valid(panel.winid)
+  end, 20),
+  "chat picker numeric shortcut opens the first conversation"
+)
 assert(vim.api.nvim_get_mode().mode ~= "i", "chat picker numeric shortcut opens chat in normal mode")
-assert(vim.bo[require("nvime.state").panels.chat.bufnr].modifiable == false, "opened chat session is locked until prompt focus")
+assert(
+  vim.bo[require("nvime.state").panels.chat.bufnr].modifiable == false,
+  "opened chat session is locked until prompt focus"
+)
 chat_buf = require("nvime.state").panels.chat.bufnr
 chat_panel = require("nvime.state").panels.chat
 chat_win = chat_panel.winid
@@ -356,33 +457,42 @@ local old_claude_cmd = require("nvime.state").config.providers.claude.cmd
 local chat_progress_claude = tmp .. "/chat-progress-claude"
 vim.fn.writefile({
   "#!/usr/bin/env sh",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"sed -n 1,260p README.md\"}}]}}'",
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"sed -n 1,260p README.md"}}]}}\'',
   "sleep 0.2",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"progress final\"}]}}'",
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"text","text":"progress final"}]}}\'',
 }, chat_progress_claude)
 vim.fn.setfperm(chat_progress_claude, "rwxr-xr-x")
 require("nvime.state").config.providers.claude.cmd = chat_progress_claude
 local progress_history_start = #require("nvime.state").chat.history
 require("nvime.chat").submit("progress flush chat")
-assert(vim.wait(5000, function()
-  return require("nvime.state").chat.progress == "claude Bash"
-end, 20), "chat progress is visible while the provider runs")
-assert(vim.wait(2000, function()
-  local panel = require("nvime.state").panels.spinner
-  if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
-    return false
-  end
-  local lines = vim.api.nvim_buf_get_lines(panel.bufnr, 0, -1, false)
-  for _, line in ipairs(lines) do
-    if line:find("Bash", 1, true) then
-      return true
+assert(
+  vim.wait(5000, function()
+    return require("nvime.state").chat.progress == "claude Bash"
+  end, 20),
+  "chat progress is visible while the provider runs"
+)
+assert(
+  vim.wait(2000, function()
+    local panel = require("nvime.state").panels.spinner
+    if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
+      return false
     end
-  end
-  return false
-end, 20), "chat progress is shown in the corner spinner float")
-assert(vim.wait(5000, function()
-  return #require("nvime.state").chat.history >= progress_history_start + 2
-end, 20), "chat progress fixture runs")
+    local lines = vim.api.nvim_buf_get_lines(panel.bufnr, 0, -1, false)
+    for _, line in ipairs(lines) do
+      if line:find("Bash", 1, true) then
+        return true
+      end
+    end
+    return false
+  end, 20),
+  "chat progress is shown in the corner spinner float"
+)
+assert(
+  vim.wait(5000, function()
+    return #require("nvime.state").chat.history >= progress_history_start + 2
+  end, 20),
+  "chat progress fixture runs"
+)
 local progress_flush_transcript = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
 assert(progress_flush_transcript:find("progress final", 1, true), "chat progress fixture delivers final answer")
 assert(not progress_flush_transcript:find("tool: Bash", 1, true), "chat progress is not appended to transcript")
@@ -393,8 +503,8 @@ local chat_native_claude_id = "33333333-3333-3333-3333-333333333333"
 local fake_chat_resume_claude = tmp .. "/fake-chat-resume-claude"
 vim.fn.writefile({
   "#!/usr/bin/env sh",
-  "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"" .. chat_native_claude_id .. "\"}'",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"native chat ok\"}]}}'",
+  'printf \'%s\\n\' \'{"type":"system","subtype":"init","session_id":"' .. chat_native_claude_id .. "\"}'",
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"text","text":"native chat ok"}]}}\'',
 }, fake_chat_resume_claude)
 vim.fn.setfperm(fake_chat_resume_claude, "rwxr-xr-x")
 require("nvime.state").config.providers.claude.cmd = fake_chat_resume_claude
@@ -403,9 +513,12 @@ require("nvime.state").chat.provider_workspaces = {}
 require("nvime.state").chat.last_provider = nil
 local native_chat_start = #require("nvime.state").chat.history
 require("nvime.chat").submit("first native chat")
-assert(vim.wait(5000, function()
-  return #require("nvime.state").chat.history >= native_chat_start + 2
-end, 20), "native chat first turn runs")
+assert(
+  vim.wait(5000, function()
+    return #require("nvime.state").chat.history >= native_chat_start + 2
+  end, 20),
+  "native chat first turn runs"
+)
 assert_eq(
   require("nvime.state").chat.provider_sessions.claude,
   chat_native_claude_id,
@@ -413,9 +526,12 @@ assert_eq(
 )
 local native_chat_followup = #require("nvime.state").chat.history
 require("nvime.chat").submit("second native chat")
-assert(vim.wait(5000, function()
-  return #require("nvime.state").chat.history >= native_chat_followup + 2
-end, 20), "native chat follow-up runs")
+assert(
+  vim.wait(5000, function()
+    return #require("nvime.state").chat.history >= native_chat_followup + 2
+  end, 20),
+  "native chat follow-up runs"
+)
 local native_chat_audit = vim.fn.readfile(audit_path)
 local first_native_chat = ""
 local second_native_chat = ""
@@ -427,8 +543,14 @@ for _, line in ipairs(native_chat_audit) do
   end
 end
 assert(not first_native_chat:find("--no-session-persistence", 1, true), "general chat keeps native session persistence")
-assert(second_native_chat:find("--resume " .. chat_native_claude_id, 1, true), "general chat follow-up uses native resume")
-assert(second_native_chat:find("Conversation so far: available from the resumed native provider session", 1, true), "resumed chat avoids resending full transcript")
+assert(
+  second_native_chat:find("--resume " .. chat_native_claude_id, 1, true),
+  "general chat follow-up uses native resume"
+)
+assert(
+  second_native_chat:find("Conversation so far: available from the resumed native provider session", 1, true),
+  "resumed chat avoids resending full transcript"
+)
 local first_native_chat_event = vim.json.decode(first_native_chat)
 local second_native_chat_event = vim.json.decode(second_native_chat)
 assert_eq(
@@ -436,8 +558,16 @@ assert_eq(
   second_native_chat_event.markdown_workspace,
   "general chat reuses one markdown workspace for native resume"
 )
-assert_eq(first_native_chat_event.cwd, first_native_chat_event.markdown_workspace, "general chat runs inside the stable markdown workspace")
-assert_eq(second_native_chat_event.cwd, second_native_chat_event.markdown_workspace, "resumed general chat stays in the stable markdown workspace")
+assert_eq(
+  first_native_chat_event.cwd,
+  first_native_chat_event.markdown_workspace,
+  "general chat runs inside the stable markdown workspace"
+)
+assert_eq(
+  second_native_chat_event.cwd,
+  second_native_chat_event.markdown_workspace,
+  "resumed general chat stays in the stable markdown workspace"
+)
 
 local stale_chat_claude = tmp .. "/stale-chat-claude"
 vim.fn.writefile({
@@ -451,11 +581,14 @@ require("nvime.state").chat.provider_sessions = { claude = "stale-chat-id" }
 require("nvime.state").chat.provider_workspaces = {}
 require("nvime.state").chat.last_provider = "claude"
 require("nvime.chat").submit("stale native chat")
-assert(vim.wait(5000, function()
-  local text = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
-  return text:find("No conversation found with session ID: stale-chat-id", 1, true)
-    and text:find("[nvime] chat failed with code 1", 1, true)
-end, 20), "general chat dumps stale native resume errors")
+assert(
+  vim.wait(5000, function()
+    local text = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
+    return text:find("No conversation found with session ID: stale-chat-id", 1, true)
+      and text:find("[nvime] chat failed with code 1", 1, true)
+  end, 20),
+  "general chat dumps stale native resume errors"
+)
 require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 require("nvime.state").chat.provider_sessions = {}
 require("nvime.state").chat.provider_workspaces = {}
@@ -465,7 +598,7 @@ local hidden_chat_claude = tmp .. "/hidden-chat-claude"
 vim.fn.writefile({
   "#!/usr/bin/env sh",
   "sleep 0.2",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hidden chat done\"}]}}'",
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"text","text":"hidden chat done"}]}}\'',
 }, hidden_chat_claude)
 vim.fn.setfperm(hidden_chat_claude, "rwxr-xr-x")
 require("nvime.state").config.providers.claude.cmd = hidden_chat_claude
@@ -479,12 +612,20 @@ require("nvime.chat").submit("hidden chat notify")
 local hidden_chat_id = require("nvime.chat").active_session_id()
 require("nvime.chat").close()
 assert(not require("nvime.chat").is_open(hidden_chat_id), "hidden chat fixture closes the float while running")
-assert(vim.wait(5000, function()
-  local session = require("nvime.chat").get_session(hidden_chat_id)
-  return session and not session.busy and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("hidden chat done", 1, true)
-end, 20), "hidden chat still records the completed response")
+assert(
+  vim.wait(5000, function()
+    local session = require("nvime.chat").get_session(hidden_chat_id)
+    return session
+      and not session.busy
+      and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("hidden chat done", 1, true)
+  end, 20),
+  "hidden chat still records the completed response"
+)
 assert(not require("nvime.chat").is_open(hidden_chat_id), "hidden chat completion does not reopen the float")
-assert(vim.tbl_contains(notices, "nvime chat finished. Reopen with :NvimeLast or <leader>nn."), "hidden chat completion notifies")
+assert(
+  vim.tbl_contains(notices, "nvime chat finished. Reopen with :NvimeLast or <leader>nn."),
+  "hidden chat completion notifies"
+)
 vim.notify = old_notify
 require("nvime").open_last()
 assert(require("nvime.chat").is_open(hidden_chat_id), "NvimeLast reopens the hidden completed chat")
@@ -511,9 +652,12 @@ require("nvime.agents").run({
       and #(result.nvime_synced_markdown or {}) == 1
   end,
 })
-assert(vim.wait(5000, function()
-  return markdown_done
-end, 20), "review lane syncs markdown writes only")
+assert(
+  vim.wait(5000, function()
+    return markdown_done
+  end, 20),
+  "review lane syncs markdown writes only"
+)
 require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 vim.fn.delete(root .. "/NVIME_TEST_DOC.md")
 
@@ -521,8 +665,8 @@ local native_claude_id = "11111111-1111-1111-1111-111111111111"
 local fake_resume_claude = tmp .. "/fake-resume-claude"
 vim.fn.writefile({
   "#!/usr/bin/env sh",
-  "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"" .. native_claude_id .. "\"}'",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"native claude ok\"}]}}'",
+  'printf \'%s\\n\' \'{"type":"system","subtype":"init","session_id":"' .. native_claude_id .. "\"}'",
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"text","text":"native claude ok"}]}}\'',
 }, fake_resume_claude)
 vim.fn.setfperm(fake_resume_claude, "rwxr-xr-x")
 require("nvime.state").config.providers.claude.cmd = fake_resume_claude
@@ -540,9 +684,12 @@ require("nvime.agents").run({
     native_claude_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return native_claude_done
-end, 20), "persistent claude selection lane runs")
+assert(
+  vim.wait(5000, function()
+    return native_claude_done
+  end, 20),
+  "persistent claude selection lane runs"
+)
 assert_eq(native_claude_seen, native_claude_id, "claude session id is captured")
 native_claude_done = false
 require("nvime.agents").run({
@@ -555,9 +702,12 @@ require("nvime.agents").run({
     native_claude_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return native_claude_done
-end, 20), "claude resume lane runs")
+assert(
+  vim.wait(5000, function()
+    return native_claude_done
+  end, 20),
+  "claude resume lane runs"
+)
 local native_claude_audit = vim.fn.readfile(audit_path)
 local first_native_claude = ""
 local second_native_claude = ""
@@ -568,7 +718,10 @@ for _, line in ipairs(native_claude_audit) do
     second_native_claude = line
   end
 end
-assert(not first_native_claude:find("--no-session-persistence", 1, true), "persistent claude start keeps native session persistence")
+assert(
+  not first_native_claude:find("--no-session-persistence", 1, true),
+  "persistent claude start keeps native session persistence"
+)
 assert(
   first_native_claude:find("--tools Read,Glob,Grep,LS,WebFetch,WebSearch,Bash", 1, true),
   "claude selection lane allows read/search/web/shell tools"
@@ -595,9 +748,12 @@ require("nvime.agents").run({
     native_claude_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return native_claude_done
-end, 20), "claude selection lane can disable shell tools")
+assert(
+  vim.wait(5000, function()
+    return native_claude_done
+  end, 20),
+  "claude selection lane can disable shell tools"
+)
 require("nvime.state").config.selection.allow_shell = old_selection_allow_shell
 native_claude_audit = vim.fn.readfile(audit_path)
 local no_shell_native_claude = ""
@@ -622,9 +778,12 @@ require("nvime.agents").run({
     native_claude_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return native_claude_done
-end, 20), "claude selection lane can disable web tools")
+assert(
+  vim.wait(5000, function()
+    return native_claude_done
+  end, 20),
+  "claude selection lane can disable web tools"
+)
 require("nvime.state").config.selection.allow_shell = old_selection_allow_shell
 require("nvime.state").config.selection.allow_web = old_selection_allow_web
 native_claude_audit = vim.fn.readfile(audit_path)
@@ -648,9 +807,9 @@ require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 local noisy_lsp_claude = tmp .. "/noisy-lsp-claude"
 vim.fn.writefile({
   "#!/usr/bin/env sh",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"LSP\",\"input\":{}}]}}'",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"LSP\",\"input\":{}}]}}'",
-  "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}'",
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"LSP","input":{}}]}}\'',
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"LSP","input":{}}]}}\'',
+  'printf \'%s\\n\' \'{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\'',
 }, noisy_lsp_claude)
 vim.fn.setfperm(noisy_lsp_claude, "rwxr-xr-x")
 require("nvime.state").config.providers.claude.cmd = noisy_lsp_claude
@@ -668,9 +827,12 @@ require("nvime.agents").run({
     lsp_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return lsp_done
-end, 20), "claude LSP progress fixture runs")
+assert(
+  vim.wait(5000, function()
+    return lsp_done
+  end, 20),
+  "claude LSP progress fixture runs"
+)
 local lsp_progress_text = table.concat(lsp_progress)
 local _, lsp_progress_count = lsp_progress_text:gsub("%[claude%] tool: LSP", "")
 assert_eq(lsp_progress_count, 1, "duplicate Claude LSP progress is collapsed")
@@ -682,11 +844,11 @@ vim.fn.writefile({
   "#!/usr/bin/env sh",
   "test -d .git || { printf '%s\\n' 'missing temp git root'; exit 3; }",
   "cat >/dev/null",
-  "printf '%s\\n' '{\"type\":\"turn.started\",\"session_id\":\"" .. native_codex_id .. "\"}'",
-  "printf '%s\\n' '{\"item\":{\"type\":\"reasoning\",\"summary\":\"checking files\"}}'",
-  "printf '%s\\n' '{\"item\":{\"type\":\"command_execution\",\"command\":\"rg README\"}}'",
+  'printf \'%s\\n\' \'{"type":"turn.started","session_id":"' .. native_codex_id .. "\"}'",
+  'printf \'%s\\n\' \'{"item":{"type":"reasoning","summary":"checking files"}}\'',
+  'printf \'%s\\n\' \'{"item":{"type":"command_execution","command":"rg README"}}\'',
   "printf '%s\\n' '2026-05-04T19:02:05.488995Z ERROR codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit' >&2",
-  "printf '%s\\n' '{\"item\":{\"type\":\"agent_message\",\"text\":\"codex ok\"}}'",
+  'printf \'%s\\n\' \'{"item":{"type":"agent_message","text":"codex ok"}}\'',
 }, fake_codex)
 vim.fn.setfperm(fake_codex, "rwxr-xr-x")
 require("nvime.state").config.providers.codex.cmd = fake_codex
@@ -707,14 +869,20 @@ require("nvime.agents").run({
     codex_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return codex_done
-end, 20), "codex review lane runs with fake provider")
+assert(
+  vim.wait(5000, function()
+    return codex_done
+  end, 20),
+  "codex review lane runs with fake provider"
+)
 local codex_audit = table.concat(vim.fn.readfile(audit_path), "\n")
 assert(codex_audit:find("%-%-skip%-git%-repo%-check"), "codex argv skips git repo check for nvime temp workspace")
 assert(table.concat(codex_text):find("codex ok", 1, true), "codex final answer is delivered as text")
 assert(not table.concat(codex_text):find("checking files", 1, true), "codex progress is not mixed into final text")
-assert(not table.concat(codex_text):find("failed to refresh available models", 1, true), "codex model refresh stderr noise is not transcript text")
+assert(
+  not table.concat(codex_text):find("failed to refresh available models", 1, true),
+  "codex model refresh stderr noise is not transcript text"
+)
 local codex_progress_text = table.concat(codex_progress)
 assert(codex_progress_text:find("checking files", 1, true), "codex reasoning summaries stream as progress")
 assert(codex_progress_text:find("rg README", 1, true), "codex tool activity streams as progress")
@@ -728,9 +896,12 @@ require("nvime.agents").run({
     codex_edit_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return codex_edit_done
-end, 20), "codex edit lane runs with fake provider")
+assert(
+  vim.wait(5000, function()
+    return codex_edit_done
+  end, 20),
+  "codex edit lane runs with fake provider"
+)
 local codex_audit_after_edit = table.concat(vim.fn.readfile(audit_path), "\n")
 assert(codex_audit_after_edit:find("check codex edit args", 1, true), "codex edit lane is audited")
 assert(codex_audit_after_edit:find("%-%-skip%-git%-repo%-check"), "codex edit argv also skips git repo check")
@@ -749,9 +920,12 @@ require("nvime.agents").run({
     native_codex_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return native_codex_done
-end, 20), "persistent codex selection lane runs")
+assert(
+  vim.wait(5000, function()
+    return native_codex_done
+  end, 20),
+  "persistent codex selection lane runs"
+)
 assert_eq(native_codex_seen, native_codex_id, "codex session id is captured")
 native_codex_done = false
 require("nvime.agents").run({
@@ -764,9 +938,12 @@ require("nvime.agents").run({
     native_codex_done = result.code == 0
   end,
 })
-assert(vim.wait(5000, function()
-  return native_codex_done
-end, 20), "codex resume lane runs")
+assert(
+  vim.wait(5000, function()
+    return native_codex_done
+  end, 20),
+  "codex resume lane runs"
+)
 local native_codex_audit = vim.fn.readfile(audit_path)
 local first_native_codex = ""
 local second_native_codex = ""
@@ -803,10 +980,14 @@ local ask_done = vim.wait(5000, function()
   return ask and ask.selection.path == "nvime-chat.txt"
 end, 20)
 assert(ask_done, "read-only selection ask uses selection lane")
-local ask_transcript = table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
+local ask_transcript =
+  table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
 assert(not ask_transcript:find("ask exited", 1, true), "ask transcript omits successful exit status")
 assert(not vim.api.nvim_buf_is_valid(stale_selection_input), "selection removes legacy input buffers")
-assert(require("nvime.state").panels.selection.bufnr ~= chat_buf, "selection workflow has a separate buffer from general chat")
+assert(
+  require("nvime.state").panels.selection.bufnr ~= chat_buf,
+  "selection workflow has a separate buffer from general chat"
+)
 assert(require("nvime.state").panels.selection.input_bufnr ~= nil, "selection workflow has a prompt buffer")
 assert(
   require("nvime.state").panels.selection.input_bufnr == require("nvime.state").panels.selection.bufnr,
@@ -816,7 +997,10 @@ assert(
   require("nvime.state").panels.selection.input_winid == require("nvime.state").panels.selection.winid,
   "selection uses one floating window"
 )
-assert(vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false, "selection workflow locks until input focus")
+assert(
+  vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false,
+  "selection workflow locks until input focus"
+)
 assert(require("nvime.selection").session_count() == 1, "selection ask creates one resumable discussion")
 require("nvime.selection").save_sessions()
 assert(vim.fn.filereadable(sessions_path) == 1, "selection discussions persist to disk")
@@ -831,10 +1015,14 @@ require("nvime.state").panels.selection = nil
 require("nvime.selection").reload_sessions()
 assert(require("nvime.selection").session_count() == 1, "selection discussions reload from disk")
 local persisted_session = require("nvime.selection").sessions()[1]
-assert(persisted_session and persisted_session.selection.path == "nvime-chat.txt", "reloaded discussion keeps file/range")
+assert(
+  persisted_session and persisted_session.selection.path == "nvime-chat.txt",
+  "reloaded discussion keeps file/range"
+)
 require("nvime.selection").open_session(persisted_session.id, { focus_input = false })
 assert(
-  table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
+  table
+    .concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
     :find("local function add", 1, true),
   "reopened persisted discussion restores transcript"
 )
@@ -847,20 +1035,28 @@ require("nvime.selection").append(
   table.concat(selection_scroll_lines, "\n") .. "\n",
   require("nvime.selection").active_session_id()
 )
-assert(vim.wait(1000, function()
-  return table.concat(vim.api.nvim_buf_get_lines(selection_panel_for_scroll.bufnr, 0, -1, false), "\n")
-    :find("selection scroll fixture 40", 1, true)
-end, 20), "selection scroll fixture is appended")
+assert(
+  vim.wait(1000, function()
+    return table
+      .concat(vim.api.nvim_buf_get_lines(selection_panel_for_scroll.bufnr, 0, -1, false), "\n")
+      :find("selection scroll fixture 40", 1, true)
+  end, 20),
+  "selection scroll fixture is appended"
+)
 require("nvime.state").panels.selection.input_active = false
 vim.api.nvim_win_set_cursor(selection_panel_for_scroll.winid, { 2, 0 })
 vim.api.nvim_win_call(selection_panel_for_scroll.winid, function()
   vim.fn.winrestview({ topline = 1 })
 end)
 require("nvime.selection").append("selection locked output\n", require("nvime.selection").active_session_id())
-assert(vim.wait(1000, function()
-  return table.concat(vim.api.nvim_buf_get_lines(selection_panel_for_scroll.bufnr, 0, -1, false), "\n")
-    :find("selection locked output", 1, true)
-end, 20), "selection locked output is appended")
+assert(
+  vim.wait(1000, function()
+    return table
+      .concat(vim.api.nvim_buf_get_lines(selection_panel_for_scroll.bufnr, 0, -1, false), "\n")
+      :find("selection locked output", 1, true)
+  end, 20),
+  "selection locked output is appended"
+)
 local selection_locked_view = vim.api.nvim_win_call(selection_panel_for_scroll.winid, vim.fn.winsaveview)
 assert_eq(
   vim.api.nvim_win_get_cursor(selection_panel_for_scroll.winid)[1],
@@ -883,14 +1079,17 @@ local numeric_discussion = require("nvime.selection").sessions()[1]
 assert(numeric_discussion ~= nil, "chats picker has a persisted discussion row to reopen")
 vim.api.nvim_set_current_win(chats_panel.winid)
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("1", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local panel = require("nvime.state").panels.selection
-  return panel
-    and panel.bufnr == selection_session_buf
-    and panel.winid
-    and vim.api.nvim_win_is_valid(panel.winid)
-    and require("nvime.selection").active_session_id() == numeric_discussion.id
-end, 20), "ask picker numeric shortcut reopens the first discussion")
+assert(
+  vim.wait(1000, function()
+    local panel = require("nvime.state").panels.selection
+    return panel
+      and panel.bufnr == selection_session_buf
+      and panel.winid
+      and vim.api.nvim_win_is_valid(panel.winid)
+      and require("nvime.selection").active_session_id() == numeric_discussion.id
+  end, 20),
+  "ask picker numeric shortcut reopens the first discussion"
+)
 pcall(vim.cmd.stopinsert)
 require("nvime.provider").cycle({ scope = "selection" })
 local active_selection_session = require("nvime.selection").get_session(require("nvime.selection").active_session_id())
@@ -910,17 +1109,23 @@ assert(active_selection_session.provider == "claude", "selection provider cycle 
 vim.cmd("NvimeChats edit")
 local edit_chats_panel = require("nvime.state").panels.chats
 local numeric_edit_discussion = require("nvime.selection").sessions()[1]
-assert(edit_chats_panel and vim.api.nvim_win_is_valid(edit_chats_panel.winid), "NvimeChats edit opens a floating picker")
+assert(
+  edit_chats_panel and vim.api.nvim_win_is_valid(edit_chats_panel.winid),
+  "NvimeChats edit opens a floating picker"
+)
 assert(numeric_edit_discussion ~= nil, "edit picker has a persisted discussion row to reopen")
 vim.api.nvim_set_current_win(edit_chats_panel.winid)
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("1", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local panel = require("nvime.state").panels.selection
-  return panel
-    and panel.winid
-    and vim.api.nvim_win_is_valid(panel.winid)
-    and require("nvime.selection").active_session_id() == numeric_edit_discussion.id
-end, 20), "edit picker numeric shortcut reopens the first discussion")
+assert(
+  vim.wait(1000, function()
+    local panel = require("nvime.state").panels.selection
+    return panel
+      and panel.winid
+      and vim.api.nvim_win_is_valid(panel.winid)
+      and require("nvime.selection").active_session_id() == numeric_edit_discussion.id
+  end, 20),
+  "edit picker numeric shortcut reopens the first discussion"
+)
 local edit_numeric_prompt = table.concat(
   vim.api.nvim_buf_get_lines(
     require("nvime.state").panels.selection.bufnr,
@@ -932,8 +1137,11 @@ local edit_numeric_prompt = table.concat(
 )
 assert(edit_numeric_prompt:find("[claude edit]$ ", 1, true), "edit picker numeric shortcut arms the edit prompt")
 assert(vim.api.nvim_get_mode().mode ~= "i", "edit picker numeric shortcut opens in normal mode")
-assert(vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false, "edit picker numeric shortcut keeps prompt locked until input focus")
-;(function()
+assert(
+  vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false,
+  "edit picker numeric shortcut keeps prompt locked until input focus"
+);
+(function()
   local normal_enter_claude = tmp .. "/normal-enter-claude"
   vim.fn.writefile({
     "#!/usr/bin/env sh",
@@ -954,12 +1162,16 @@ assert(vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false
   vim.api.nvim_set_current_win(panel.winid)
   vim.api.nvim_win_set_cursor(panel.winid, { panel.input_start, 0 })
   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "xt", false)
-  assert(vim.wait(5000, function()
-    local session = require("nvime.selection").get_session(require("nvime.selection").active_session_id())
-    return session
-      and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n")
-        :find("normal enter submitted", 1, true)
-  end, 20), "normal-mode Enter submits a filled selection prompt after reopening a discussion")
+  assert(
+    vim.wait(5000, function()
+      local session = require("nvime.selection").get_session(require("nvime.selection").active_session_id())
+      return session
+        and table
+          .concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n")
+          :find("normal enter submitted", 1, true)
+    end, 20),
+    "normal-mode Enter submits a filled selection prompt after reopening a discussion"
+  )
   require("nvime.state").config.providers.claude.cmd = normal_enter_old_cmd
 end)()
 vim.cmd("NvimeChats ask")
@@ -972,14 +1184,16 @@ end
 assert(delete_row ~= nil, "chats picker has a persisted discussion row to delete")
 vim.api.nvim_win_set_cursor(delete_panel.winid, { delete_row, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("dd", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  return require("nvime.selection").session_count() == 0
-end, 20), "chats picker dd deletes the selected discussion")
+assert(
+  vim.wait(1000, function()
+    return require("nvime.selection").session_count() == 0
+  end, 20),
+  "chats picker dd deletes the selected discussion"
+)
 require("nvime.selection").save_sessions()
 local after_delete_json = table.concat(vim.fn.readfile(sessions_path), "\n")
-assert(not after_delete_json:find("nvime%-chat%.txt"), "deleted discussions are removed from persisted sessions")
-
-;(function()
+assert(not after_delete_json:find("nvime%-chat%.txt"), "deleted discussions are removed from persisted sessions");
+(function()
   local stale_selection_file = tmp .. "/stale-selection.lua"
   vim.fn.writefile({
     "local function stale()",
@@ -1027,12 +1241,16 @@ assert(not after_delete_json:find("nvime%-chat%.txt"), "deleted discussions are 
   })
   local stale_submit_ok, stale_submit_err = pcall(require("nvime.selection").submit_current)
   assert(stale_submit_ok, tostring(stale_submit_err))
-  assert(vim.wait(5000, function()
-    local session = require("nvime.selection").get_session(stale_selection_session_id)
-    return session
-      and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n")
-        :find("stale persisted selection reattached", 1, true)
-  end, 20), "persisted selection sessions reattach by path before submit")
+  assert(
+    vim.wait(5000, function()
+      local session = require("nvime.selection").get_session(stale_selection_session_id)
+      return session
+        and table
+          .concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n")
+          :find("stale persisted selection reattached", 1, true)
+    end, 20),
+    "persisted selection sessions reattach by path before submit"
+  )
   require("nvime.state").config.providers.claude.cmd = stale_old_claude_cmd
   require("nvime.selection").delete_sessions({ stale_selection_session_id })
 end)()
@@ -1050,7 +1268,10 @@ require("nvime.ask").start({
 })
 local prompt_only_session_id = require("nvime.selection").active_session_id()
 assert(vim.api.nvim_get_mode().mode ~= "i", "selection prompt opens in normal mode")
-assert(vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false, "selection prompt is locked until input focus")
+assert(
+  vim.bo[require("nvime.state").panels.selection.bufnr].modifiable == false,
+  "selection prompt is locked until input focus"
+)
 local old_select_selection = vim.ui.select
 vim.ui.select = function(items, _opts, on_choice)
   on_choice(items[1])
@@ -1062,7 +1283,10 @@ local templated_selection_prompt = vim.api.nvim_buf_get_lines(
   require("nvime.state").panels.selection.input_start,
   false
 )[1] or ""
-assert(templated_selection_prompt:find("Please review this selection", 1, true), "selection prompt picker fills the prompt line")
+assert(
+  templated_selection_prompt:find("Please review this selection", 1, true),
+  "selection prompt picker fills the prompt line"
+)
 vim.ui.select = old_select_selection
 pcall(vim.cmd.stopinsert)
 require("nvime.selection").delete_sessions({ prompt_only_session_id })
@@ -1095,18 +1319,32 @@ require("nvime.ask").start({
 })
 local hidden_ask_session_id = require("nvime.selection").active_session_id()
 require("nvime.selection").close()
-assert(not require("nvime.selection").is_open(hidden_ask_session_id), "hidden ask fixture closes the float while running")
-assert(vim.wait(5000, function()
-  local session = require("nvime.selection").get_session(hidden_ask_session_id)
-  return session and not session.busy and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("hidden ask done", 1, true)
-end, 20), "hidden ask still records the completed response")
+assert(
+  not require("nvime.selection").is_open(hidden_ask_session_id),
+  "hidden ask fixture closes the float while running"
+)
+assert(
+  vim.wait(5000, function()
+    local session = require("nvime.selection").get_session(hidden_ask_session_id)
+    return session
+      and not session.busy
+      and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("hidden ask done", 1, true)
+  end, 20),
+  "hidden ask still records the completed response"
+)
 assert(not require("nvime.selection").is_open(hidden_ask_session_id), "hidden ask completion does not reopen the float")
-assert(vim.wait(1000, function()
-  return vim.tbl_contains(selection_notices, "nvime ask finished. Reopen with :NvimeLast or <leader>nn.")
-end, 20), "hidden ask completion notifies")
+assert(
+  vim.wait(1000, function()
+    return vim.tbl_contains(selection_notices, "nvime ask finished. Reopen with :NvimeLast or <leader>nn.")
+  end, 20),
+  "hidden ask completion notifies"
+)
 vim.notify = old_notify_selection
 require("nvime").open_last()
-assert(require("nvime.selection").is_open(hidden_ask_session_id), "NvimeLast reopens the hidden completed selection discussion")
+assert(
+  require("nvime.selection").is_open(hidden_ask_session_id),
+  "NvimeLast reopens the hidden completed selection discussion"
+)
 require("nvime.selection").delete_sessions({ hidden_ask_session_id })
 require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 
@@ -1132,10 +1370,16 @@ local old_visual_session_id = require("nvime.selection").active_session_id()
 local old_visual_session = require("nvime.selection").get_session(old_visual_session_id)
 old_visual_session.provider_sessions.codex = "codex-visual-resume"
 require("nvime.selection").append("previous repo context\n", old_visual_session_id)
-assert(vim.wait(1000, function()
-  local session = require("nvime.selection").get_session(old_visual_session_id)
-  return session and table.concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n"):find("previous repo context", 1, true)
-end, 20), "visual resume fixture has persisted context")
+assert(
+  vim.wait(1000, function()
+    local session = require("nvime.selection").get_session(old_visual_session_id)
+    return session
+      and table
+        .concat(vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false), "\n")
+        :find("previous repo context", 1, true)
+  end, 20),
+  "visual resume fixture has persisted context"
+)
 require("nvime.selection").save_sessions()
 require("nvime.selection").reload_sessions()
 local old_select = vim.ui.select
@@ -1164,14 +1408,20 @@ require("nvime.ask").start({
 })
 vim.ui.select = old_select
 assert(visual_resume_choices and #visual_resume_choices >= 2, "visual selection chooser offers previous discussions")
-assert(visual_resume_choices[2].label:find("same file", 1, true), "visual selection chooser labels same-file discussions")
-assert(vim.wait(5000, function()
-  local ask = require("nvime.state").selection.last_ask
-  return require("nvime.selection").active_session_id() == old_visual_session_id
-    and ask
-    and ask.selection.path == "visual-resume.lua"
-    and tonumber(ask.selection.line1) == 2
-end, 20), "visual selection can resume an older persisted discussion for a new range")
+assert(
+  visual_resume_choices[2].label:find("same file", 1, true),
+  "visual selection chooser labels same-file discussions"
+)
+assert(
+  vim.wait(5000, function()
+    local ask = require("nvime.state").selection.last_ask
+    return require("nvime.selection").active_session_id() == old_visual_session_id
+      and ask
+      and ask.selection.path == "visual-resume.lua"
+      and tonumber(ask.selection.line1) == 2
+  end, 20),
+  "visual selection can resume an older persisted discussion for a new range"
+)
 local resumed_visual_session = require("nvime.selection").get_session(old_visual_session_id)
 assert_eq(resumed_visual_session.provider, "codex", "resuming a previous discussion keeps its provider")
 assert_eq(resumed_visual_session.selection.line1, 2, "resumed discussion attaches the newly highlighted range")
@@ -1206,19 +1456,21 @@ require("nvime.ask").start({
     source = "test",
   },
 })
-assert(vim.wait(5000, function()
-  local session = require("nvime.state").current_diff
-  return session and session.file == "askdiff.lua" and session.selection_session_id ~= nil
-end, 20), "ask response containing a current-file diff opens inline review")
+assert(
+  vim.wait(5000, function()
+    local session = require("nvime.state").current_diff
+    return session and session.file == "askdiff.lua" and session.selection_session_id ~= nil
+  end, 20),
+  "ask response containing a current-file diff opens inline review"
+)
 local ask_diff_panel = require("nvime.state").panels.selection
 assert(
   not ask_diff_panel or not ask_diff_panel.winid or not vim.api.nvim_win_is_valid(ask_diff_panel.winid),
   "ask output float closes when an inline diff opens"
 )
 require("nvime.diff").reject_all()
-require("nvime.state").config.providers.claude.cmd = old_claude_cmd
-
-;(function()
+require("nvime.state").config.providers.claude.cmd = old_claude_cmd;
+(function()
   local policy = require("nvime.policy")
   local copied_claude = tmp .. "/clyde"
   vim.fn.writefile(vim.fn.readfile(fake_claude), copied_claude)
@@ -1273,7 +1525,10 @@ require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 
   local uv = vim.uv or vim.loop
   local uv_handle, uv_err, uv_name = uv.spawn(fake_claude, { args = { "-p", "should be blocked" } }, function() end)
-  assert(uv_handle == nil and tostring(uv_err):find("nvime blocked command", 1, true) and uv_name == "EPERM", "direct uv.spawn block")
+  assert(
+    uv_handle == nil and tostring(uv_err):find("nvime blocked command", 1, true) and uv_name == "EPERM",
+    "direct uv.spawn block"
+  )
 
   local term_buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(term_buf, "term://claude -p should-be-blocked")
@@ -1310,33 +1565,52 @@ local edit_question_done = vim.wait(5000, function()
     and tonumber(ask.selection.line2) == 3
 end, 20)
 assert(edit_question_done, "question-shaped edit routes to ask lane")
-local edit_question_transcript = table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
-assert(not edit_question_transcript:find("ask exited", 1, true), "question-shaped edit omits successful ask exit status")
+local edit_question_transcript =
+  table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
+assert(
+  not edit_question_transcript:find("ask exited", 1, true),
+  "question-shaped edit omits successful ask exit status"
+)
 assert(require("nvime.state").current_diff == nil, "question-shaped edit does not open a diff")
 
 assert(require("nvime.state").selection.last_ask ~= nil, "ask result is retained for edit handoff")
 local selection_panel = require("nvime.state").panels.selection
-assert(require("nvime.state").selection.pending_input.mode == "ask", "ask arms a follow-up prompt for the same selection")
+assert(
+  require("nvime.state").selection.pending_input.mode == "ask",
+  "ask arms a follow-up prompt for the same selection"
+)
 require("nvime.selection").focus_input()
 assert(vim.api.nvim_get_current_win() == selection_panel.input_winid, "ask follow-up focuses the selection prompt")
 assert(vim.bo[selection_panel.bufnr].modifiable == true, "selection buffer becomes editable while typing on the prompt")
 vim.api.nvim_buf_set_lines(selection_panel.bufnr, 0, 1, false, { "oops" })
-assert(vim.wait(1000, function()
-  local guarded = table.concat(vim.api.nvim_buf_get_lines(selection_panel.bufnr, 0, -1, false), "\n")
-  return guarded:find("oops", 1, true) == nil and guarded:find("[claude ask]$ ", 1, true) ~= nil
-end, 20), "selection guard restores edits outside the prompt line")
+assert(
+  vim.wait(1000, function()
+    local guarded = table.concat(vim.api.nvim_buf_get_lines(selection_panel.bufnr, 0, -1, false), "\n")
+    return guarded:find("oops", 1, true) == nil and guarded:find("[claude ask]$ ", 1, true) ~= nil
+  end, 20),
+  "selection guard restores edits outside the prompt line"
+)
 local edit_prompt_lnum = selection_panel.input_start
-local edit_prompt_line = vim.api.nvim_buf_get_lines(selection_panel.bufnr, edit_prompt_lnum - 1, edit_prompt_lnum, false)[1] or ""
+local edit_prompt_line = vim.api.nvim_buf_get_lines(
+  selection_panel.bufnr,
+  edit_prompt_lnum - 1,
+  edit_prompt_lnum,
+  false
+)[1] or ""
 assert(edit_prompt_line:find("[claude ask]$ ", 1, true), "ask follow-up input shows the ask prompt")
 vim.api.nvim_buf_set_lines(selection_panel.bufnr, edit_prompt_lnum - 1, edit_prompt_lnum, false, {
   "[claude ask]$ ",
 })
 vim.api.nvim_win_set_cursor(selection_panel.input_winid, { edit_prompt_lnum, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("Ityped<Esc>", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local line = vim.api.nvim_buf_get_lines(selection_panel.bufnr, edit_prompt_lnum - 1, edit_prompt_lnum, false)[1] or ""
-  return line == "[claude ask]$ typed"
-end, 20), "selection I inserts after the prompt prefix on an empty prompt")
+assert(
+  vim.wait(1000, function()
+    local line = vim.api.nvim_buf_get_lines(selection_panel.bufnr, edit_prompt_lnum - 1, edit_prompt_lnum, false)[1]
+      or ""
+    return line == "[claude ask]$ typed"
+  end, 20),
+  "selection I inserts after the prompt prefix on an empty prompt"
+)
 pcall(vim.cmd.stopinsert)
 vim.api.nvim_buf_set_lines(selection_panel.bufnr, edit_prompt_lnum - 1, edit_prompt_lnum, false, {
   "[claude ask]$ can you please suggest the diff so i can approve it",
@@ -1374,7 +1648,10 @@ assert_eq(#session.blocks, 2, "replacement diff trims unchanged trailing lines")
 assert_eq(#session.visual_groups, 1, "contiguous line units render as one readable change block")
 assert(session.bufnr == nil, "diff review does not open a separate diff buffer")
 assert(vim.api.nvim_get_current_buf() == target, "diff review focuses the target file")
-assert(#vim.api.nvim_buf_get_extmarks(target, vim.api.nvim_create_namespace("nvime.diff.inline"), 0, -1, {}) > 0, "diff review renders inline extmarks")
+assert(
+  #vim.api.nvim_buf_get_extmarks(target, vim.api.nvim_create_namespace("nvime.diff.inline"), 0, -1, {}) > 0,
+  "diff review renders inline extmarks"
+)
 require("nvime.diff").accept_hunks({ session.hunks[1] })
 
 local lines = vim.api.nvim_buf_get_lines(target, 0, -1, false)
@@ -1408,10 +1685,14 @@ require("nvime.edit").start({
     source = "test",
   },
 })
-assert(vim.wait(5000, function()
-  local transcript = table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
-  return transcript:find("no patch opened", 1, true) ~= nil
-end, 20), "edit no-patch result is reported")
+assert(
+  vim.wait(5000, function()
+    local transcript =
+      table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.selection.bufnr, 0, -1, false), "\n")
+    return transcript:find("no patch opened", 1, true) ~= nil
+  end, 20),
+  "edit no-patch result is reported"
+)
 assert(
   require("nvime.state").selection.pending_input
     and require("nvime.state").selection.pending_input.mode == "edit"
@@ -1425,10 +1706,13 @@ vim.api.nvim_buf_set_lines(no_patch_panel.bufnr, no_patch_panel.input_start - 1,
   "[claude edit]$ please fix",
 })
 require("nvime.selection").submit_current()
-assert(vim.wait(5000, function()
-  local followup_diff = require("nvime.state").current_diff
-  return followup_diff and followup_diff.file == "no-patch.lua"
-end, 20), "edit follow-up prompt submits after a no-patch result")
+assert(
+  vim.wait(5000, function()
+    local followup_diff = require("nvime.state").current_diff
+    return followup_diff and followup_diff.file == "no-patch.lua"
+  end, 20),
+  "edit follow-up prompt submits after a no-patch result"
+)
 require("nvime.diff").reject_all()
 
 local review_route_claude = tmp .. "/review-route-claude"
@@ -1451,19 +1735,21 @@ require("nvime.edit").start({
     source = "test",
   },
 })
-assert(vim.wait(5000, function()
-  local ask = require("nvime.state").selection.last_ask
-  return ask and ask.question:find("nitpicky", 1, true)
-end, 20), "review-shaped edit prompt routes to ask")
+assert(
+  vim.wait(5000, function()
+    local ask = require("nvime.state").selection.last_ask
+    return ask and ask.question:find("nitpicky", 1, true)
+  end, 20),
+  "review-shaped edit prompt routes to ask"
+)
 assert(require("nvime.state").current_diff == nil, "review-shaped edit prompt does not open a diff")
 require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 
 local audit = table.concat(vim.fn.readfile(audit_path), "\n")
 assert(audit:find('"event":"blocked"', 1, true), "audit records blocked direct invocation")
 assert(audit:find('"event":"agent_start"', 1, true), "audit records trusted agent start")
-assert(audit:find('"event":"agent_exit"', 1, true), "audit records trusted agent exit")
-
-;(function()
+assert(audit:find('"event":"agent_exit"', 1, true), "audit records trusted agent exit");
+(function()
   local state = require("nvime.state")
   local audit_mod = require("nvime.audit")
   state.config.audit.log_prompts = false
@@ -1520,13 +1806,18 @@ local prose_answer = require("nvime.diff").start_session({
 }, "Yes, this looks right. I would not change it.", "claude", "")
 assert(prose_answer.status == "no_change", "plain review answer does not become a replacement")
 
-local unchanged_diff = require("nvime.diff").start_session({
-  bufnr = target,
-  line1 = 1,
-  line2 = 3,
-  path = "sample.lua",
-  source = "test",
-}, "--- a/sample.lua\n+++ b/sample.lua\n@@ -1,3 +1,3 @@\n-local function add(a, b)\n+local function add(a, b)\n-  return a + b\n+  return a + b\n-end\n+end", "claude", "")
+local unchanged_diff = require("nvime.diff").start_session(
+  {
+    bufnr = target,
+    line1 = 1,
+    line2 = 3,
+    path = "sample.lua",
+    source = "test",
+  },
+  "--- a/sample.lua\n+++ b/sample.lua\n@@ -1,3 +1,3 @@\n-local function add(a, b)\n+local function add(a, b)\n-  return a + b\n+  return a + b\n-end\n+end",
+  "claude",
+  ""
+)
 assert(unchanged_diff.status == "no_change", "semantically identical diff does not open a diff")
 
 vim.cmd.edit(tmp .. "/nested-fence.md")
@@ -1549,35 +1840,57 @@ local nested_fence_result = require("nvime.diff").start_session({
 }, "NVIME_REPLACEMENT\n````markdown\n# nvime\n\n```lua\nlocal value = 2\n```\n\ntail\n````", "claude", "")
 assert_eq(nested_fence_result.session.hunks[1].old_start, 4, "four-backtick replacement strips the outer fence")
 assert_eq(#nested_fence_result.session.blocks, 1, "nested fenced markdown replacement only changes the edited line")
-assert_eq(nested_fence_result.session.blocks[1].old_lines[1], "local value = 1", "nested replacement keeps original changed line")
-assert_eq(nested_fence_result.session.blocks[1].new_lines[1], "local value = 2", "nested replacement keeps proposed changed line")
+assert_eq(
+  nested_fence_result.session.blocks[1].old_lines[1],
+  "local value = 1",
+  "nested replacement keeps original changed line"
+)
+assert_eq(
+  nested_fence_result.session.blocks[1].new_lines[1],
+  "local value = 2",
+  "nested replacement keeps proposed changed line"
+)
 require("nvime.diff").reject_all()
-local prefaced_fence_result = require("nvime.diff").start_session({
-  bufnr = nested_fence_target,
-  line1 = 1,
-  line2 = 7,
-  path = "nested-fence.md",
-  source = "test",
-}, "I found one issue.\n\nNVIME_REPLACEMENT\n````markdown\n# nvime\n\n```lua\nlocal value = 3\n```\n\ntail\n````", "claude", "")
+local prefaced_fence_result = require("nvime.diff").start_session(
+  {
+    bufnr = nested_fence_target,
+    line1 = 1,
+    line2 = 7,
+    path = "nested-fence.md",
+    source = "test",
+  },
+  "I found one issue.\n\nNVIME_REPLACEMENT\n````markdown\n# nvime\n\n```lua\nlocal value = 3\n```\n\ntail\n````",
+  "claude",
+  ""
+)
 assert_eq(prefaced_fence_result.session.hunks[1].old_start, 4, "replacement parser finds NVIME mode after prose")
-assert_eq(prefaced_fence_result.session.blocks[1].new_lines[1], "local value = 3", "prefaced replacement keeps nested fence content")
+assert_eq(
+  prefaced_fence_result.session.blocks[1].new_lines[1],
+  "local value = 3",
+  "prefaced replacement keeps nested fence content"
+)
 require("nvime.diff").reject_all()
 
 vim.cmd.edit(tmp .. "/bare-diff.md")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "# install",
   "The plugin auto-registers with defaults when it is on `runtimepath`, so no",
-  "explicit `setup` call is required to use it; call `require(\"nvime\").setup({ ... })`",
+  'explicit `setup` call is required to use it; call `require("nvime").setup({ ... })`',
   "## next",
 })
 local bare_diff_target = vim.api.nvim_get_current_buf()
-local bare_diff_result = require("nvime.diff").start_session({
-  bufnr = bare_diff_target,
-  line1 = 1,
-  line2 = 4,
-  path = "bare-diff.md",
-  source = "test",
-}, "NVIME_DIFF\n```diff\n@@\n The plugin auto-registers with defaults when it is on `runtimepath`, so no\n-explicit `setup` call is required to use it; call `require(\"nvime\").setup({ ... })`\n+explicit `setup` call is required. Call `require(\"nvime\").setup({ ... })` only\n+when you want to override the defaults shown below.\n```", "claude", "")
+local bare_diff_result = require("nvime.diff").start_session(
+  {
+    bufnr = bare_diff_target,
+    line1 = 1,
+    line2 = 4,
+    path = "bare-diff.md",
+    source = "test",
+  },
+  'NVIME_DIFF\n```diff\n@@\n The plugin auto-registers with defaults when it is on `runtimepath`, so no\n-explicit `setup` call is required to use it; call `require("nvime").setup({ ... })`\n+explicit `setup` call is required. Call `require("nvime").setup({ ... })` only\n+when you want to override the defaults shown below.\n```',
+  "claude",
+  ""
+)
 assert_eq(bare_diff_result.status, "diff", "bare @@ NVIME_DIFF is anchored into a reviewed hunk")
 assert_eq(bare_diff_result.session.hunks[1].old_start, 2, "bare @@ diff anchors on selected context")
 assert_eq(#bare_diff_result.session.blocks, 2, "bare @@ diff creates line-level review blocks")
@@ -1585,7 +1898,7 @@ require("nvime.diff").accept_all()
 local bare_diff_lines = vim.api.nvim_buf_get_lines(bare_diff_target, 0, -1, false)
 assert_eq(
   table.concat(bare_diff_lines, "\n"),
-  "# install\nThe plugin auto-registers with defaults when it is on `runtimepath`, so no\nexplicit `setup` call is required. Call `require(\"nvime\").setup({ ... })` only\nwhen you want to override the defaults shown below.\n## next",
+  '# install\nThe plugin auto-registers with defaults when it is on `runtimepath`, so no\nexplicit `setup` call is required. Call `require("nvime").setup({ ... })` only\nwhen you want to override the defaults shown below.\n## next',
   "bare @@ diff applies through inline review"
 )
 
@@ -1593,24 +1906,29 @@ vim.cmd.edit(tmp .. "/lazy-install.md")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "```lua",
   "{",
-  "  \"mengsig/nvime\",",
+  '  "mengsig/nvime",',
   "  opts = {},",
   "}",
   "```",
   "",
   "With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you.",
   "If the plugin is loaded directly from `runtimepath`, `plugin/nvime.lua`",
-  "registers the defaults. Call `require(\"nvime\").setup({ ... })` only when you",
+  'registers the defaults. Call `require("nvime").setup({ ... })` only when you',
   "want to override them.",
 })
 local lazy_install_target = vim.api.nvim_get_current_buf()
-local lazy_install_result = require("nvime.diff").start_session({
-  bufnr = lazy_install_target,
-  line1 = 8,
-  line2 = 11,
-  path = "lazy-install.md",
-  source = "test",
-}, "NVIME_DIFF\n```diff\n--- a/lazy-install.md\n+++ b/lazy-install.md\n@@ -6,6 +6,7 @@\n```\n\n-With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you.\n+With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you,\n+and it is where you can pass overrides.\n If the plugin is loaded directly from `runtimepath`, `plugin/nvime.lua`\n registers the defaults. Call `require(\"nvime\").setup({ ... })` only when you\n want to override them.\n```", "codex", "")
+local lazy_install_result = require("nvime.diff").start_session(
+  {
+    bufnr = lazy_install_target,
+    line1 = 8,
+    line2 = 11,
+    path = "lazy-install.md",
+    source = "test",
+  },
+  'NVIME_DIFF\n```diff\n--- a/lazy-install.md\n+++ b/lazy-install.md\n@@ -6,6 +6,7 @@\n```\n\n-With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you.\n+With lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you,\n+and it is where you can pass overrides.\n If the plugin is loaded directly from `runtimepath`, `plugin/nvime.lua`\n registers the defaults. Call `require("nvime").setup({ ... })` only when you\n want to override them.\n```',
+  "codex",
+  ""
+)
 assert_eq(lazy_install_result.status, "diff", "agent diff with unprefixed context lines still opens a patch")
 assert(
   lazy_install_result.session.warnings and #lazy_install_result.session.warnings > 0,
@@ -1621,14 +1939,14 @@ require("nvime.diff").accept_all()
 local lazy_install_lines = vim.api.nvim_buf_get_lines(lazy_install_target, 0, -1, false)
 assert_eq(
   table.concat(lazy_install_lines, "\n"),
-  "```lua\n{\n  \"mengsig/nvime\",\n  opts = {},\n}\n```\n\nWith lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you,\nand it is where you can pass overrides.\nIf the plugin is loaded directly from `runtimepath`, `plugin/nvime.lua`\nregisters the defaults. Call `require(\"nvime\").setup({ ... })` only when you\nwant to override them.",
+  '```lua\n{\n  "mengsig/nvime",\n  opts = {},\n}\n```\n\nWith lazy.nvim, `opts = {}` is enough because lazy calls `setup({})` for you,\nand it is where you can pass overrides.\nIf the plugin is loaded directly from `runtimepath`, `plugin/nvime.lua`\nregisters the defaults. Call `require("nvime").setup({ ... })` only when you\nwant to override them.',
   "agent diff with unprefixed context applies the intended README text"
 )
 
 vim.cmd.edit(tmp .. "/duplicate-diff.md")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "The plugin auto-registers with defaults when it is on `runtimepath`, so no",
-  "explicit `setup` call is required. Call `require(\"nvime\").setup({ ... })` only",
+  'explicit `setup` call is required. Call `require("nvime").setup({ ... })` only',
   "when you want to override the defaults.",
 })
 local duplicate_diff_target = vim.api.nvim_get_current_buf()
@@ -1639,11 +1957,11 @@ local duplicate_diff = table.concat({
   "+++ b/duplicate-diff.md",
   "@@ -1,3 +1,4 @@",
   "-The plugin auto-registers with defaults when it is on `runtimepath`, so no",
-  "-explicit `setup` call is required. Call `require(\"nvime\").setup({ ... })` only",
+  '-explicit `setup` call is required. Call `require("nvime").setup({ ... })` only',
   "-when you want to override the defaults.",
   "+With lazy.nvim, `opts = {}` is enough - lazy will call `setup({})` for you.",
   "+If your manager doesn't do that, nvime still auto-registers with defaults as",
-  "+soon as it is on `runtimepath`. Call `require(\"nvime\").setup({ ... })`",
+  '+soon as it is on `runtimepath`. Call `require("nvime").setup({ ... })`',
   "+explicitly only to override the defaults.",
   "```NVIME_DIFF",
   "```diff",
@@ -1651,11 +1969,11 @@ local duplicate_diff = table.concat({
   "+++ b/duplicate-diff.md",
   "@@ -1,3 +1,4 @@",
   "-The plugin auto-registers with defaults when it is on `runtimepath`, so no",
-  "-explicit `setup` call is required. Call `require(\"nvime\").setup({ ... })` only",
+  '-explicit `setup` call is required. Call `require("nvime").setup({ ... })` only',
   "-when you want to override the defaults.",
   "+With lazy.nvim, `opts = {}` is enough - lazy will call `setup({})` for you.",
   "+If your manager doesn't do that, nvime still auto-registers with defaults as",
-  "+soon as it is on `runtimepath`. Call `require(\"nvime\").setup({ ... })`",
+  '+soon as it is on `runtimepath`. Call `require("nvime").setup({ ... })`',
   "+explicitly only to override the defaults.",
   "```",
 }, "\n")
@@ -1671,10 +1989,13 @@ require("nvime.diff").accept_all()
 local duplicate_diff_lines = vim.api.nvim_buf_get_lines(duplicate_diff_target, 0, -1, false)
 assert_eq(
   table.concat(duplicate_diff_lines, "\n"),
-  "With lazy.nvim, `opts = {}` is enough - lazy will call `setup({})` for you.\nIf your manager doesn't do that, nvime still auto-registers with defaults as\nsoon as it is on `runtimepath`. Call `require(\"nvime\").setup({ ... })`\nexplicitly only to override the defaults.",
+  'With lazy.nvim, `opts = {}` is enough - lazy will call `setup({})` for you.\nIf your manager doesn\'t do that, nvime still auto-registers with defaults as\nsoon as it is on `runtimepath`. Call `require("nvime").setup({ ... })`\nexplicitly only to override the defaults.',
   "duplicate NVIME_DIFF accept-all applies only proposed content once"
 )
-assert(not table.concat(duplicate_diff_lines, "\n"):find("%+%+ b/duplicate%-diff%.md"), "diff file header is never applied as content")
+assert(
+  not table.concat(duplicate_diff_lines, "\n"):find("%+%+ b/duplicate%-diff%.md"),
+  "diff file header is never applied as content"
+)
 
 vim.cmd.edit(tmp .. "/generate.lua")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
@@ -1688,13 +2009,13 @@ local generate_result = require("nvime.diff").start_session({
   line2 = 1,
   path = "generate.lua",
   source = "range",
-}, "NVIME_REPLACEMENT\n```lua\nlocal function greet(name)\n  return \"hello \" .. name\nend\n```", "claude", "")
+}, 'NVIME_REPLACEMENT\n```lua\nlocal function greet(name)\n  return "hello " .. name\nend\n```', "claude", "")
 assert(generate_result.status == "diff", "blank selected range can generate code")
 require("nvime.diff").accept_all()
 local generated_lines = vim.api.nvim_buf_get_lines(generate_target, 0, -1, false)
 assert_eq(
   table.concat(generated_lines, "\n"),
-  "local function greet(name)\n  return \"hello \" .. name\nend\nlocal after = true",
+  'local function greet(name)\n  return "hello " .. name\nend\nlocal after = true',
   "generated function replaces the highlighted blank area only"
 )
 
@@ -1714,7 +2035,11 @@ assert(gitignore_result.status == "diff", "non-code selected range can be comple
 assert_eq(gitignore_result.session.hunks[1].old_count, 0, "completion replacement trims unchanged selected prefix")
 require("nvime.diff").accept_all()
 local gitignore_lines = vim.api.nvim_buf_get_lines(gitignore_target, 0, -1, false)
-assert_eq(table.concat(gitignore_lines, "\n"), "node_modules/\ndist/\n.env\n*.log", "gitignore completion applies through reviewed diff")
+assert_eq(
+  table.concat(gitignore_lines, "\n"),
+  "node_modules/\ndist/\n.env\n*.log",
+  "gitignore completion applies through reviewed diff"
+)
 
 vim.cmd.edit(tmp .. "/blocks.lua")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
@@ -1725,13 +2050,18 @@ vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "local e = 5",
 })
 local block_target = vim.api.nvim_get_current_buf()
-local block_session_result = require("nvime.diff").start_session({
-  bufnr = block_target,
-  line1 = 1,
-  line2 = 5,
-  path = "blocks.lua",
-  source = "test",
-}, "--- a/blocks.lua\n+++ b/blocks.lua\n@@ -1,5 +1,5 @@\n local a = 1\n-local b = 2\n+local b = 20\n local c = 3\n-local d = 4\n+local d = 40\n local e = 5", "claude", "")
+local block_session_result = require("nvime.diff").start_session(
+  {
+    bufnr = block_target,
+    line1 = 1,
+    line2 = 5,
+    path = "blocks.lua",
+    source = "test",
+  },
+  "--- a/blocks.lua\n+++ b/blocks.lua\n@@ -1,5 +1,5 @@\n local a = 1\n-local b = 2\n+local b = 20\n local c = 3\n-local d = 4\n+local d = 40\n local e = 5",
+  "claude",
+  ""
+)
 assert(block_session_result.status == "diff", "multi-line inline diff opens")
 assert_eq(#block_session_result.session.blocks, 2, "diff splits separated changes into line units")
 assert_eq(#block_session_result.session.visual_groups, 2, "separated changes render as separate readable blocks")
@@ -1759,8 +2089,7 @@ assert_eq(
   "diff review proposed pane shows the full agent result"
 )
 assert(
-  vim.fn.maparg("q", "n", false, true).buffer == 1
-    or vim.api.nvim_buf_get_keymap(block_target, "n")[1] ~= nil,
+  vim.fn.maparg("q", "n", false, true).buffer == 1 or vim.api.nvim_buf_get_keymap(block_target, "n")[1] ~= nil,
   "diff review installs a buffer-local q on the editable pane"
 )
 assert(vim.bo[block_target].modifiable, "diff review target pane remains directly editable")
@@ -1818,10 +2147,27 @@ assert_eq(#group_result.session.blocks, 3, "group fixture keeps line-level revie
 assert_eq(#group_result.session.visual_groups, 1, "group fixture renders one readable block")
 vim.api.nvim_win_set_cursor(0, { 2, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ga", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local group_lines = vim.api.nvim_buf_get_lines(group_target, 0, -1, false)
-  return table.concat(group_lines, "\n") == "ONE\nTWO\nTHREE"
-end, 20), "normal ga accepts the whole visual block")
+assert(
+  vim.wait(1000, function()
+    local group_lines = vim.api.nvim_buf_get_lines(group_target, 0, -1, false)
+    return table.concat(group_lines, "\n") == "ONE\nTWO\nTHREE"
+  end, 20),
+  "normal ga accepts the whole visual block"
+)
+assert(vim.fn.maparg("gu", "n") ~= "", "undo accepted block mapping is installed")
+require("nvime.diff").undo_last_accept()
+assert_eq(
+  table.concat(vim.api.nvim_buf_get_lines(group_target, 0, -1, false), "\n"),
+  "ONE\nTWO\nthree",
+  "undo restores the most recently accepted block"
+)
+require("nvime.diff").undo_last_accept()
+require("nvime.diff").undo_last_accept()
+assert_eq(
+  table.concat(vim.api.nvim_buf_get_lines(group_target, 0, -1, false), "\n"),
+  "one\ntwo\nthree",
+  "accepted block undo can unwind multiple accepted blocks"
+)
 
 vim.cmd.edit(tmp .. "/accept-all.lua")
 vim.api.nvim_buf_set_lines(0, 0, -1, false, {
@@ -1838,10 +2184,13 @@ require("nvime.diff").start_session({
   source = "test",
 }, "--- a/accept-all.lua\n+++ b/accept-all.lua\n@@ -1,3 +1,3 @@\n-left\n+LEFT\n middle\n-right\n+RIGHT", "claude", "")
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("gA", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  local accept_all_lines = vim.api.nvim_buf_get_lines(accept_all_target, 0, -1, false)
-  return table.concat(accept_all_lines, "\n") == "LEFT\nmiddle\nRIGHT"
-end, 20), "normal gA accepts all unresolved blocks")
+assert(
+  vim.wait(1000, function()
+    local accept_all_lines = vim.api.nvim_buf_get_lines(accept_all_target, 0, -1, false)
+    return table.concat(accept_all_lines, "\n") == "LEFT\nmiddle\nRIGHT"
+  end, 20),
+  "normal gA accepts all unresolved blocks"
+)
 assert(vim.fn.maparg("gA!", "n") ~= "", "force accept-all mapping is installed")
 
 do
@@ -1867,9 +2216,11 @@ do
     "normal accept refuses to overwrite drifted live text"
   )
   local saw_conflict_hl = false
-  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(conflict_target, vim.api.nvim_create_namespace("nvime.diff.inline"), 0, -1, {
-    details = true,
-  })) do
+  for _, mark in
+    ipairs(vim.api.nvim_buf_get_extmarks(conflict_target, vim.api.nvim_create_namespace("nvime.diff.inline"), 0, -1, {
+      details = true,
+    }))
+  do
     local details = mark[4] or {}
     saw_conflict_hl = saw_conflict_hl or details.line_hl_group == "NvimeConflict"
   end
@@ -1903,13 +2254,19 @@ local deny_result = require("nvime.diff").start_session({
 assert_eq(#deny_result.session.visual_groups, 2, "deny fixture renders two readable blocks")
 vim.api.nvim_win_set_cursor(0, { 1, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("gb", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  return deny_result.session.blocks[1].status == "rejected" and deny_result.session.blocks[2].status == "pending"
-end, 20), "normal gb rejects the current visual block")
+assert(
+  vim.wait(1000, function()
+    return deny_result.session.blocks[1].status == "rejected" and deny_result.session.blocks[2].status == "pending"
+  end, 20),
+  "normal gb rejects the current visual block"
+)
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("gB", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-  return deny_result.session.blocks[1].status == "rejected" and deny_result.session.blocks[2].status == "rejected"
-end, 20), "normal gB rejects all remaining visual blocks")
+assert(
+  vim.wait(1000, function()
+    return deny_result.session.blocks[1].status == "rejected" and deny_result.session.blocks[2].status == "rejected"
+  end, 20),
+  "normal gB rejects all remaining visual blocks"
+)
 local deny_lines = vim.api.nvim_buf_get_lines(deny_target, 0, -1, false)
 assert_eq(table.concat(deny_lines, "\n"), "one\ntwo\nthree\nfour", "reject bindings leave current code untouched")
 
@@ -1929,10 +2286,13 @@ require("nvime.diff").start_session({
 }, "--- a/visual.lua\n+++ b/visual.lua\n@@ -1,3 +1,3 @@\n-red\n-green\n-blue\n+RED\n+GREEN\n+BLUE", "claude", "")
 vim.api.nvim_win_set_cursor(0, { 1, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("Vjga", true, false, true), "xt", false)
-assert(vim.wait(1000, function()
-local visual_lines = vim.api.nvim_buf_get_lines(visual_target, 0, -1, false)
-  return visual_lines[1] == "RED" and visual_lines[2] == "GREEN" and visual_lines[3] == "blue"
-end, 20), "visual ga accepts every pending line touched by the visual range")
+assert(
+  vim.wait(1000, function()
+    local visual_lines = vim.api.nvim_buf_get_lines(visual_target, 0, -1, false)
+    return visual_lines[1] == "RED" and visual_lines[2] == "GREEN" and visual_lines[3] == "blue"
+  end, 20),
+  "visual ga accepts every pending line touched by the visual range"
+)
 
 vim.cmd.edit(tmp .. "/large.lua")
 local large_original = {}

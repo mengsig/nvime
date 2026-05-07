@@ -127,7 +127,11 @@ local function build_prompt(selection, intent)
     "Before producing NVIME_DIFF, re-read the selected code: do not insert a line that already exists, do not duplicate an existing return/break/continue, and verify your hunk's context lines match the selected text exactly.",
     "Prefer NVIME_DIFF for any change to existing nonblank text. Use NVIME_DIFF with the smallest changed hunks only. NVIME_DIFF is required for Markdown, large selections, and selections containing code fences.",
     "NVIME_REPLACEMENT is only acceptable for blank or near-blank selected ranges or tiny whole-range rewrites. The replacement is inserted verbatim at the selected range; no indentation is added for you. If the selection is a blank line inside an indented block (e.g. a Python function body), include the exact leading whitespace of the surrounding scope on every non-empty replacement line.",
-    "NVIME_DIFF must include --- a/" .. selection.path .. ", +++ b/" .. selection.path .. ", and ranged @@ -line,count +line,count @@ headers.",
+    "NVIME_DIFF must include --- a/"
+      .. selection.path
+      .. ", +++ b/"
+      .. selection.path
+      .. ", and ranged @@ -line,count +line,count @@ headers.",
     "Use one response form:",
     "",
     "NVIME_NO_CHANGE",
@@ -235,7 +239,8 @@ run_edit = function(selection, intent, provider, session_opts)
   local agent_session = selection_state.agent_run_opts(session_id, provider)
   state.selection.last_edit_prompt = prompt
   selection_state.set_busy(true, session_id)
-  agents.run({
+  local handle
+  handle = agents.run({
     provider = provider,
     lane = lane,
     prompt = prompt,
@@ -249,9 +254,32 @@ run_edit = function(selection, intent, provider, session_opts)
     on_progress = function(text)
       selection_state.set_progress(text, session_id)
     end,
+    on_handle = function(agent_handle)
+      handle = agent_handle
+      selection_state.attach_process(session_id, agent_handle, {
+        lane = lane,
+        provider = provider,
+      })
+    end,
     on_exit = function(result)
       local was_open = selection_state.is_open(session_id)
+      local run_session = selection_state.get_session(session_id)
+      local cancelled = run_session
+        and (
+          (handle and run_session.cancelled_handles and run_session.cancelled_handles[handle] == true)
+          or (not handle and run_session.cancelled == true)
+        )
+      if run_session and handle and run_session.cancelled_handles then
+        run_session.cancelled_handles[handle] = nil
+      end
+      selection_state.clear_process(session_id, handle)
       selection_state.set_busy(false, session_id)
+      if run_session and cancelled then
+        run_session.cancelled = false
+      end
+      if cancelled then
+        return
+      end
       local opened_diff = false
       if result.code ~= 0 then
         selection_state.append("\n[nvime] edit failed with code " .. tostring(result.code) .. "\n", session_id)
@@ -266,7 +294,12 @@ run_edit = function(selection, intent, provider, session_opts)
           opened_diff = true
         end
       end
-      arm_edit_followup(selection, provider, session_id, not opened_diff and was_open and selection_state.active_session_id() == session_id)
+      arm_edit_followup(
+        selection,
+        provider,
+        session_id,
+        not opened_diff and was_open and selection_state.active_session_id() == session_id
+      )
       if not opened_diff and not was_open then
         selection_state.notify_finished("edit", session_id, result.code)
       end
@@ -275,6 +308,9 @@ run_edit = function(selection, intent, provider, session_opts)
       end
     end,
   })
+  if not handle then
+    selection_state.set_busy(false, session_id)
+  end
 end
 
 function M.start(opts)
@@ -403,7 +439,8 @@ function M.continue_remaining()
         "",
         "User question: " .. input,
       }, "\n")
-      agents.run({
+      local handle
+      handle = agents.run({
         provider = selected_provider,
         lane = "edit",
         prompt = prompt,
@@ -418,12 +455,36 @@ function M.continue_remaining()
         on_progress = function(text)
           selection_state.set_progress(text, selection_session_id)
         end,
+        on_handle = function(agent_handle)
+          handle = agent_handle
+          selection_state.attach_process(selection_session_id, agent_handle, {
+            lane = "discuss",
+            provider = selected_provider,
+          })
+        end,
         on_exit = function(result)
           local was_open = selection_state.is_open(selection_session_id)
+          local run_session = selection_state.get_session(selection_session_id)
+          local cancelled = run_session
+            and (
+              (handle and run_session.cancelled_handles and run_session.cancelled_handles[handle] == true)
+              or (not handle and run_session.cancelled == true)
+            )
+          if run_session and handle and run_session.cancelled_handles then
+            run_session.cancelled_handles[handle] = nil
+          end
+          selection_state.clear_process(selection_session_id, handle)
           selection_state.set_busy(false, selection_session_id)
+          if run_session and cancelled then
+            run_session.cancelled = false
+          end
+          if cancelled then
+            return
+          end
           local body = table.concat(response)
           local opened_diff = false
-          if body:find("NVIME_DIFF", 1, true)
+          if
+            body:find("NVIME_DIFF", 1, true)
             or body:find("NVIME_REPLACEMENT", 1, true)
             or body:find("```diff", 1, true)
             or body:match("^%s*%-%-%- a/")
@@ -439,7 +500,10 @@ function M.continue_remaining()
             end
           end
           if result.code ~= 0 then
-            selection_state.append("\n[nvime] discuss failed with code " .. tostring(result.code) .. "\n", selection_session_id)
+            selection_state.append(
+              "\n[nvime] discuss failed with code " .. tostring(result.code) .. "\n",
+              selection_session_id
+            )
           end
           if opened_diff then
             selection_state.close()
@@ -448,6 +512,9 @@ function M.continue_remaining()
           end
         end,
       })
+      if not handle then
+        selection_state.set_busy(false, selection_session_id)
+      end
     end,
   })
 end

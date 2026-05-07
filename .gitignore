@@ -31,6 +31,9 @@ doc/tags
 *.swp
 *.swo
 *.swn
-REVIEW.md
 scripts/screenshot-ui
 bench/
+
+# Local files for development
+REVIEW.md
+IMPROVEMENTS.md

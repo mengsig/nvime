@@ -44,6 +44,8 @@ want to override them.
 Repeated identical `setup()` calls are ignored. Use
 `force = true` in the setup opts when you intentionally want to re-initialize
 wrappers, commands, and keymaps.
+Unknown config keys and obvious type mismatches are reported with `vim.notify`
+when setup runs.
 
 ## Configuration
 
@@ -241,6 +243,7 @@ Inside the chat window:
 - `i`, `I`, `a`, `A`, `o`, `O`: jump to the prompt
 - `?`: choose a configured prompt template
 - prompt `<CR>`: submit the current message
+- `<C-c>`: cancel the active chat/review agent
 - `p`, `<Tab>`: cycle Claude/Codex for the next chat prompt
 - `P`: choose Claude or Codex for the next chat prompt
 - `<Esc>`: return focus to the scrollback
@@ -309,6 +312,7 @@ that active discussion's next prompt, while earlier Claude/Codex messages remain
 in the shared scrollback for context.
 
 Selection discussion windows use the same in-window keys as the chat window above.
+`<C-c>` cancels the active Ask/Edit/Discuss agent for that discussion.
 
 ## Inline Diff Review
 
@@ -333,6 +337,8 @@ Inline diff mappings in the target file:
 - `gA`: accept all unresolved blocks
 - `gA!`: force-accept all unresolved blocks, bypassing live-content conflict
   checks and writing a `block_force_applied` audit event
+- `gu`: undo the most recently accepted block if the accepted text is still
+  unchanged
 - `gb`: reject the current visual change block
 - visual `gb`: reject every unresolved changed line touched by the visual range
 - `gB`: reject all unresolved blocks
@@ -430,6 +436,20 @@ In help, see `:help nvime-protocol`.
 - command-line detection via `CmdlineLeave` when `guard.block_cmdline = true`
 
 Direct Claude/Codex use inside these paths is denied unless it is launched by `nvime` itself. Every allow/deny is logged to `.nvime/audit.jsonl` by default.
+
+Operational commands:
+
+- `:NvimeCancel`: cancel the active nvime agent run
+- `:NvimeDisable`: cancel running agents, restore wrapped Neovim APIs, and stop
+  persisting sessions while disabled
+- `:NvimeEnable`: reinstall nvime wrappers after `:NvimeDisable`
+- `:checkhealth nvime`: report provider executables, writable state directory,
+  guard status, Tree-sitter parser availability, and recent blocked events
+
+`:NvimeDisable` restores the raw Neovim APIs that nvime wrapped. If another
+plugin loaded after nvime stored a reference to a wrapped function, that stored
+reference still points at the wrapper; callers that resolve `vim.system`,
+`jobstart`, or similar APIs after disable see the restored raw functions.
 
 ## Test
 

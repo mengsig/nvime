@@ -2,6 +2,7 @@ local M = {
   config = nil,
   setup_done = false,
   guard_installed = false,
+  disabled = false,
   trusted_depth = 0,
   panels = {},
   last_session = nil,

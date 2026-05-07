@@ -146,6 +146,173 @@ local function is_list(value)
   return count == #value
 end
 
+local optional_types = {
+  ["audit.path"] = { "string", "nil" },
+  ["sessions.path"] = { "string", "nil" },
+  ["sessions.chat_path"] = { "string", "nil" },
+  ["ui.spinner_frames"] = { "table", "nil" },
+}
+
+local function type_label(value)
+  if type(value) == "table" and is_list(value) then
+    return "list"
+  end
+  return type(value)
+end
+
+local function matches_type(value, expected)
+  if type(expected) == "table" then
+    for _, item in ipairs(expected) do
+      if matches_type(value, item) then
+        return true
+      end
+    end
+    return false
+  end
+  if expected == "list" then
+    return is_list(value)
+  end
+  if expected == "integer" then
+    return type(value) == "number" and value % 1 == 0
+  end
+  return type(value) == expected
+end
+
+local function validate_with_vim(path, value, expected)
+  local validator = expected
+  if expected == "integer" then
+    validator = function(item)
+      return matches_type(item, "integer")
+    end
+  elseif expected == "list" then
+    validator = function(item)
+      return is_list(item)
+    end
+  elseif type(expected) == "table" then
+    validator = function(item)
+      return matches_type(item, expected)
+    end
+  end
+  if pcall(vim.validate, { [path] = { value, validator } }) then
+    return true
+  end
+  if pcall(vim.validate, path, value, validator) then
+    return true
+  end
+  return false
+end
+
+local function warn(warnings, message)
+  warnings[#warnings + 1] = message
+end
+
+local function validate_leaf(warnings, path, value, expected)
+  if not validate_with_vim(path, value, expected) or not matches_type(value, expected) then
+    local label = type(expected) == "table" and table.concat(expected, "|") or expected
+    warn(warnings, path .. " should be " .. label .. ", got " .. type_label(value))
+  end
+end
+
+local function validate_provider(warnings, name, value)
+  local path = "providers." .. tostring(name)
+  if type(value) ~= "table" then
+    validate_leaf(warnings, path, value, "table")
+    return
+  end
+  for key, item in pairs(value) do
+    local child = path .. "." .. tostring(key)
+    if key == "cmd" then
+      validate_leaf(warnings, child, item, "string")
+    else
+      warn(warnings, "unknown nvime config key: " .. child)
+    end
+  end
+end
+
+local function validate_prompt_entry(warnings, path, value)
+  if type(value) ~= "table" then
+    validate_leaf(warnings, path, value, "table")
+    return
+  end
+  for key, item in pairs(value) do
+    local child = path .. "." .. tostring(key)
+    if key == "label" or key == "prompt" or key == "lane" then
+      validate_leaf(warnings, child, item, "string")
+    else
+      warn(warnings, "unknown nvime config key: " .. child)
+    end
+  end
+end
+
+local function validate_prompts(warnings, path, value)
+  if type(value) ~= "table" then
+    validate_leaf(warnings, path, value, "table")
+    return
+  end
+  for name, items in pairs(value) do
+    local child = path .. "." .. tostring(name)
+    if not is_list(items) then
+      validate_leaf(warnings, child, items, "list")
+    else
+      for index, item in ipairs(items) do
+        validate_prompt_entry(warnings, child .. "." .. tostring(index), item)
+      end
+    end
+  end
+end
+
+local function validate_icons(warnings, path, value)
+  if type(value) ~= "table" then
+    validate_leaf(warnings, path, value, "table")
+    return
+  end
+  for name, item in pairs(value) do
+    validate_leaf(warnings, path .. "." .. tostring(name), item, "string")
+  end
+end
+
+local function validate_table(warnings, user, schema, path)
+  if type(user) ~= "table" then
+    validate_leaf(warnings, path ~= "" and path or "opts", user, "table")
+    return
+  end
+  for key, value in pairs(user) do
+    if not (path == "" and key == "force") then
+      local child = path ~= "" and (path .. "." .. tostring(key)) or tostring(key)
+      if child == "providers" then
+        if type(value) ~= "table" then
+          validate_leaf(warnings, child, value, "table")
+        else
+          for provider_name, provider_opts in pairs(value) do
+            validate_provider(warnings, provider_name, provider_opts)
+          end
+        end
+      elseif child == "prompts" then
+        validate_prompts(warnings, child, value)
+      elseif child == "ui.icons" then
+        validate_icons(warnings, child, value)
+      elseif optional_types[child] then
+        validate_leaf(warnings, child, value, optional_types[child])
+      elseif schema[key] == nil then
+        warn(warnings, "unknown nvime config key: " .. child)
+      elseif type(schema[key]) == "table" and not is_list(schema[key]) then
+        validate_table(warnings, value, schema[key], child)
+      else
+        validate_leaf(warnings, child, value, type_label(schema[key]))
+      end
+    end
+  end
+end
+
+function M.validate(opts)
+  local warnings = {}
+  validate_table(warnings, opts or {}, M.defaults, "")
+  for _, message in ipairs(warnings) do
+    vim.notify(message, vim.log.levels.WARN)
+  end
+  return warnings
+end
+
 local function merge(base, override)
   local out = vim.deepcopy(base)
   for key, value in pairs(override or {}) do
@@ -159,6 +326,7 @@ local function merge(base, override)
 end
 
 function M.resolve(opts)
+  M.validate(opts or {})
   return merge(M.defaults, opts or {})
 end
 

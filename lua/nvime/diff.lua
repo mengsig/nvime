@@ -780,6 +780,9 @@ local function install_buffer_maps(session)
   vim.keymap.set("n", "gb", function()
     require("nvime.diff").reject_current_group()
   end, opts)
+  vim.keymap.set("n", "gu", function()
+    require("nvime.diff").undo_last_accept()
+  end, opts)
   vim.keymap.set("x", "gb", function()
     require("nvime.diff").reject_selection()
   end, opts)
@@ -797,6 +800,9 @@ local function install_buffer_maps(session)
   end, opts)
   vim.keymap.set("n", "gB", function()
     require("nvime.diff").reject_all()
+  end, opts)
+  vim.keymap.set("n", "gu", function()
+    require("nvime.diff").undo_last_accept()
   end, opts)
   vim.keymap.set("n", "gR", function()
     require("nvime.diff").reject_all()
@@ -1425,6 +1431,7 @@ function M.start_session(selection, response, provider, prompt)
     provider = provider,
     prompt = prompt,
     applied = {},
+    applied_history = {},
   }
 
   local warnings = {}
@@ -1726,12 +1733,22 @@ local function apply_block(session, block, start_line_override, opts)
       end_line = end_index,
     })
   end
+  local old_snapshot = vim.api.nvim_buf_get_lines(session.target_bufnr, start_index, end_index, false)
   vim.api.nvim_buf_set_lines(session.target_bufnr, start_index, end_index, false, replacement)
   block.status = "accepted"
   block.conflict = nil
   session.applied[#session.applied + 1] = {
+    block_id = block.id,
     old_start = block.old_start,
     delta = #block.new_lines - block.old_count,
+  }
+  session.applied_history = session.applied_history or {}
+  session.applied_history[#session.applied_history + 1] = {
+    block = block,
+    block_id = block.id,
+    start_index = start_index,
+    old_lines = copy_lines(old_snapshot),
+    new_lines = copy_lines(replacement),
   }
   update_hunk_status(block.hunk)
   return #block.new_lines - block.old_count
@@ -1743,6 +1760,63 @@ local function reject_block(block)
     block.conflict = nil
     update_hunk_status(block.hunk)
   end
+end
+
+local function remove_last_applied_delta(session, entry)
+  for index = #(session.applied or {}), 1, -1 do
+    local applied = session.applied[index]
+    if
+      applied
+      and (applied.block_id == entry.block_id or applied.old_start == (entry.block and entry.block.old_start))
+    then
+      table.remove(session.applied, index)
+      return
+    end
+  end
+end
+
+function M.undo_last_accept()
+  local session = state.current_diff
+  if not session then
+    vim.notify("No active nvime diff session", vim.log.levels.WARN)
+    return
+  end
+  local history = session.applied_history or {}
+  local entry = table.remove(history)
+  if not entry then
+    vim.notify("No accepted nvime block to undo", vim.log.levels.INFO)
+    return
+  end
+  if not (session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr)) then
+    vim.notify("The nvime diff target buffer is no longer valid", vim.log.levels.WARN)
+    history[#history + 1] = entry
+    return
+  end
+
+  local start_index = math.max(0, math.min(entry.start_index or 0, target_line_count(session)))
+  local end_index = math.max(start_index, math.min(start_index + #(entry.new_lines or {}), target_line_count(session)))
+  local live_lines = vim.api.nvim_buf_get_lines(session.target_bufnr, start_index, end_index, false)
+  if not same_lines(live_lines, entry.new_lines or {}) then
+    history[#history + 1] = entry
+    vim.notify("Cannot undo nvime block because the accepted text changed", vim.log.levels.WARN)
+    return
+  end
+
+  vim.api.nvim_buf_set_lines(session.target_bufnr, start_index, end_index, false, entry.old_lines or {})
+  local block = entry.block
+  if block then
+    block.status = "pending"
+    block.conflict = nil
+    update_hunk_status(block.hunk)
+  end
+  remove_last_applied_delta(session, entry)
+  audit.write({
+    event = "block_undo_applied",
+    file = session.file,
+    block_id = entry.block_id,
+    start_line = start_index + 1,
+  })
+  render_session(session)
 end
 
 function M.accept_blocks(blocks, opts)

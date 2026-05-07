@@ -6,6 +6,7 @@ local state = require("nvime.state")
 local M = {}
 
 local persist_group = vim.api.nvim_create_augroup("nvime.persist", { clear = false })
+local audit_group = vim.api.nvim_create_augroup("nvime.audit", { clear = false })
 
 local function delete_keymaps()
   for _, keymap in ipairs(state.keymaps or {}) do
@@ -173,6 +174,56 @@ local function command_opts(args)
   }
 end
 
+function M.cancel()
+  local count = 0
+  local ok_chat, chat_cancelled = pcall(function()
+    return require("nvime.chat").cancel_active()
+  end)
+  if ok_chat and chat_cancelled then
+    count = count + 1
+  end
+  local ok_selection, selection_cancelled = pcall(function()
+    return require("nvime.selection").cancel_active()
+  end)
+  if ok_selection and selection_cancelled then
+    count = count + 1
+  end
+  if count == 0 then
+    vim.notify("No running nvime agent to cancel", vim.log.levels.INFO)
+  end
+  return count
+end
+
+function M.disable()
+  pcall(function()
+    require("nvime.chat").cancel_all()
+  end)
+  pcall(function()
+    require("nvime.selection").cancel_all()
+  end)
+  policy.restore()
+  state.disabled = true
+  pcall(function()
+    require("nvime.audit").write({
+      event = "nvime_disabled",
+    })
+  end)
+  vim.notify("nvime disabled; run :NvimeEnable to re-enable it", vim.log.levels.WARN)
+end
+
+function M.enable()
+  state.disabled = false
+  if state.config and state.config.guard and state.config.guard.enabled then
+    policy.install()
+  end
+  pcall(function()
+    require("nvime.audit").write({
+      event = "nvime_enabled",
+    })
+  end)
+  vim.notify("nvime enabled", vim.log.levels.INFO)
+end
+
 function M.setup(opts)
   if vim.fn.has("nvim-0.10") == 0 then
     vim.notify("nvime requires Neovim 0.10+", vim.log.levels.ERROR)
@@ -200,7 +251,7 @@ function M.setup(opts)
   state.config = resolved
   state.setup_signature = setup_signature
 
-  if state.config.guard.enabled then
+  if state.config.guard.enabled and not state.disabled then
     policy.install()
   end
 
@@ -273,6 +324,18 @@ function M.setup(opts)
     desc = "Open the nvime audit log",
   })
 
+  vim.api.nvim_create_user_command("NvimeCancel", M.cancel, {
+    desc = "Cancel the active nvime agent run",
+  })
+
+  vim.api.nvim_create_user_command("NvimeDisable", M.disable, {
+    desc = "Disable nvime wrappers and cancel running agents",
+  })
+
+  vim.api.nvim_create_user_command("NvimeEnable", M.enable, {
+    desc = "Re-enable nvime wrappers after :NvimeDisable",
+  })
+
   vim.api.nvim_create_user_command("NvimeAccept", function(args)
     require("nvime.diff").accept_current_group({
       force = args.bang,
@@ -300,8 +363,16 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = persist_group,
     callback = function()
-      require("nvime.chat").save_sessions()
-      require("nvime.selection").save_sessions()
+      require("nvime.chat").flush_sessions()
+      require("nvime.selection").flush_sessions()
+    end,
+  })
+
+  pcall(vim.api.nvim_clear_autocmds, { group = audit_group })
+  vim.api.nvim_create_autocmd("DirChanged", {
+    group = audit_group,
+    callback = function()
+      require("nvime.audit").clear_cache()
     end,
   })
 
