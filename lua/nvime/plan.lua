@@ -2584,6 +2584,8 @@ local function install_run_panel_keymaps(bufnr)
   end, vim.tbl_extend("force", opts, { desc = "nvime plan run: cancel running" }))
 end
 
+local PLAN_RUN_NS = vim.api.nvim_create_namespace("nvime.plan.run.scrollback")
+
 local function run_panel_append(text)
   -- agents.run's on_text / on_progress fire from libuv callbacks (a "fast
   -- event context"). nvim_buf_is_valid and nvim_buf_set_lines are NOT safe
@@ -2616,6 +2618,13 @@ local function run_panel_append(text)
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, current)
   end
   vim.bo[bufnr].modifiable = false
+  -- Re-decorate the streaming panel with markdown-aware highlights so
+  -- the plan author's prose (headings, code, lists, bold, links) is
+  -- legible while it's still being written.
+  local ok_render, render = pcall(require, "nvime.render")
+  if ok_render and render and type(render.scrollback) == "function" then
+    pcall(render.scrollback, bufnr, PLAN_RUN_NS)
+  end
   if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
     pcall(vim.api.nvim_win_set_cursor, panel.winid, { vim.api.nvim_buf_line_count(bufnr), 0 })
   end

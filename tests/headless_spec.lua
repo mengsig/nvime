@@ -3166,6 +3166,121 @@ assert(vim.fn.exists(":NvimeAudit") == 2, "NvimeAudit command exists");
   require("nvime.state").plan.plans = nil
 end)();
 
+-- Markdown renderer: heading levels, inline code, bold/italic, links,
+-- numbered lists, blockquote gutter. Confirms the structure-aware spans
+-- get the right highlight groups without modifying buffer text.
+(function()
+  local render = require("nvime.render")
+
+  local function find_span(line, hl)
+    for _, s in ipairs(render.inline_spans(line)) do
+      if s[3] == hl then
+        return s
+      end
+    end
+    return nil
+  end
+
+  local function span_text(line, span)
+    return line:sub(span[1], span[2])
+  end
+
+  local strong_line = "a **bold** word"
+  local strong = find_span(strong_line, "NvimeMarkdownStrong")
+  assert(strong, "renderer: bold span detected")
+  assert_eq(span_text(strong_line, strong), "**bold**", "renderer: bold span covers the whole **...**")
+
+  local em_line = "an *italic* word"
+  local em = find_span(em_line, "NvimeMarkdownEmphasis")
+  assert(em, "renderer: italic span detected")
+  assert_eq(span_text(em_line, em), "*italic*", "renderer: italic span covers *...*")
+
+  local conflict_spans = render.inline_spans("**super** strong")
+  local saw_bold = false
+  for _, s in ipairs(conflict_spans) do
+    if s[3] == "NvimeMarkdownStrong" then
+      saw_bold = true
+    end
+    assert(s[3] ~= "NvimeMarkdownEmphasis", "renderer: bold takes priority over italic when nested")
+  end
+  assert(saw_bold, "renderer: bold detected in **super**")
+
+  local stray = render.inline_spans("you wrote *foo bar")
+  for _, s in ipairs(stray) do
+    assert(s[3] ~= "NvimeMarkdownEmphasis", "renderer: unbalanced * is not italic")
+  end
+
+  local code_line = "call `foo()` here"
+  local code = find_span(code_line, "NvimeMarkdownInlineCode")
+  assert(code, "renderer: inline code detected")
+  assert_eq(span_text(code_line, code), "`foo()`", "renderer: inline code covers the backtick span")
+
+  assert(find_span("this ~~old~~ way", "NvimeMarkdownStrike"), "renderer: strikethrough detected")
+  assert(find_span("see [docs](https://x)", "NvimeMarkdownLinkText"), "renderer: link text styled")
+  assert(find_span("see [docs](https://x)", "NvimeMarkdownLinkUrl"), "renderer: link url styled")
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].filetype = "nvime"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+    "# Top-level title",
+    "## Subsection",
+    "### Tertiary",
+    "#### Quaternary",
+    "",
+    "Body with **strong** and *em* and `code` and ~~old~~ and [docs](https://x).",
+    "",
+    "1. first numbered",
+    "2. second numbered",
+    "- bullet alpha",
+    "* bullet beta",
+    "",
+    "> quoted line one",
+    "> quoted line two",
+    "",
+    "```lua",
+    "local x = 1",
+    "```",
+  })
+  local ns = vim.api.nvim_create_namespace("nvime.test.render")
+  render.scrollback(buf, ns)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+  local seen = {}
+  for _, m in ipairs(marks) do
+    local hl = m[4] and m[4].hl_group
+    if hl then
+      seen[hl] = (seen[hl] or 0) + 1
+    end
+    if m[4] and m[4].virt_text then
+      for _, chunk in ipairs(m[4].virt_text) do
+        if chunk[2] and chunk[2] ~= "" then
+          seen[chunk[2]] = (seen[chunk[2]] or 0) + 1
+        end
+      end
+    end
+  end
+  for _, group in ipairs({
+    "NvimeMarkdownH1",
+    "NvimeMarkdownH2",
+    "NvimeMarkdownH3",
+    "NvimeMarkdownH4",
+    "NvimeMarkdownHeadingMarker",
+    "NvimeMarkdownStrong",
+    "NvimeMarkdownEmphasis",
+    "NvimeMarkdownInlineCode",
+    "NvimeMarkdownStrike",
+    "NvimeMarkdownLinkText",
+    "NvimeMarkdownLinkUrl",
+    "NvimeBullet",
+    "NvimeBulletNumber",
+    "NvimeQuote",
+    "NvimeQuoteGutter",
+    "NvimeCodeFence",
+    "NvimeCode",
+  }) do
+    assert(seen[group], "renderer: missing highlight group " .. group)
+  end
+end)();
+
 -- :NvimeRecap (#10): prompt building, hash stability, command parsing.
 (function()
   local recap = require("nvime.recap")
