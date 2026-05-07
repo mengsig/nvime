@@ -31,6 +31,21 @@ M.defaults = {
     path = nil,
     log_prompts = false,
   },
+  attribution = {
+    -- Per-line ledger: every accepted nvime diff block writes one entry to
+    -- .nvime/attribution.json (in the git root) with rationale, critic
+    -- verdict, plan + step linkage, and a content anchor so the entry
+    -- survives later edits that shift line numbers.
+    enabled = true,
+    path = nil, -- defaults to .nvime/attribution.json in a git repo
+    max = 500, -- oldest entries trimmed when the ledger exceeds this count
+  },
+  recap = {
+    -- :NvimeRecap takes a git diff and asks the plan-lane agent to write
+    -- a plan.md narrative explaining what changed, why, and what is
+    -- untested. Output lands in .nvime/plans/recap-<hash>/.
+    auto_open = true, -- open the recap in the plan view after it's drafted
+  },
   guard = {
     enabled = true,
     strict = true,
@@ -196,6 +211,7 @@ end
 
 local optional_types = {
   ["audit.path"] = { "string", "nil" },
+  ["attribution.path"] = { "string", "nil" },
   ["sessions.path"] = { "string", "nil" },
   ["sessions.chat_path"] = { "string", "nil" },
   ["ui.spinner_frames"] = { "table", "nil" },

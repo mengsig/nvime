@@ -348,6 +348,13 @@ run_edit = function(selection, intent, provider, session_opts)
           selection_state.append("\n[nvime] no patch opened.\n", session_id)
         elseif diff_result and diff_result.session then
           diff_result.session.selection_session_id = session_id
+          -- Plan linkage: when the run was launched by plan.execute_step,
+          -- tag the diff session with the plan + step id so attribution
+          -- entries persist that linkage when blocks are accepted.
+          if session_opts.plan_id then
+            diff_result.session.plan_id = session_opts.plan_id
+            diff_result.session.plan_step_id = session_opts.plan_step_id
+          end
           -- Plumb the caller's on_resolved hook onto the new diff session.
           -- Used by plan.execute_step to auto-run step.tests when the user
           -- accepts/rejects every block.
@@ -490,6 +497,8 @@ function M.start(opts)
     on_run_failed = opts.on_run_failed,
     devils_advocate = opts.devils_advocate,
     plan_continuity = opts.plan_continuity,
+    plan_id = opts.plan_id,
+    plan_step_id = opts.plan_step_id,
   })
 end
 

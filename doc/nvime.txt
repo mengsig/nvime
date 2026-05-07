@@ -175,7 +175,42 @@ COMMANDS                                                        *nvime-commands*
 
                                                         *:NvimeAudit*
 :NvimeAudit
-        Open the audit log.
+:NvimeAudit raw
+:NvimeAudit summary [days]
+:NvimeAudit forces
+        Inspect the audit log. The bare command (and `raw`) opens
+        .nvime/audit.jsonl directly. `summary` opens a digest float that
+        groups events by lane/provider, surfaces risky events
+        (block_force_applied, block_conflict, plan_step_rollback,
+        blocked), and ranks the most-touched files. The default window is
+        7 days; pass an explicit number for a different range. `forces`
+        opens a focused review of every force-accepted diff block — the
+        single class of action that bypasses the live-content guard, and
+        the place where unnoticed changes can hide.
+
+                                                        *:NvimeAttribute*
+:NvimeAttribute [show|hide|toggle]
+        Show the attribution entry for the line under the cursor: which
+        plan and step authored it, the patch worker's RATIONALE, the
+        critic verdict, and the timestamp. Without an arg, prints the
+        entry to vim.notify. `show` paints inline virtual-text annotations
+        on every line covered by an attribution anchor in the current
+        buffer; `hide` clears them; `toggle` flips. Entries are persisted
+        to .nvime/attribution.json (in the git root); the ledger is
+        capped at attribution.max entries (default 500) with oldest
+        rotated out.
+
+                                                        *:NvimeRecap*
+:NvimeRecap [claude|codex] [--cached] [<rev>..<rev>]
+        Reverse-direction "explain my changes" lane. Computes a git diff
+        (working tree by default; `--cached` for staged changes; an
+        A..B range for any commit interval), spawns the plan-lane agent
+        in a temp workspace, and asks it to write a plan.md narrative
+        explaining what changed, why, and what is untested. Output lands
+        under .nvime/plans/recap-<short-hash>/ and is auto-opened in the
+        plan view. Catches the case where work happened outside nvime
+        and you want to re-establish understanding without retroactive
+        vibe-coding.
 
                                                         *:NvimeProvider*
 :NvimeProvider [claude|codex]

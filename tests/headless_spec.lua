@@ -2899,6 +2899,398 @@ end
   state.plan.loaded = false
   state.plan.plans = nil
   assert_eq(#plan.plans(), 0, "plan: delete removes plan from disk")
+end)();
+
+-- Attribution ledger: every accepted diff block records a rationale +
+-- critic + plan linkage anchored to the accepted text content.
+(function()
+  local attribution = require("nvime.attribution")
+  -- Use a temp ledger for this test so we don't pollute the real
+  -- .nvime/attribution.json in the dev tree.
+  local ledger_path = tmp .. "/attribution.json"
+  require("nvime.state").config.attribution = { enabled = true, path = ledger_path, max = 500 }
+
+  local target = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(target, tmp .. "/attribution_target.lua")
+  vim.api.nvim_buf_set_lines(target, 0, -1, false, {
+    "local function greet()",
+    "  return 'hello'",
+    "end",
+  })
+  -- Write the buffer so repo_relative_path can resolve.
+  vim.fn.writefile(vim.api.nvim_buf_get_lines(target, 0, -1, false), tmp .. "/attribution_target.lua")
+
+  local diff = require("nvime.diff")
+  local response = table.concat({
+    "RATIONALE: bug: greeting is too quiet; patch: shout it; why: matches caller expectation.",
+    "NVIME_DIFF",
+    "```diff",
+    "--- a/" .. tmp .. "/attribution_target.lua",
+    "+++ b/" .. tmp .. "/attribution_target.lua",
+    "@@ -2,1 +2,1 @@",
+    "-  return 'hello'",
+    "+  return 'HELLO'",
+    "```",
+  }, "\n")
+  local result = diff.start_session({
+    bufnr = target,
+    line1 = 2,
+    line2 = 2,
+    path = tmp .. "/attribution_target.lua",
+    source = "test",
+  }, response, "claude", "")
+  assert(result and result.session, "attribution test: diff session opened")
+  -- Tag the session with plan linkage to confirm plumbing.
+  result.session.plan_id = "0001-test-plan"
+  result.session.plan_step_id = 7
+  -- Accept the only block.
+  diff.accept_all()
+  local applied = vim.api.nvim_buf_get_lines(target, 0, -1, false)
+  assert_eq(applied[2], "  return 'HELLO'", "attribution test: block applied to buffer")
+
+  local ledger_raw = vim.fn.readfile(ledger_path)
+  assert(#ledger_raw > 0, "attribution: ledger file written")
+  local ledger = vim.json.decode(table.concat(ledger_raw, "\n"))
+  assert_eq(ledger.version, 1, "attribution: ledger version is 1")
+  assert(ledger.entries and #ledger.entries == 1, "attribution: one entry recorded")
+  local entry = ledger.entries[1]
+  assert_eq(entry.plan_id, "0001-test-plan", "attribution: plan id forwarded")
+  assert_eq(entry.step_id, 7, "attribution: step id forwarded")
+  assert_eq(entry.provider, "claude", "attribution: provider recorded")
+  assert(
+    entry.rationale and entry.rationale:find("greeting is too quiet", 1, true),
+    "attribution: rationale captured from RATIONALE: line"
+  )
+  assert(
+    entry.anchor and entry.anchor.head and entry.anchor.head[1] == "  return 'HELLO'",
+    "attribution: anchor head matches accepted text"
+  )
+
+  -- Lookup: a query at the accepted line should return the entry.
+  local matches =
+    attribution.for_line(tmp .. "/attribution_target.lua", 2, vim.api.nvim_buf_get_lines(target, 0, -1, false))
+  assert(#matches >= 1, "attribution: lookup finds the entry by anchor")
+  assert_eq(matches[1].plan_id, "0001-test-plan", "attribution: lookup result carries plan_id")
+
+  -- Anchor survives a benign edit elsewhere in the file: insert a line
+  -- above and confirm we still match.
+  vim.api.nvim_buf_set_lines(target, 0, 0, false, { "-- newer comment" })
+  local shifted = vim.api.nvim_buf_get_lines(target, 0, -1, false)
+  local shifted_matches = attribution.for_line(tmp .. "/attribution_target.lua", 3, shifted)
+  assert(#shifted_matches >= 1, "attribution: anchor survives line shift")
+  assert_eq(shifted_matches[1].match_line1, 3, "attribution: anchor reports new line position")
+
+  -- Cap test: write 502 entries, expect the trim to keep only the most recent 500.
+  vim.fn.delete(ledger_path)
+  for i = 1, 502 do
+    attribution.record({
+      file = "tests/fixture_" .. i .. ".lua",
+      line1 = 1,
+      line2 = 1,
+      lines = { "line " .. i },
+      rationale = "r" .. i,
+      provider = "claude",
+    })
+  end
+  local capped = vim.json.decode(table.concat(vim.fn.readfile(ledger_path), "\n"))
+  assert(#capped.entries <= 500, "attribution: ledger trims to max")
+  assert(capped.entries[#capped.entries].file == "tests/fixture_502.lua", "attribution: newest entry survives")
+  assert(capped.entries[1].file ~= "tests/fixture_1.lua", "attribution: oldest entry trimmed")
+
+  vim.fn.delete(ledger_path)
+  require("nvime.state").config.attribution = { enabled = true, path = nil, max = 500 }
+end)()
+
+-- :NvimeAttribute command surface
+assert(vim.fn.exists(":NvimeAttribute") == 2, "NvimeAttribute command exists");
+
+-- Audit summarizer (#2): walk a synthetic audit log, check stats and the
+-- risky-event subset.
+(function()
+  local digest = require("nvime.digest")
+  local synthetic = tmp .. "/digest_audit.jsonl"
+  local function write_event(t)
+    local fd = assert(io.open(synthetic, "a"))
+    fd:write(vim.json.encode(t))
+    fd:write("\n")
+    fd:close()
+  end
+  vim.fn.delete(synthetic)
+  local now = os.time()
+  local recent_iso = os.date("!%Y-%m-%dT%H:%M:%SZ", now)
+  local stale_iso = os.date("!%Y-%m-%dT%H:%M:%SZ", now - 14 * 86400)
+  write_event({ event = "agent_start", lane = "edit", provider = "claude", ts = recent_iso })
+  write_event({ event = "agent_exit", lane = "edit", provider = "claude", ts = recent_iso })
+  write_event({ event = "agent_start", lane = "plan", provider = "codex", ts = recent_iso })
+  write_event({
+    event = "block_force_applied",
+    file = "lua/nvime/diff.lua",
+    block_id = 7,
+    start_line = 100,
+    end_line = 120,
+    ts = recent_iso,
+  })
+  write_event({
+    event = "block_conflict",
+    file = "lua/nvime/diff.lua",
+    block_id = 8,
+    start_line = 200,
+    end_line = 210,
+    ts = recent_iso,
+  })
+  write_event({
+    event = "plan_step_rollback",
+    plan_id = "0001-test",
+    step_id = 3,
+    file = "lua/nvime/plan.lua",
+    ts = recent_iso,
+  })
+  -- Old event, outside the 7-day window.
+  write_event({ event = "agent_start", lane = "edit", provider = "claude", ts = stale_iso })
+
+  local events = digest.read_events({ path = synthetic, window_days = 7 })
+  assert(#events == 6, "digest: 7-day window excludes stale event (got " .. #events .. ")")
+  local all_events = digest.read_events({ path = synthetic })
+  assert(#all_events == 7, "digest: no window returns all events (got " .. #all_events .. ")")
+
+  local stats = digest.summarize(events)
+  assert_eq(stats.total, 6, "digest: total events")
+  -- by_lane counts every event tagged with a lane (start + exit etc.).
+  assert_eq(stats.by_lane.edit, 2, "digest: edit-lane events (start + exit)")
+  assert_eq(stats.by_lane.plan, 1, "digest: plan-lane events")
+  -- sessions counts agent_start only, so it represents distinct sessions.
+  assert_eq(stats.sessions.edit, 1, "digest: edit sessions started")
+  assert_eq(stats.sessions.plan, 1, "digest: plan sessions started")
+  assert_eq(stats.by_provider.claude, 2, "digest: claude provider events")
+  assert_eq(stats.by_provider.codex, 1, "digest: codex provider events")
+  assert(#stats.risky == 3, "digest: risky events bucketed (force/conflict/rollback)")
+  assert_eq(stats.plans["0001-test"], 1, "digest: plan id surfaced")
+
+  local forces = digest.force_review(events)
+  assert(#forces == 1, "digest: exactly one force_applied")
+  assert_eq(forces[1].file, "lua/nvime/diff.lua", "digest: force_review carries file")
+end)()
+
+-- :NvimeAudit subcommands
+assert(vim.fn.exists(":NvimeAudit") == 2, "NvimeAudit command exists");
+
+-- Plan.md as living changelog (#7): set_step_status to "done" appends a
+-- new section to plan.md including the rationale + critic verdict + tests.
+(function()
+  local plan = require("nvime.plan")
+  local plan_dir = tmp .. "/changelog_plans"
+  vim.fn.mkdir(plan_dir, "p")
+  require("nvime.state").config.plan = require("nvime.state").config.plan or {}
+  require("nvime.state").config.plan.dir = plan_dir
+  require("nvime.state").plan = require("nvime.state").plan or {}
+  require("nvime.state").plan.loaded = false
+  require("nvime.state").plan.plans = nil
+
+  local plan_id = "0099-changelog"
+  local plan_path = plan_dir .. "/" .. plan_id
+  vim.fn.mkdir(plan_path, "p")
+  local plan_obj = {
+    version = 1,
+    id = plan_id,
+    title = "Changelog test plan",
+    why = "exercise the plan.md execution log",
+    created_at = os.time(),
+    updated_at = os.time(),
+    files_estimated = { "lua/nvime/plan.lua" },
+    acceptance = {},
+    steps = {
+      {
+        id = 1,
+        intent = "do the thing",
+        file = "lua/nvime/plan.lua",
+        range = { line1 = 1, line2 = 5 },
+        depends_on = {},
+        tests = {},
+        status = "pending",
+      },
+      {
+        id = 2,
+        intent = "do the second thing",
+        file = "lua/nvime/plan.lua",
+        range = "new",
+        depends_on = {},
+        tests = {},
+        status = "pending",
+      },
+    },
+  }
+  vim.fn.writefile({ vim.json.encode(plan_obj) }, plan_path .. "/plan.json")
+  vim.fn.writefile({ "# Changelog test plan", "", "Original plan.md body." }, plan_path .. "/plan.md")
+  require("nvime.state").plan.loaded = false
+
+  -- Manual gx-style transition records a minimal entry.
+  assert(plan.set_step_status(plan_id, 1, "done"), "changelog: step 1 marked done")
+  local md_after_first = table.concat(vim.fn.readfile(plan_path .. "/plan.md"), "\n")
+  assert(md_after_first:find("nvime execution log", 1, true), "changelog: log header initialized")
+  assert(md_after_first:find("### Step 1 executed @", 1, true), "changelog: step 1 entry written")
+  assert(md_after_first:find("manual `gx` mark%-done"), "changelog: manual transition flagged")
+
+  -- Rich-context transition (post-execute) carries rationale + critic + tests.
+  assert(
+    plan.set_step_status(plan_id, 2, "done", {
+      provider = "claude",
+      rationale = "bug: thing missing; patch: add thing; why: makes it correct.",
+      verdict = { decision = "APPROVE", justification = "minimal addition" },
+      accepted = 3,
+      total = 3,
+      forced = 1,
+      tests_cmd = "./scripts/test",
+      tests_pass = true,
+      tests_tail = "All 42 tests passed",
+    }),
+    "changelog: step 2 marked done with rich context"
+  )
+  local md_after_second = table.concat(vim.fn.readfile(plan_path .. "/plan.md"), "\n")
+  assert(md_after_second:find("### Step 2 executed @", 1, true), "changelog: step 2 entry written")
+  assert(md_after_second:find("Rationale: bug: thing missing", 1, true), "changelog: rationale captured")
+  assert(md_after_second:find("Critic: %*%*APPROVE%*%*"), "changelog: critic verdict captured")
+  assert(md_after_second:find("Force%-accepts: %*%*1%*%*"), "changelog: force-accept count flagged")
+  assert(md_after_second:find("./scripts/test", 1, true), "changelog: tests command captured")
+  assert(md_after_second:find("All 42 tests passed", 1, true), "changelog: tests output tail captured")
+
+  -- Re-flipping done should not double-write because prior_status check
+  -- guards on transition.
+  local before = md_after_second
+  plan.set_step_status(plan_id, 2, "done", { provider = "claude" })
+  local md_after_third = table.concat(vim.fn.readfile(plan_path .. "/plan.md"), "\n")
+  assert_eq(md_after_third, before, "changelog: redundant done→done writes nothing")
+
+  -- Restore plan dir to default and clear cache so other tests don't see it.
+  require("nvime.state").config.plan.dir = nil
+  require("nvime.state").plan.loaded = false
+  require("nvime.state").plan.plans = nil
+end)();
+
+-- :NvimeRecap (#10): prompt building, hash stability, command parsing.
+(function()
+  local recap = require("nvime.recap")
+  assert(vim.fn.exists(":NvimeRecap") == 2, "NvimeRecap command exists")
+
+  local diff_a = "--- a/foo.lua\n+++ b/foo.lua\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+  local diff_b = "--- a/bar.lua\n+++ b/bar.lua\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+
+  local id_a1 = recap._ensure_recap_id(diff_a)
+  local id_a2 = recap._ensure_recap_id(diff_a)
+  local id_b = recap._ensure_recap_id(diff_b)
+  assert(id_a1:find("^recap%-"), "recap: id has recap- prefix")
+  assert_eq(id_a1, id_a2, "recap: same diff yields same id")
+  assert(id_a1 ~= id_b, "recap: different diff yields different id")
+
+  local prompt = recap._build_recap_prompt(diff_a, "working tree", id_a1)
+  assert(prompt:find("NVIME RECAP MODE", 1, true), "recap: prompt has mode header")
+  assert(prompt:find("MUST NOT modify any source code", 1, true), "recap: prompt forbids source edits")
+  assert(prompt:find(id_a1, 1, true), "recap: prompt embeds recap id")
+  assert(
+    prompt:find("`.nvime/plans/" .. id_a1 .. "/plan.md`", 1, true),
+    "recap: prompt cites the only writable plan.md"
+  )
+  assert(prompt:find("NVIME_PLAN", 1, true), "recap: prompt requires the NVIME_PLAN marker")
+  assert(prompt:find("```diff\n", 1, true), "recap: prompt fences the diff body")
+
+  -- Empty-diff bailout: stub the diff computation (so we don't depend on
+  -- real git state) and the agents.run entry point (so this test never
+  -- spawns a real provider).
+  local agents_mod = require("nvime.agents")
+  local original_run = agents_mod.run
+  local agent_called = false
+  agents_mod.run = function()
+    agent_called = true
+    return { kill = function() end }
+  end
+  local original_compute = recap._compute_diff
+  recap._compute_diff = function()
+    return "", { "git", "diff" }
+  end
+  recap.start({})
+  assert(not agent_called, "recap: empty diff does not spawn the agent")
+
+  -- Non-empty diff path: confirm recap.start delegates to agents.run with
+  -- lane="plan" and a prompt containing the recap id.
+  recap._compute_diff = function()
+    return diff_a, { "git", "diff" }
+  end
+  local captured_lane, captured_prompt
+  agents_mod.run = function(o)
+    agent_called = true
+    captured_lane = o.lane
+    captured_prompt = o.prompt
+    return { kill = function() end }
+  end
+  recap.start({})
+  assert(agent_called, "recap: non-empty diff invokes the agent")
+  assert_eq(captured_lane, "plan", "recap: invokes the plan lane (workspace + sync filter)")
+  assert(
+    captured_prompt and captured_prompt:find("NVIME RECAP MODE", 1, true),
+    "recap: prompt is the recap-mode header"
+  )
+
+  recap._compute_diff = original_compute
+  agents_mod.run = original_run
+end)();
+
+-- PROTOCOL drift guard: PROTOCOL.md is the public contract; the live prompt
+-- builders in edit.lua / plan.lua / critic.lua MUST keep the load-bearing
+-- sentences verbatim. If any of these strings vanishes from a source file
+-- without PROTOCOL.md being updated in the same commit, this test fails.
+(function()
+  local function read_file(path)
+    local fd = io.open(path, "r")
+    if not fd then
+      error("cannot open " .. path)
+    end
+    local body = fd:read("*a")
+    fd:close()
+    return body
+  end
+  local edit_src = read_file(root .. "/lua/nvime/edit.lua")
+  local plan_src = read_file(root .. "/lua/nvime/plan.lua")
+  local critic_src = read_file(root .. "/lua/nvime/critic.lua")
+  local protocol_md = read_file(root .. "/PROTOCOL.md")
+
+  local function require_in(haystack, needle, where)
+    if not haystack:find(needle, 1, true) then
+      error("PROTOCOL drift: missing in " .. where .. ": " .. needle)
+    end
+  end
+
+  -- Edit lane invariants
+  require_in(edit_src, "You are a constrained patch worker, not a reviewer.", "edit.lua")
+  require_in(edit_src, "Return exactly one machine-readable response block.", "edit.lua")
+  require_in(edit_src, "You may only propose changes for the selected range in the current file.", "edit.lua")
+  require_in(edit_src, "Do not edit files directly.", "edit.lua")
+  require_in(edit_src, "Prefer NVIME_DIFF for any change to existing nonblank text.", "edit.lua")
+
+  -- Perf lane invariants
+  require_in(edit_src, "If you cannot prove a real win with numbers, return NVIME_NO_CHANGE.", "edit.lua")
+  require_in(edit_src, "Use Bash to create a scratch directory under /tmp", "edit.lua")
+  require_in(edit_src, "NEVER write inside the user's repository.", "edit.lua")
+
+  -- Plan author invariants
+  require_in(plan_src, "You are an architect drafting a structured implementation plan", "plan.lua")
+  require_in(plan_src, "You MUST NOT modify any source code", "plan.lua")
+  require_in(plan_src, "ONLY for paths under `.nvime/plans/<plan-id>/`.", "plan.lua")
+  require_in(plan_src, "Decompose into ORDERED steps", "plan.lua")
+
+  -- Critic invariants
+  require_in(critic_src, "You are a critical reviewer of a proposed patch", "critic.lua")
+  require_in(critic_src, "you cannot edit anything", "critic.lua")
+  require_in(critic_src, "APPROVE", "critic.lua")
+  require_in(critic_src, "FLAG", "critic.lua")
+  require_in(critic_src, "REJECT", "critic.lua")
+  require_in(critic_src, "prefer FLAG over REJECT unless the patch is unambiguously wrong", "critic.lua")
+
+  -- And the inverse: PROTOCOL.md must keep referring to the markers it
+  -- documents, so a doc rewrite that drops them surfaces here too.
+  require_in(protocol_md, "NVIME_NO_CHANGE", "PROTOCOL.md")
+  require_in(protocol_md, "NVIME_REPLACEMENT", "PROTOCOL.md")
+  require_in(protocol_md, "NVIME_DIFF", "PROTOCOL.md")
+  require_in(protocol_md, "NVIME_PLAN", "PROTOCOL.md")
+  require_in(protocol_md, "RATIONALE:", "PROTOCOL.md")
 end)()
 
 print("nvime headless spec passed")

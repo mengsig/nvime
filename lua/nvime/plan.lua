@@ -941,7 +941,94 @@ end
 -- Step operations
 -- ============================================================================
 
-local function set_step_status(plan_id, step_id, new_status)
+-- Append one "Step N executed @ <iso>" section to plan.md. Called whenever a
+-- step transitions pending → done (or any non-done → done). Captures the
+-- patch worker's rationale, critic verdict, and test-runner tail when the
+-- caller passes them in `ctx`. Without ctx we still write a minimal entry
+-- so a manual `gx` flip leaves a paper trail. plan.md becomes the
+-- after-the-fact narrative of what each step actually did.
+local function append_step_changelog(plan, step, ctx)
+  ctx = ctx or {}
+  local md_path = plan_md_path(plan.id)
+  ensure_dir(plan_dir_for(plan.id))
+  local existing = ""
+  if vim.fn.filereadable(md_path) == 1 then
+    local ok, lines = pcall(vim.fn.readfile, md_path)
+    if ok and lines then
+      existing = table.concat(lines, "\n")
+    end
+  end
+
+  -- Initialize a top-of-file changelog header on the first append per plan.
+  if not existing:find("## nvime execution log", 1, true) then
+    existing = (existing ~= "" and (existing .. "\n\n") or "")
+      .. "## nvime execution log\n\n"
+      .. "Each entry is appended automatically when a step transitions to `done`.\n"
+      .. "Records what was applied, the rationale, the critic verdict, and the\n"
+      .. "test output. This is the after-the-fact narrative — the body above is\n"
+      .. "the architect's plan; the body below is what nvime + you actually did.\n"
+  end
+
+  local iso = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local section = { "" }
+  section[#section + 1] = string.format("### Step %s executed @ %s", tostring(step.id or "?"), iso)
+  section[#section + 1] = ""
+  section[#section + 1] = string.format("- Intent: %s", (step.intent or "(none)"):gsub("\n", " ↵ "))
+  if step.file then
+    local where = step.file
+    if type(step.range) == "table" and step.range.line1 then
+      where = where .. " (L" .. tostring(step.range.line1) .. "-" .. tostring(step.range.line2 or "?") .. ")"
+    elseif step.range == "new" then
+      where = where .. " (new file)"
+    end
+    section[#section + 1] = string.format("- File: %s", where)
+  end
+  section[#section + 1] = string.format("- Provider: %s", ctx.provider or "?")
+  if ctx.rationale and ctx.rationale ~= "" then
+    section[#section + 1] = string.format("- Rationale: %s", ctx.rationale)
+  end
+  if type(ctx.verdict) == "table" and ctx.verdict.decision then
+    section[#section + 1] =
+      string.format("- Critic: **%s** — %s", ctx.verdict.decision, ctx.verdict.justification or "")
+  elseif ctx.verdict_pending then
+    section[#section + 1] = "- Critic: (verdict pending at done-time)"
+  end
+  if ctx.accepted and ctx.total then
+    section[#section + 1] = string.format("- Diff blocks: %d/%d accepted", ctx.accepted, ctx.total)
+  end
+  if ctx.forced and ctx.forced > 0 then
+    section[#section + 1] = string.format("- Force-accepts: **%d** (review!)", ctx.forced)
+  end
+  if ctx.tests_cmd and ctx.tests_cmd ~= "" then
+    section[#section + 1] = string.format("- Tests: `%s` → %s", ctx.tests_cmd, ctx.tests_pass and "pass" or "fail")
+    if ctx.tests_tail and ctx.tests_tail ~= "" then
+      section[#section + 1] = ""
+      section[#section + 1] = "  ```"
+      for _, line in ipairs(vim.split(ctx.tests_tail, "\n", { plain = true })) do
+        section[#section + 1] = "  " .. line
+      end
+      section[#section + 1] = "  ```"
+    end
+  end
+  if ctx.manual then
+    section[#section + 1] = "- Source: manual `gx` mark-done"
+  end
+
+  local new_body = existing .. "\n" .. table.concat(section, "\n") .. "\n"
+  local fd, err = io.open(md_path, "w")
+  if not fd then
+    vim.notify("nvime plan: could not append plan.md changelog: " .. tostring(err), vim.log.levels.WARN)
+    return
+  end
+  pcall(function()
+    fd:write(new_body)
+  end)
+  pcall(function()
+    fd:close()
+  end)
+end
+
+local function set_step_status(plan_id, step_id, new_status, ctx)
   if not STATUS_ORDER[new_status] then
     return false, "invalid status: " .. tostring(new_status)
   end
@@ -953,6 +1040,7 @@ local function set_step_status(plan_id, step_id, new_status)
   if not step then
     return false, "step not found: " .. tostring(step_id)
   end
+  local prior_status = step.status
   step.status = new_status
   if not persist_plan(plan) then
     return false, "could not write plan"
@@ -963,6 +1051,13 @@ local function set_step_status(plan_id, step_id, new_status)
     step_id = step.id,
     status = new_status,
   })
+  -- Living changelog: any time a step crosses into "done", append a section
+  -- to plan.md. ctx (rationale/verdict/tests) is only present from the
+  -- post-execute path; manual `gx` marks pass nothing and we record a
+  -- minimal entry so plan.md still reflects the transition.
+  if new_status == "done" and prior_status ~= "done" then
+    append_step_changelog(plan, step, ctx or { manual = true })
+  end
   return true
 end
 
@@ -1849,6 +1944,13 @@ function M.execute_step(plan_id, step_id, opts)
       return
     end
     local tests = step.tests or {}
+    -- Count force-accepts in this resolution so the changelog flags them.
+    local forced_count = 0
+    for _, entry in ipairs(summary.applied_history or {}) do
+      if entry.block and entry.block.was_forced then
+        forced_count = forced_count + 1
+      end
+    end
     if #tests == 0 then
       vim.schedule(function()
         local choice = vim.fn.confirm(
@@ -1863,7 +1965,15 @@ function M.execute_step(plan_id, step_id, opts)
           1
         )
         if choice == 1 then
-          set_step_status(plan.id, step.id, "done")
+          set_step_status(plan.id, step.id, "done", {
+            provider = summary.provider,
+            rationale = summary.rationale,
+            verdict = summary.verdict,
+            verdict_pending = summary.verdict == nil,
+            accepted = summary.accepted,
+            total = summary.total,
+            forced = forced_count,
+          })
         elseif choice == 2 then
           set_step_status(plan.id, step.id, "pending")
         end
@@ -1907,7 +2017,18 @@ function M.execute_step(plan_id, step_id, opts)
               1
             )
             if choice == 1 then
-              set_step_status(plan.id, step.id, "done")
+              set_step_status(plan.id, step.id, "done", {
+                provider = summary.provider,
+                rationale = summary.rationale,
+                verdict = summary.verdict,
+                verdict_pending = summary.verdict == nil,
+                accepted = summary.accepted,
+                total = summary.total,
+                forced = forced_count,
+                tests_cmd = cmd,
+                tests_pass = true,
+                tests_tail = tail,
+              })
             elseif choice == 2 then
               set_step_status(plan.id, step.id, "pending")
             end
@@ -2019,6 +2140,10 @@ function M.execute_step(plan_id, step_id, opts)
     on_run_failed = on_run_failed,
     devils_advocate = devils_advocate,
     plan_continuity = plan_continuity,
+    -- Plan linkage: surfaces in the attribution ledger so every accepted
+    -- block reports which plan + step authored it.
+    plan_id = plan.id,
+    plan_step_id = step.id,
   })
   return true
 end

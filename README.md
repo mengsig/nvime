@@ -115,6 +115,14 @@ require("nvime").setup({
     path = nil, -- defaults to .nvime/audit.jsonl in a git repo
     log_prompts = false,
   },
+  attribution = {
+    enabled = true,
+    path = nil, -- defaults to .nvime/attribution.json in a git repo
+    max = 500,  -- oldest entries trimmed when the ledger exceeds this count
+  },
+  recap = {
+    auto_open = true, -- open the recap plan view after :NvimeRecap drafts it
+  },
   guard = {
     enabled = true,
     strict = true,
@@ -218,7 +226,23 @@ require("nvime").setup({
   target text no longer matches the hunk nvime reviewed.
 - `:NvimeReject` rejects the current inline diff block.
 - `:NvimeDiff` opens the active diff in a two-pane review workspace.
-- `:NvimeAudit` opens `.nvime/audit.jsonl`.
+- `:NvimeAudit` opens `.nvime/audit.jsonl`. `:NvimeAudit summary [days]` opens a
+  digest float (default 7 days) that groups events by lane/provider, ranks the
+  most-touched files, and surfaces risky events (force-accepts, diff conflicts,
+  plan rollbacks). `:NvimeAudit forces` opens a focused review of every
+  force-accepted diff block — the single class of action that bypassed nvime's
+  live-content guard.
+- `:NvimeAttribute` shows the attribution entry for the line under the cursor
+  (which plan/step authored it, the rationale, the critic verdict, the
+  timestamp). `:NvimeAttribute show` paints inline virtual-text annotations on
+  every attributed line in the current buffer; `:NvimeAttribute hide` clears
+  them. The ledger lives in `.nvime/attribution.json`; entries are anchored to
+  the accepted text content so they survive later edits that shift line numbers.
+- `:NvimeRecap [--cached] [<rev>..<rev>]` is the reverse-direction "explain my
+  changes" lane: takes a git diff, spawns the plan-lane agent in a temp
+  workspace, and writes a `plan.md` narrative under `.nvime/plans/recap-<hash>/`
+  explaining what changed, why, and what is untested. Auto-opens in the plan
+  view.
 
 ## Chat Panel
 

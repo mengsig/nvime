@@ -340,10 +340,25 @@ function M.setup(opts)
     desc = "Show or set the nvime provider",
   })
 
-  vim.api.nvim_create_user_command("NvimeAudit", function()
-    require("nvime.audit").open()
+  vim.api.nvim_create_user_command("NvimeAudit", function(args)
+    local fargs = args.fargs or {}
+    local sub = fargs[1]
+    if not sub or sub == "raw" then
+      require("nvime.audit").open()
+    elseif sub == "summary" then
+      local days = tonumber(fargs[2]) or 7
+      require("nvime.digest").show_summary(days)
+    elseif sub == "forces" or sub == "force" or sub == "force-review" then
+      require("nvime.digest").show_force_review()
+    else
+      vim.notify("nvime: usage `:NvimeAudit [raw|summary [days]|forces]`", vim.log.levels.WARN)
+    end
   end, {
-    desc = "Open the nvime audit log",
+    nargs = "*",
+    complete = function()
+      return { "raw", "summary", "forces" }
+    end,
+    desc = "Open the nvime audit log (raw / summary / force-accept review)",
   })
 
   vim.api.nvim_create_user_command("NvimeCancel", M.cancel, {
@@ -394,6 +409,36 @@ function M.setup(opts)
       return out
     end,
     desc = "Open the nvime plan picker, draft a plan, or run a step",
+  })
+
+  vim.api.nvim_create_user_command("NvimeRecap", function(args)
+    require("nvime.recap").command(args)
+  end, {
+    nargs = "*",
+    complete = function()
+      return { "claude", "codex", "--cached", "--staged" }
+    end,
+    desc = "Summarize the current git diff into a plan.md narrative under .nvime/plans/recap-<hash>/",
+  })
+
+  vim.api.nvim_create_user_command("NvimeAttribute", function(args)
+    local attribution = require("nvime.attribution")
+    local sub = (args.args or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if sub == "show" or sub == "on" then
+      attribution.toggle_overlay(nil, "show")
+    elseif sub == "hide" or sub == "off" or sub == "clear" then
+      attribution.toggle_overlay(nil, "hide")
+    elseif sub == "toggle" then
+      attribution.toggle_overlay(nil)
+    else
+      attribution.show_at_cursor()
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      return { "show", "hide", "toggle" }
+    end,
+    desc = "Show nvime attribution for the current line, or toggle the inline overlay",
   })
 
   vim.api.nvim_create_user_command("NvimePlanClose", function()

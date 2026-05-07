@@ -1317,6 +1317,14 @@ local function render_session(session, opts)
         original_lines = session.original_lines,
         target_bufnr = session.target_bufnr,
         path = session.file,
+        -- Extended payload (consumed by plan.md changelog hook and the
+        -- attribution ledger). The rationale is the patch worker's one-line
+        -- self-check; the verdict is the critic agent's APPROVE/FLAG/REJECT
+        -- when devil's-advocate is enabled.
+        rationale = session.rationale,
+        verdict = session.verdict,
+        provider = session.provider,
+        applied_history = session.applied_history,
       })
     end
   end
@@ -1824,6 +1832,9 @@ local function apply_block(session, block, start_line_override, opts)
   local old_snapshot = vim.api.nvim_buf_get_lines(session.target_bufnr, start_index, end_index, false)
   vim.api.nvim_buf_set_lines(session.target_bufnr, start_index, end_index, false, replacement)
   block.status = "accepted"
+  -- Record whether this block bypassed the live-content guard so the plan.md
+  -- changelog and the digest's force-review can flag it.
+  block.was_forced = opts.force == true
   block.conflict = nil
   session.applied[#session.applied + 1] = {
     block_id = block.id,
@@ -1838,6 +1849,24 @@ local function apply_block(session, block, start_line_override, opts)
     old_lines = copy_lines(old_snapshot),
     new_lines = copy_lines(replacement),
   }
+  -- Record per-block attribution. Anchored to the final accepted text in the
+  -- file so a later edit that shifts line numbers doesn't lose the link.
+  local ok_attr, attribution = pcall(require, "nvime.attribution")
+  if ok_attr and attribution and #replacement > 0 then
+    pcall(attribution.record, {
+      file = session.file,
+      line1 = start_index + 1,
+      line2 = start_index + #replacement,
+      lines = replacement,
+      rationale = session.rationale,
+      verdict = session.verdict,
+      provider = session.provider,
+      plan_id = session.plan_id,
+      step_id = session.plan_step_id,
+      forced = opts.force == true,
+      diff_session_id = session.review_id,
+    })
+  end
   update_hunk_status(block.hunk)
   return #block.new_lines - block.old_count
 end
