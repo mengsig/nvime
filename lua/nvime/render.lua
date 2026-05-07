@@ -203,7 +203,8 @@ function M.spinner_text(seed)
   local cfg = (require("nvime.state").config or {}).ui or {}
   local frames = cfg.spinner_frames
   if type(frames) ~= "table" or #frames == 0 then
-    frames = cfg.ascii_icons == true and { "-", "\\", "|", "/" } or { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+    frames = cfg.ascii_icons == true and { "-", "\\", "|", "/" }
+      or { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
   end
   if tonumber(seed) then
     seed = tonumber(seed)

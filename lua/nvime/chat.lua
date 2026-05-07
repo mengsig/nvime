@@ -156,8 +156,8 @@ local function schedule_save_sessions()
 end
 
 local function migrate_sessions(decoded, path)
-  local version = tonumber(decoded.version or 1)
-  if version > SESSION_VERSION then
+  local version_value = tonumber(decoded.version or 1)
+  if version_value > SESSION_VERSION then
     vim.notify("nvime chat sessions were written by a newer nvime version: " .. path, vim.log.levels.WARN)
     return nil
   end

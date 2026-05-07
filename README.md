@@ -8,12 +8,42 @@ It is a Neovim Lua plugin for getting real work done with Claude Code and Codex 
 - edit lane: one selected range or Tree-sitter detected function, one current file, written intent required
 - generation lane: selected blank ranges can become new code/text, and selected non-code ranges such as `.gitignore` can be completed
 - plan lane: the agent drafts a structured roadmap (`.nvime/plans/<id>/plan.json` + `plan.md`) that you navigate, execute step-by-step through the existing edit lane, and mark complete — the contract for "agent writes code, but only where you reviewed and approved the architecture"
+- patch worker rationalizes: every edit-lane response carries a one-line `RATIONALE:` self-check (bug → patch → why correct), surfaced in the diff banner before you accept any block
+- devil's-advocate critic: opt-in read-only second-pass agent that reviews each diff and returns APPROVE / FLAG / REJECT (advisory; never blocks). Default-on for plan execution
+- auto-rollback on test failure: when a plan step's tests fail post-accept, one keystroke restores the file to its pre-step content
+- test scaffolder: `:NvimePlan add-test <id> <step>` (or `gW` in the plan view) fires the edit lane against your test file with a "write a regression test for this step" intent
+
+### Plan picker
+
+`<leader>nP` opens the plan picker — every plan in `.nvime/plans/` plus a live "drafting…" row when an author run is in flight.
+
+![nvime plan picker](docs/plan-picker.png)
+
+### Plan view
+
+`<CR>` on a plan row opens the plan view — sectioned WHY / ACCEPTANCE / FILES / STEPS with status-tinted step badges, per-plan progress bar, session-continuity badge, and the full keymap footer.
+
+![nvime plan view](docs/plan-view.png)
+
+### Plan compose
+
+`n` (or `<C-n>`, `N`) in the picker — or `<leader>nP` followed by `n` — opens the persistent compose buffer. Multi-line, free-form, edit/leave/return preserves the draft. `<C-s>` submits to the plan author agent.
+
+![nvime plan compose](docs/plan-compose.png)
+
+### Inline diff review
+
+After step execution, the inline diff opens in the target file with a `RATIONALE:` banner from the patch worker, optional critic verdict, per-block accept/reject controls, and conflict detection if the file drifted under the agent.
+
+![nvime diff review](docs/diff-review.png)
 - diff review: agent output becomes a current-file inline diff; accepted lines or blocks are applied by `nvime`
 - guardrail lane: direct `claude`/`codex` launches from common Neovim process APIs are blocked and audited
 
 This is an editor discipline tool, not a security sandbox. It prevents accidental YOLO use inside normal Neovim paths. It cannot stop an external terminal, a renamed binary, or a hostile plugin.
 
 ![nvime dashboard](docs/dashboard.png)
+
+Screenshots of the plan workflow are in [Plan picker](#plan-picker), [Plan view](#plan-view), [Plan compose](#plan-compose), and [Inline diff review](#inline-diff-review).
 
 ## Install
 

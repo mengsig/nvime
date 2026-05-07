@@ -82,9 +82,16 @@ local function write_json(path, data)
     fd:write(encoded)
     fd:write("\n")
   end)
-  fd:close()
+  local close_ok, closed, close_err = pcall(function()
+    return fd:close()
+  end)
   if not write_ok then
     return false, write_err
+  end
+  if not close_ok then
+    return false, closed
+  elseif not closed then
+    return false, close_err
   end
   return true
 end
@@ -404,8 +411,20 @@ local function dimensions()
   }
 end
 
+local BACKDROP_NAMES = { "picker", "compose", "view", "run" }
+
+-- IMPORTANT: backdrops live under their own state keys (plan_<name>_backdrop)
+-- so they do not collide with the float-panel state keys (plan_<name>). The
+-- previous design had both sharing `plan_picker` / `plan_compose` / `plan` /
+-- `plan_run`, so opening a backdrop silently overwrote the float panel
+-- entry, which made every cleanup path ambiguous and left grey backdrops on
+-- the screen.
+local function backdrop_key(name)
+  return "plan_" .. name .. "_backdrop"
+end
+
 local function close_backdrop(name)
-  local key = "plan_" .. name
+  local key = backdrop_key(name)
   local backdrop = state.panels[key]
   if backdrop and backdrop.winid and vim.api.nvim_win_is_valid(backdrop.winid) then
     pcall(vim.api.nvim_win_close, backdrop.winid, true)
@@ -413,13 +432,85 @@ local function close_backdrop(name)
   state.panels[key] = nil
 end
 
+local function close_all_backdrops_except(keep)
+  for _, name in ipairs(BACKDROP_NAMES) do
+    if name ~= keep then
+      close_backdrop(name)
+    end
+  end
+end
+
+-- Hard reset: kill every plan-UI float and every backdrop. Useful when one
+-- of them gets stuck and the user wants the screen back.
+local function close_all_plan_ui()
+  for _, key in ipairs({ "plan_picker", "plan_compose", "plan", "plan_run" }) do
+    local panel = state.panels[key]
+    if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+      pcall(vim.api.nvim_win_close, panel.winid, true)
+    end
+    state.panels[key] = nil
+  end
+  for _, name in ipairs(BACKDROP_NAMES) do
+    close_backdrop(name)
+  end
+  -- Belt-and-suspenders: walk every state.panels.plan_*_backdrop key in case
+  -- a previous version stored a backdrop under a different key.
+  for key, panel in pairs(state.panels) do
+    if type(key) == "string" and key:match("^plan_.*_backdrop$") then
+      if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+        pcall(vim.api.nvim_win_close, panel.winid, true)
+      end
+      state.panels[key] = nil
+    end
+  end
+end
+
+local PLAN_AUGROUP = vim.api.nvim_create_augroup("nvime.plan.cleanup", { clear = true })
+
+-- Defensive backdrop cleanup: if any of our floats closes for any reason
+-- (`q`, `:q`, lazy.nvim reload, accidental :wincmd), make sure the
+-- corresponding backdrop dies with it. Without this, a stuck backdrop leaves
+-- the screen looking dim/grey forever (the bug the user reported on
+-- closing the picker).
+vim.api.nvim_create_autocmd("WinClosed", {
+  group = PLAN_AUGROUP,
+  callback = function(args)
+    local closed_winid = tonumber(args.match)
+    if not closed_winid then
+      return
+    end
+    -- Float panel keys → matching backdrop name
+    local mapping = {
+      plan_picker = "picker",
+      plan_compose = "compose",
+      plan = "view",
+      plan_run = "run",
+    }
+    for state_key, backdrop_name in pairs(mapping) do
+      local panel = state.panels[state_key]
+      if panel and panel.winid == closed_winid then
+        state.panels[state_key] = nil
+        close_backdrop(backdrop_name)
+      end
+    end
+    -- If the user closed the BACKDROP itself for any reason, also nil it.
+    for _, backdrop_name in ipairs(BACKDROP_NAMES) do
+      local key = backdrop_key(backdrop_name)
+      local backdrop = state.panels[key]
+      if backdrop and backdrop.winid == closed_winid then
+        state.panels[key] = nil
+      end
+    end
+  end,
+})
+
 local function open_backdrop(name)
   local cfg = (state.config or {}).ui or {}
   if cfg.backdrop == false then
     close_backdrop(name)
     return
   end
-  local key = "plan_" .. name
+  local key = backdrop_key(name)
   local existing = state.panels[key]
   if existing and existing.winid and vim.api.nvim_win_is_valid(existing.winid) then
     return
@@ -522,12 +613,28 @@ local function pad_right(text, width)
   return text .. string.rep(" ", width - visible)
 end
 
+-- Forward declarations needed by render_plan and friends. Defined later in
+-- the file as named-anonymous locals (e.g. `close_picker = function() ... end`).
+local install_plan_view_keymaps
+local install_picker_keymaps
+local refresh_picker
+local picker_winid
+local close_picker
+
 local function render_plan_lines(plan)
   local lines = {}
   local marks = {} -- { row, hl, line = true } | { row, hl, col_start, col_end } | { row, virt = true, chunks = {...} }
   local step_index = {} -- step_id -> { first_row, last_row }
 
   local function push(line, hl)
+    -- Defensive: nvim_buf_set_lines rejects items containing \n. plan.json
+    -- step.intent / step.notes / acceptance.text / etc. can legitimately
+    -- contain embedded newlines (the agent encoded them in JSON, decoded
+    -- back to literal \n). Without this guard, render_plan crashes any
+    -- time the user opens or refreshes the plan view. Replace embedded
+    -- newlines with the visible glyph so the line stays single-row but
+    -- the user still sees the full content.
+    line = tostring(line or ""):gsub("\r", ""):gsub("\n", " ↵ ")
     lines[#lines + 1] = line
     if hl then
       marks[#marks + 1] = { row = #lines - 1, hl = hl, line = true }
@@ -577,6 +684,27 @@ local function render_plan_lines(plan)
     updated_label
   )
   local status_row = push(status_line, status_hl(status))
+
+  -- Continuity badge: "↻ claude · resume" when the plan has a stored
+  -- provider session, "○ fresh" when not. Lets the user see at a glance
+  -- whether the next step will share architecture context with prior steps.
+  do
+    local provider_sessions = plan.provider_sessions or {}
+    local resume_chunks = {}
+    for prov_name, sess_id in pairs(provider_sessions) do
+      if sess_id and sess_id ~= "" then
+        resume_chunks[#resume_chunks + 1] = (ui.icon("resume") ~= "" and ui.icon("resume") or "~") .. " " .. prov_name
+      end
+    end
+    local continuity_text
+    if #resume_chunks > 0 then
+      continuity_text = "  session: " .. table.concat(resume_chunks, ", ") .. "  ·  gN to reset"
+      push(continuity_text, "NvimePlanFile")
+    else
+      push("  session: fresh (no resume captured)", "NvimePlanWhy")
+    end
+  end
+
   -- Highlight the bar precisely. 4 leading spaces + icon (display 1) + 2 spaces + status_word padded 12 + 2 spaces.
   do
     -- The icon may be a multi-byte glyph; compute its byte length safely.
@@ -671,9 +799,9 @@ local function render_plan_lines(plan)
   end
 
   push_rule()
-  push("    <CR> execute step    gx done   gp pending   gB blocked   gT tests", "NvimePlanFooter")
-  push("    ]s [s navigate       gA run next pending   gd refine   gr replan", "NvimePlanFooter")
-  push("    o open file          c copy intent         ? help      q close", "NvimePlanFooter")
+  push("    <CR> exec   gE edit-then-exec   gx done   gp pending   gB blocked   gT tests", "NvimePlanFooter")
+  push("    ]s [s navigate       gA run next pending   gW write test   gd refine   gr replan", "NvimePlanFooter")
+  push("    gN reset session     o open file           c copy intent   ? help     q close", "NvimePlanFooter")
   push_blank()
 
   return lines, marks, step_index
@@ -707,6 +835,7 @@ local function open_plan_window(bufnr, title)
     footer = " <CR> exec  gx done  ]s/[s nav  gd discuss  gr replan  q close ",
     footer_pos = "center",
     zindex = 54,
+    focusable = true,
   }
   if existing and existing.winid and vim.api.nvim_win_is_valid(existing.winid) then
     vim.api.nvim_win_set_buf(existing.winid, bufnr)
@@ -778,8 +907,19 @@ local function render_plan(plan, opts)
 
   local winid
   if opts.open ~= false then
+    -- Close any stacked plan UI floats first so we don't fight zindex order.
+    close_picker()
+    local compose_panel = state.panels.plan_compose
+    if compose_panel and compose_panel.winid and vim.api.nvim_win_is_valid(compose_panel.winid) then
+      pcall(vim.api.nvim_win_close, compose_panel.winid, true)
+      state.panels.plan_compose = nil
+    end
+    close_all_backdrops_except("view")
     open_backdrop("view")
     winid = open_plan_window(bufnr, "nvime plan · " .. (plan.title or plan.id))
+    if winid then
+      pcall(vim.api.nvim_set_current_win, winid)
+    end
   end
 
   state.plan.last_opened = plan.id
@@ -795,11 +935,7 @@ local function close_plan_view()
   close_backdrop("view")
 end
 
--- forward declarations for keymap closures
-local install_plan_view_keymaps
-local install_picker_keymaps
-local refresh_picker
-local picker_winid
+-- (forward declarations moved earlier, see top of file)
 
 -- ============================================================================
 -- Step operations
@@ -845,6 +981,198 @@ function M.delete(plan_id)
   return true
 end
 
+-- Extract identifier-shaped tokens from a step intent, prioritizing those
+-- in `backticks` (which the plan author prompt asks for as code refs) and
+-- falling back to snake_case / CamelCase identifiers ≥ 4 chars. Used as
+-- the symbol-search fallback when a step has no range_anchor (e.g. plans
+-- authored before range_anchor existed) and the recorded line range is
+-- stale.
+local function extract_intent_symbols(intent)
+  if type(intent) ~= "string" or intent == "" then
+    return {}
+  end
+  local out = {}
+  local seen = {}
+  local function push(sym)
+    if sym and #sym >= 3 and not seen[sym] then
+      seen[sym] = true
+      out[#out + 1] = sym
+    end
+  end
+  for sym in intent:gmatch("`([%w_][%w_]*)`") do
+    push(sym)
+  end
+  -- Light fallback: any 4+ char snake_case or CamelCase identifier referenced
+  -- bare in the intent body. Skip very generic words.
+  local generic = {
+    line = true,
+    lines = true,
+    range = true,
+    file = true,
+    code = true,
+    test = true,
+    tests = true,
+    plan = true,
+    step = true,
+    steps = true,
+    field = true,
+    fields = true,
+    value = true,
+    values = true,
+    with = true,
+    today = true,
+    when = true,
+    here = true,
+    then_ = true,
+  }
+  for sym in intent:gmatch("([%w_][%w_]+)") do
+    if #sym >= 4 and (sym:find("_") or sym:find("[A-Z]")) and not generic[sym:lower()] then
+      push(sym)
+    end
+  end
+  return out
+end
+
+local function search_by_symbols(buf_lines, symbols)
+  if not symbols or #symbols == 0 then
+    return nil, 0
+  end
+  local best_line, best_score = nil, 0
+  for line_no, line in ipairs(buf_lines) do
+    local score = 0
+    for _, sym in ipairs(symbols) do
+      if line:find(sym, 1, true) then
+        local extra = 0
+        -- Function definitions / declarations are stronger evidence than
+        -- bare references. Same for top-level local declarations.
+        if line:find("function%s+" .. sym .. "%(") or line:find("function%s+[%w_%.:]+%." .. sym .. "%(") then
+          extra = extra + 3
+        end
+        if line:find("local%s+function%s+" .. sym) then
+          extra = extra + 3
+        end
+        if line:find("local%s+" .. sym) or line:find("^" .. sym .. "%s*=") then
+          extra = extra + 2
+        end
+        score = score + 1 + extra
+      end
+    end
+    if score > best_score then
+      best_score = score
+      best_line = line_no
+    end
+  end
+  return best_line, best_score
+end
+
+-- Re-anchor a step's recorded line range against the current file content.
+-- Order of attempts:
+--   1. range_anchor matches at the recorded line1 (cheap fast path).
+--   2. range_anchor matches elsewhere in the file (drift correction).
+--   3. No anchor / anchor missing in file: extract symbols from `intent`
+--      and use the highest-scoring line as a guess (helps OLD plans
+--      authored before range_anchor existed, where line numbers may be
+--      off by hundreds of lines).
+--   4. Last resort: clamp the recorded range as-is, with a notice.
+local function reanchor_range(buf_lines, recorded_line1, recorded_line2, anchor, intent)
+  local total = #buf_lines
+  local function clamp_recorded(notice)
+    local l1 = math.max(1, math.min(recorded_line1 or 1, total))
+    local l2 = math.max(l1, math.min(recorded_line2 or l1, total))
+    return l1, l2, notice
+  end
+
+  local function symbol_fallback(reason)
+    local symbols = extract_intent_symbols(intent or "")
+    local found, score = search_by_symbols(buf_lines, symbols)
+    if found and score >= 1 then
+      local span = (recorded_line2 or recorded_line1 or found) - (recorded_line1 or found)
+      span = math.max(span, 0)
+      -- Cap the span at 40 lines so a wildly drifted range doesn't ship a
+      -- huge unfocused selection to the patch worker.
+      if span > 40 then
+        span = 40
+      end
+      local new_l1 = found
+      local new_l2 = math.min(total, found + span)
+      local notice = string.format(
+        "step range drifted (%s): symbols matched line %d (recorded was %d-%d)",
+        reason,
+        found,
+        recorded_line1 or -1,
+        recorded_line2 or -1
+      )
+      return new_l1, new_l2, notice
+    end
+    return nil
+  end
+
+  if not anchor or anchor == "" then
+    local fl1, fl2, fnotice = symbol_fallback("no range_anchor")
+    if fl1 then
+      return fl1, fl2, fnotice
+    end
+    return clamp_recorded(nil)
+  end
+
+  local anchor_lines = vim.split(anchor, "\n", { plain = true })
+  while #anchor_lines > 0 and anchor_lines[#anchor_lines]:match("^%s*$") do
+    table.remove(anchor_lines)
+  end
+  if #anchor_lines == 0 then
+    local fl1, fl2, fnotice = symbol_fallback("empty range_anchor")
+    if fl1 then
+      return fl1, fl2, fnotice
+    end
+    return clamp_recorded(nil)
+  end
+
+  local function matches_at(start)
+    if start < 1 or start + #anchor_lines - 1 > total then
+      return false
+    end
+    for i = 1, #anchor_lines do
+      if buf_lines[start + i - 1] ~= anchor_lines[i] then
+        return false
+      end
+    end
+    return true
+  end
+
+  if recorded_line1 and matches_at(recorded_line1) then
+    local span = (recorded_line2 or recorded_line1) - recorded_line1
+    return recorded_line1, math.min(total, recorded_line1 + span), nil
+  end
+
+  local best = nil
+  for start = 1, total - #anchor_lines + 1 do
+    if matches_at(start) then
+      if not best or math.abs(start - (recorded_line1 or 1)) < math.abs(best - (recorded_line1 or 1)) then
+        best = start
+      end
+    end
+  end
+  if best then
+    local span = (recorded_line2 or recorded_line1 or best) - (recorded_line1 or best)
+    local new_line2 = math.min(total, best + math.max(0, span))
+    local notice = nil
+    if best ~= recorded_line1 then
+      notice = string.format("step range drifted: anchor was at line %d, now at line %d", recorded_line1 or -1, best)
+    end
+    return best, new_line2, notice
+  end
+
+  -- Anchor exists but didn't match; try symbols before giving up.
+  local fl1, fl2, fnotice = symbol_fallback("range_anchor not found in file")
+  if fl1 then
+    return fl1, fl2, fnotice
+  end
+  return clamp_recorded("step anchor not found in file; using recorded range as-is")
+end
+
+M._reanchor_range = reanchor_range -- exposed for tests
+M._extract_intent_symbols = extract_intent_symbols
+
 local function open_step_target(plan, step)
   local file = step.file
   if not file or file == "" then
@@ -870,51 +1198,536 @@ local function open_step_target(plan, step)
   if range == "new" or range == nil then
     line1, line2 = 1, total_lines
   elseif type(range) == "table" then
-    line1 = clamp_int(range.line1 or range[1], 1)
-    line2 = clamp_int(range.line2 or range[2], line1)
-    line1 = math.max(1, math.min(line1 or 1, total_lines))
-    line2 = math.max(line1, math.min(line2 or line1, total_lines))
+    local recorded_l1 = clamp_int(range.line1 or range[1], 1)
+    local recorded_l2 = clamp_int(range.line2 or range[2], recorded_l1)
+    -- Re-anchor against the current file content if the step has an anchor.
+    -- Lines drift when earlier steps modify the same file; without re-
+    -- anchoring, the patch worker refuses because the recorded range no
+    -- longer covers the target content.
+    local buf_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local notice
+    line1, line2, notice = reanchor_range(buf_lines, recorded_l1, recorded_l2, step.range_anchor, step.intent)
+    if notice then
+      vim.notify("nvime plan: " .. notice, vim.log.levels.INFO)
+    end
   else
     line1, line2 = 1, total_lines
   end
   vim.api.nvim_win_set_cursor(0, { line1, 0 })
-  return true, { bufnr = bufnr, line1 = line1, line2 = line2, path = file }
+  return true,
+    {
+      bufnr = bufnr,
+      line1 = line1,
+      line2 = line2,
+      col1 = 0,
+      col2 = 0,
+      path = file,
+      -- ask.lua / edit.lua format the prompt header with selection.source;
+      -- without this the build_prompt path crashes with "concatenate field
+      -- 'source' (a nil value)".
+      source = "plan-step",
+    }
 end
 
-local function plan_context_block(plan, step, char_budget)
-  char_budget = char_budget or 480
+local function plan_context_block(plan, step, _char_budget)
+  -- No truncation. The plan author writes deliberate per-step context; we
+  -- forward it to the patch worker verbatim. claude/codex both have plenty
+  -- of context window, and a half-sentence ending in "..." (the previous
+  -- 320-char cap) is strictly worse than a long line.
   local steps = plan.steps or {}
   local total = #steps
   local position = string.format("step %s/%d", tostring(step.id or "?"), total)
-  local why = plan.why or ""
-  if #why > 220 then
-    why = why:sub(1, 217) .. "..."
+  local intent = step.intent or "(no intent)"
+
+  local lines = {
+    "Plan context (informational; the actual change is bounded by the selected range):",
+    string.format("- Plan: %s — %s", plan.id or "?", plan.title or ""),
+    "- " .. position .. " (full instruction):",
+    "    " .. intent,
+  }
+  if plan.why and plan.why ~= "" then
+    lines[#lines + 1] = "- Why:"
+    for _, paragraph in ipairs(vim.split(plan.why, "\n", { plain = true })) do
+      lines[#lines + 1] = "    " .. paragraph
+    end
   end
+  if step.notes and step.notes ~= "" then
+    lines[#lines + 1] = "- Step notes:"
+    for _, paragraph in ipairs(vim.split(step.notes, "\n", { plain = true })) do
+      lines[#lines + 1] = "    " .. paragraph
+    end
+  end
+  -- Include the actual acceptance texts (not just a count) so the patch
+  -- worker knows what success looks like at the plan level.
   local acceptance_lines = {}
   for _, item in ipairs(plan.acceptance or {}) do
     local txt = type(item) == "table" and (item.text or "") or tostring(item)
     if txt ~= "" then
-      acceptance_lines[#acceptance_lines + 1] = "  - " .. txt
+      acceptance_lines[#acceptance_lines + 1] = "    - " .. txt
     end
   end
-  local context = {
-    "Plan context (informational; do not exceed the selected range):",
-    string.format("- Plan: %s — %s", plan.id or "?", plan.title or ""),
-    "- Why: " .. why,
-    "- " .. position .. ": " .. (step.intent or ""),
-  }
-  if step.notes and step.notes ~= "" then
-    context[#context + 1] = "- Step notes: " .. step.notes
-  end
   if #acceptance_lines > 0 then
-    context[#context + 1] = "- Plan acceptance:"
-    vim.list_extend(context, acceptance_lines)
+    lines[#lines + 1] = "- Plan-level acceptance:"
+    vim.list_extend(lines, acceptance_lines)
   end
-  local joined = table.concat(context, "\n")
-  if #joined > char_budget then
-    joined = joined:sub(1, char_budget - 3) .. "..."
+  return table.concat(lines, "\n")
+end
+
+-- Detect the project's primary test file so the test scaffolder has a
+-- sensible default. Falls back to nil if the user must pick. Covers Lua,
+-- Python, Go, JS/TS, Rust, Zig, C/C++, Java/Kotlin conventions.
+local function detect_test_file()
+  local cfg = plan_config()
+  if cfg.test_file and cfg.test_file ~= "" then
+    return cfg.test_file
   end
-  return joined
+  local root = git.root() or vim.fn.getcwd()
+  local candidates = {
+    -- Lua / Neovim
+    "tests/headless_spec.lua",
+    "tests/spec.lua",
+    "tests/test_spec.lua",
+    "test/test.lua",
+    "spec/spec.lua",
+    -- Python
+    "tests/__init__.py",
+    "tests/test.py",
+    "tests/test_main.py",
+    "tests/test_basic.py",
+    "test_basic.py",
+    -- Go
+    "test/test.go",
+    "internal/test_test.go",
+    -- TypeScript / JavaScript
+    "tests/integration.test.ts",
+    "tests/index.test.ts",
+    "tests/index.test.js",
+    "src/__tests__/index.test.ts",
+    "src/__tests__/index.test.js",
+    "test/index.test.js",
+    -- Rust
+    "tests/integration_test.rs",
+    "tests/it.rs",
+    "tests/main.rs",
+    -- Zig
+    "tests/main_test.zig",
+    "src/main_test.zig",
+    "test.zig",
+    -- C / C++
+    "tests/test_main.c",
+    "tests/test_main.cpp",
+    "test/test_main.c",
+    "test/test_main.cpp",
+    -- Java / Kotlin
+    "src/test/java/AppTest.java",
+    "src/test/kotlin/AppTest.kt",
+  }
+  for _, rel in ipairs(candidates) do
+    if vim.fn.filereadable(root .. "/" .. rel) == 1 then
+      return rel
+    end
+  end
+  return nil
+end
+
+-- Detect the project's preferred test runner from common project markers.
+-- Returned as a single shell command suitable to be put into step.tests.
+local function detect_test_runner()
+  local cfg = plan_config()
+  if cfg.test_runner and cfg.test_runner ~= "" then
+    return cfg.test_runner
+  end
+  local root = git.root() or vim.fn.getcwd()
+  local function exists(rel)
+    return vim.fn.filereadable(root .. "/" .. rel) == 1 or vim.fn.isdirectory(root .. "/" .. rel) == 1
+  end
+  -- Project-local runner script wins
+  if exists("scripts/test") then
+    return "./scripts/test"
+  end
+  if exists("Cargo.toml") then
+    return "cargo test --quiet"
+  end
+  if exists("build.zig") then
+    return "zig build test"
+  end
+  if exists("go.mod") then
+    return "go test ./..."
+  end
+  if exists("pyproject.toml") or exists("pytest.ini") or exists("setup.py") then
+    return "pytest -q"
+  end
+  if exists("package.json") then
+    return "npm test --silent"
+  end
+  if exists("pom.xml") then
+    return "mvn -q test"
+  end
+  if exists("build.gradle") or exists("build.gradle.kts") then
+    return "gradle -q test"
+  end
+  if exists("CMakeLists.txt") then
+    return "ctest --output-on-failure"
+  end
+  if exists("Makefile") then
+    return "make test"
+  end
+  return nil
+end
+
+M.detect_test_file = detect_test_file
+M.detect_test_runner = detect_test_runner
+
+local function build_test_intent(plan, step, target_file)
+  local lines = {
+    "Add a regression test that exercises the change made by step "
+      .. tostring(step.id)
+      .. " of plan "
+      .. plan.id
+      .. ".",
+    "",
+    "Step intent (verbatim):",
+    step.intent or "(no intent)",
+    "",
+    "The change was applied to " .. (step.file or "?") .. " " .. (step.range == "new" and "(new file)" or (type(
+      step.range
+    ) == "table" and ("L" .. (step.range.line1 or "?") .. "-" .. (step.range.line2 or "?")) or "?")) .. ".",
+    "",
+    "Required test discipline:",
+    "  1. The test MUST fail without the step's change and pass after it.",
+    "  2. Append to the END of the selected range; do not rewrite existing tests.",
+    "  3. Use the same harness pattern that surrounding tests in this file use.",
+    "  4. Keep the test self-contained; create temp files / fixtures as needed.",
+    "  5. Name the test clearly so future readers understand what it guards.",
+    "",
+    "Target file: " .. target_file,
+  }
+  return table.concat(lines, "\n")
+end
+
+function M.add_test_for_step(plan_id, step_id, opts)
+  opts = opts or {}
+  local plan = M.get(plan_id)
+  if not plan then
+    vim.notify("nvime: unknown plan " .. tostring(plan_id), vim.log.levels.ERROR)
+    return false
+  end
+  local step = find_step(plan, step_id)
+  if not step then
+    vim.notify("nvime: unknown step " .. tostring(step_id), vim.log.levels.ERROR)
+    return false
+  end
+
+  local target_file = opts.test_file or detect_test_file()
+  if not target_file then
+    vim.notify(
+      "nvime: could not auto-detect a test file. Set plan.test_file in your nvime config or pass --file=...",
+      vim.log.levels.ERROR
+    )
+    return false
+  end
+
+  local root = git.root() or vim.fn.getcwd()
+  local abs = target_file
+  if abs:sub(1, 1) ~= "/" then
+    abs = root .. "/" .. target_file
+  end
+  if vim.fn.filereadable(abs) ~= 1 then
+    vim.notify("nvime: test file not found: " .. abs, vim.log.levels.ERROR)
+    return false
+  end
+
+  close_plan_view()
+  vim.cmd("edit " .. vim.fn.fnameescape(abs))
+  local bufnr = vim.api.nvim_get_current_buf()
+  local total = math.max(1, vim.api.nvim_buf_line_count(bufnr))
+  local first = math.max(1, total - 5)
+  vim.api.nvim_win_set_cursor(0, { first, 0 })
+
+  local selection = {
+    bufnr = bufnr,
+    line1 = first,
+    line2 = total,
+    col1 = 0,
+    col2 = 0,
+    path = target_file,
+    source = "plan-test-scaffold",
+  }
+
+  audit.write({
+    event = "plan_step_test_scaffold",
+    plan_id = plan.id,
+    step_id = step.id,
+    test_file = target_file,
+  })
+
+  -- On accept, append the file path to step.tests as a default verifier.
+  local on_resolved = function(summary)
+    if (summary.accepted or 0) == 0 then
+      vim.schedule(function()
+        vim.notify(
+          "nvime plan: test scaffold rejected; step " .. tostring(step.id) .. " still has no test",
+          vim.log.levels.WARN
+        )
+      end)
+      return
+    end
+    vim.schedule(function()
+      -- Update the plan's step.tests so future re-runs of the step exercise
+      -- the new test (if not already covered by an existing entry).
+      local fresh = M.get(plan.id)
+      if not fresh then
+        return
+      end
+      local fresh_step = find_step(fresh, step.id)
+      if not fresh_step then
+        return
+      end
+      fresh_step.tests = fresh_step.tests or {}
+      local default_runner = detect_test_runner() or "./scripts/test"
+      local already = false
+      for _, t in ipairs(fresh_step.tests) do
+        if t == default_runner then
+          already = true
+          break
+        end
+      end
+      if not already then
+        table.insert(fresh_step.tests, default_runner)
+      end
+      persist_plan(fresh)
+      vim.notify(
+        "nvime plan: regression test added to "
+          .. target_file
+          .. "; step "
+          .. tostring(step.id)
+          .. ".tests now has "
+          .. #fresh_step.tests
+          .. " entr"
+          .. (#fresh_step.tests == 1 and "y" or "ies"),
+        vim.log.levels.INFO
+      )
+    end)
+  end
+
+  require("nvime.edit").start({
+    selection = selection,
+    intent = build_test_intent(plan, step, target_file),
+    line1 = selection.line1,
+    line2 = selection.line2,
+    range = 2,
+    provider = opts.provider,
+    force_edit = true,
+    on_resolved = on_resolved,
+  })
+  return true
+end
+
+-- Clear the plan's stored provider session id so the next step (or the
+-- next plan_author refinement) starts a fresh conversation. Use this when
+-- the conversation has accumulated too much context, when the model has
+-- gone off-track, or simply when you want a clean slate. If `provider` is
+-- nil, clears all providers' sessions for the plan.
+function M.reset_session(plan_id, provider)
+  local plan = M.get(plan_id)
+  if not plan then
+    vim.notify("nvime: unknown plan " .. tostring(plan_id), vim.log.levels.ERROR)
+    return false
+  end
+  plan.provider_sessions = plan.provider_sessions or {}
+  if provider and provider ~= "" then
+    if plan.provider_sessions[provider] then
+      plan.provider_sessions[provider] = nil
+      persist_plan(plan)
+      vim.notify("nvime plan: " .. plan.id .. " — fresh session for next " .. provider .. " run", vim.log.levels.INFO)
+    else
+      vim.notify("nvime plan: no " .. provider .. " session captured for this plan", vim.log.levels.INFO)
+    end
+  else
+    plan.provider_sessions = {}
+    persist_plan(plan)
+    vim.notify("nvime plan: " .. plan.id .. " — all sessions reset", vim.log.levels.INFO)
+  end
+  audit.write({
+    event = "plan_session_reset",
+    plan_id = plan.id,
+    provider = provider,
+  })
+  return true
+end
+
+-- "Edit before exec" mode: open a scratch buffer with the would-be intent
+-- + plan-context block prefilled. On <C-s>, the user's (possibly edited)
+-- intent is fed to M.execute_step via the intent_override opt. On q the
+-- compose is cancelled and nothing fires.
+local STEP_COMPOSE_NS = vim.api.nvim_create_namespace("nvime.plan.step_compose")
+
+function M.compose_step(plan_id, step_id, opts)
+  opts = opts or {}
+  local plan = M.get(plan_id)
+  if not plan then
+    vim.notify("nvime: unknown plan " .. tostring(plan_id), vim.log.levels.ERROR)
+    return false
+  end
+  local step = find_step(plan, step_id)
+  if not step then
+    vim.notify("nvime: unknown step " .. tostring(step_id), vim.log.levels.ERROR)
+    return false
+  end
+
+  -- Build the SAME intent string execute_step would fire — including the
+  -- plan-context block — so the user can read & tweak the EXACT text the
+  -- agent will see.
+  local cfg = plan_config()
+  local context = plan_context_block(plan, step, tonumber(cfg.inject_context_chars) or 480)
+  local prefilled = (step.intent or "") .. "\n\n" .. context
+
+  local buffer_name = "nvime://plan/step-compose/" .. plan_id .. "/" .. tostring(step_id)
+  local bufnr = find_buffer(buffer_name)
+  if not bufnr then
+    bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(bufnr, buffer_name)
+  end
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].bufhidden = "hide"
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].filetype = "markdown"
+  vim.bo[bufnr].modifiable = true
+  vim.bo[bufnr].readonly = false
+
+  -- Seed with a header so the user knows what each section is.
+  local seed = {
+    "# Step " .. tostring(step.id) .. "/" .. tostring(#(plan.steps or {})) .. " — " .. plan.id,
+    "# File: " .. (step.file or "?") .. "  Range: " .. range_label(step),
+    "# <C-s> fire   q close (cancel)   gC reset to original",
+    "",
+    "# === INTENT (the agent reads everything below this line) ===",
+    "",
+  }
+  for _, line in ipairs(vim.split(prefilled, "\n", { plain = true })) do
+    seed[#seed + 1] = line
+  end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, seed)
+
+  -- Decoration: dim the header lines so they stand out as instructions, not
+  -- content the agent will see.
+  vim.api.nvim_buf_clear_namespace(bufnr, STEP_COMPOSE_NS, 0, -1)
+  ui.ensure_highlights()
+  for row, line in ipairs(seed) do
+    if line:sub(1, 1) == "#" then
+      vim.api.nvim_buf_set_extmark(bufnr, STEP_COMPOSE_NS, row - 1, 0, {
+        end_col = #line,
+        hl_group = "NvimePlanWhy",
+      })
+    end
+  end
+
+  close_all_backdrops_except("compose")
+  open_backdrop("compose")
+
+  local cfg_ui = (state.config or {}).ui or {}
+  local columns = vim.o.columns
+  local lines = vim.o.lines
+  local width = math.max(72, math.min(math.floor(columns * 0.74), columns - 4))
+  local height = math.max(16, math.min(math.floor(lines * 0.62), lines - 4))
+  local config = {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = math.max(0, math.floor((lines - height) / 2 - 1)),
+    col = math.max(0, math.floor((columns - width) / 2)),
+    style = "minimal",
+    border = cfg_ui.border or "rounded",
+    title = " nvime plan · compose-then-fire step " .. tostring(step.id) .. " ",
+    title_pos = "center",
+    footer = " <C-s> fire · q cancel · gC reset ",
+    footer_pos = "center",
+    zindex = 54,
+    focusable = true,
+  }
+
+  local existing = state.panels.plan_step_compose
+  local winid
+  if existing and existing.winid and vim.api.nvim_win_is_valid(existing.winid) then
+    vim.api.nvim_win_set_buf(existing.winid, bufnr)
+    vim.api.nvim_win_set_config(existing.winid, config)
+    configure_window(existing.winid)
+    winid = existing.winid
+  else
+    winid = vim.api.nvim_open_win(bufnr, true, config)
+    configure_window(winid)
+  end
+  state.panels.plan_step_compose = { bufnr = bufnr, winid = winid }
+  pcall(vim.api.nvim_set_current_win, winid)
+  -- Position cursor on the first content line under the INTENT header.
+  pcall(vim.api.nvim_win_set_cursor, winid, { 7, 0 })
+
+  -- Buffer-local keymaps
+  for _, lhs in ipairs({ "<C-s>", "q", "<Esc>", "gC" }) do
+    pcall(vim.keymap.del, "n", lhs, { buffer = bufnr })
+  end
+  pcall(vim.keymap.del, "i", "<C-s>", { buffer = bufnr })
+  local kopts = { buffer = bufnr, silent = true, nowait = true }
+
+  local function close_step_compose()
+    local panel = state.panels.plan_step_compose
+    if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+      pcall(vim.api.nvim_win_close, panel.winid, true)
+    end
+    state.panels.plan_step_compose = nil
+    close_backdrop("compose")
+  end
+
+  local function fire()
+    -- Strip the leading header lines (`#` prefix at the START of the buffer
+    -- only — once we hit a non-header line, everything after is content).
+    local raw = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local first_content = 1
+    for index, line in ipairs(raw) do
+      if line:sub(1, 1) ~= "#" and line ~= "" then
+        first_content = index
+        break
+      elseif line:sub(1, 1) ~= "#" then
+        first_content = index + 1
+      end
+    end
+    local body = {}
+    for i = first_content, #raw do
+      body[#body + 1] = raw[i]
+    end
+    local intent = vim.trim(table.concat(body, "\n"))
+    if intent == "" then
+      vim.notify("nvime: step compose is empty", vim.log.levels.WARN)
+      return
+    end
+    close_step_compose()
+    M.execute_step(plan_id, step_id, vim.tbl_extend("force", opts, { intent_override = intent }))
+  end
+
+  vim.keymap.set({ "n", "i", "v" }, "<C-s>", function()
+    if vim.fn.mode() ~= "n" then
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+    end
+    fire()
+  end, vim.tbl_extend("force", kopts, { desc = "nvime plan: fire step with edited intent" }))
+
+  vim.keymap.set(
+    "n",
+    "q",
+    close_step_compose,
+    vim.tbl_extend("force", kopts, { desc = "nvime plan: cancel step compose" })
+  )
+  vim.keymap.set(
+    "n",
+    "<Esc>",
+    close_step_compose,
+    vim.tbl_extend("force", kopts, { desc = "nvime plan: cancel step compose" })
+  )
+  vim.keymap.set("n", "gC", function()
+    M.compose_step(plan_id, step_id, opts) -- reseed the buffer
+  end, vim.tbl_extend("force", kopts, { desc = "nvime plan: reset compose to original intent" }))
+
+  return true
 end
 
 function M.execute_step(plan_id, step_id, opts)
@@ -968,7 +1781,17 @@ function M.execute_step(plan_id, step_id, opts)
   end
 
   local context = plan_context_block(plan, step, tonumber(cfg.inject_context_chars) or 480)
-  local intent = (step.intent or "") .. "\n\n" .. context
+  -- Honor the edit-before-exec opt-in path. compose_step prefills the
+  -- generated intent + context, lets the user tweak, then calls
+  -- execute_step with intent_override = the edited buffer body. We trust
+  -- the user fully here: if they cleared the plan-context block, they
+  -- meant to. Fall back to auto-generated intent + context otherwise.
+  local intent
+  if opts.intent_override and opts.intent_override ~= "" then
+    intent = opts.intent_override
+  else
+    intent = (step.intent or "") .. "\n\n" .. context
+  end
 
   audit.write({
     event = "plan_step_executing",
@@ -977,6 +1800,210 @@ function M.execute_step(plan_id, step_id, opts)
     file = step.file,
   })
 
+  -- Restore the file to its pre-step content using the snapshot the diff
+  -- session captured at start. Used by the test-failure rollback option so
+  -- the user can recover with one keystroke instead of git-reverting by
+  -- hand. We also save the file so the on-disk state matches the buffer.
+  local function rollback_step(summary)
+    local target_bufnr = summary and summary.target_bufnr
+    local original_lines = summary and summary.original_lines
+    if not target_bufnr or not vim.api.nvim_buf_is_valid(target_bufnr) or not original_lines then
+      vim.notify("nvime plan: cannot rollback — original snapshot unavailable", vim.log.levels.ERROR)
+      return false
+    end
+    vim.api.nvim_buf_set_lines(target_bufnr, 0, -1, false, original_lines)
+    -- :write the buffer if it has a real file; suppress autocmds so other
+    -- plugins don't reformat the rolled-back content.
+    pcall(function()
+      vim.api.nvim_buf_call(target_bufnr, function()
+        vim.cmd("noautocmd silent! write")
+      end)
+    end)
+    audit.write({
+      event = "plan_step_rollback",
+      plan_id = plan.id,
+      step_id = step.id,
+      file = summary.path,
+    })
+    vim.notify("nvime plan: step " .. tostring(step.id) .. " rolled back to pre-step content", vim.log.levels.WARN)
+    return true
+  end
+
+  -- When the user finishes reviewing the diff (every block accepted or
+  -- rejected), auto-run the step's tests and offer to mark the step done.
+  -- The user stays in control — we never auto-flip status without confirm.
+  local on_resolved = function(summary)
+    if (summary.accepted or 0) == 0 then
+      vim.schedule(function()
+        local choice = vim.fn.confirm(
+          "nvime plan: step " .. tostring(step.id) .. " — every block was rejected. Mark this step blocked?",
+          "&Blocked\n&Pending\n&Cancel",
+          1
+        )
+        if choice == 1 then
+          set_step_status(plan.id, step.id, "blocked")
+        elseif choice == 2 then
+          set_step_status(plan.id, step.id, "pending")
+        end
+      end)
+      return
+    end
+    local tests = step.tests or {}
+    if #tests == 0 then
+      vim.schedule(function()
+        local choice = vim.fn.confirm(
+          "nvime plan: step "
+            .. tostring(step.id)
+            .. " accepted ("
+            .. summary.accepted
+            .. "/"
+            .. summary.total
+            .. " blocks). No tests defined. Mark done?",
+          "&Done\n&Pending\n&Cancel",
+          1
+        )
+        if choice == 1 then
+          set_step_status(plan.id, step.id, "done")
+        elseif choice == 2 then
+          set_step_status(plan.id, step.id, "pending")
+        end
+      end)
+      return
+    end
+    vim.schedule(function()
+      -- Save the target buffer to disk before running tests. The diff
+      -- acceptance path writes to the BUFFER, not the file; tools that read
+      -- from disk (stylua --check, ./scripts/test, rg/grep, etc.) would
+      -- otherwise see stale content and report a false failure.
+      local target_bufnr = summary and summary.target_bufnr
+      if target_bufnr and vim.api.nvim_buf_is_valid(target_bufnr) and vim.bo[target_bufnr].modified then
+        pcall(function()
+          vim.api.nvim_buf_call(target_bufnr, function()
+            vim.cmd("noautocmd silent! write")
+          end)
+        end)
+      end
+      vim.notify("nvime plan: running step " .. tostring(step.id) .. " tests…", vim.log.levels.INFO)
+      local cmd = table.concat(tests, " && ")
+      local cwd = git.root() or vim.fn.getcwd()
+      vim.system({ "sh", "-lc", cmd }, { cwd = cwd, text = true }, function(result)
+        vim.schedule(function()
+          local stdout = (result.stdout or ""):gsub("%s+$", "")
+          local stderr = (result.stderr or ""):gsub("%s+$", "")
+          local tail = stdout
+          if stderr ~= "" then
+            tail = (tail ~= "" and (tail .. "\n") or "") .. stderr
+          end
+          if #tail > 1200 then
+            tail = tail:sub(-1200)
+          end
+          if result.code == 0 then
+            local choice = vim.fn.confirm(
+              "nvime plan: step "
+                .. tostring(step.id)
+                .. " tests PASSED. Mark step done?\n\nLast output:\n"
+                .. (tail ~= "" and tail or "(no output)"),
+              "&Done\n&Pending\n&Cancel",
+              1
+            )
+            if choice == 1 then
+              set_step_status(plan.id, step.id, "done")
+            elseif choice == 2 then
+              set_step_status(plan.id, step.id, "pending")
+            end
+          else
+            local choice = vim.fn.confirm(
+              "nvime plan: step "
+                .. tostring(step.id)
+                .. " tests FAILED (exit "
+                .. tostring(result.code)
+                .. "). Output:\n"
+                .. (tail ~= "" and tail or "(no output)")
+                .. "\n\nWhat next?",
+              "&Rollback\n&Blocked\n&Pending\n&Cancel",
+              1
+            )
+            if choice == 1 then
+              if rollback_step(summary) then
+                set_step_status(plan.id, step.id, "pending")
+              else
+                set_step_status(plan.id, step.id, "blocked")
+              end
+            elseif choice == 2 then
+              set_step_status(plan.id, step.id, "blocked")
+            elseif choice == 3 then
+              set_step_status(plan.id, step.id, "pending")
+            end
+          end
+        end)
+      end)
+    end)
+  end
+
+  -- Plan-execution prefers the critic on by default (overrides the
+  -- diff.devils_advocate global) because plan steps are structured and the
+  -- second-pass review materially raises bar. Caller can override.
+  local devils_advocate = opts.devils_advocate
+  if devils_advocate == nil then
+    local plan_cfg = (state.config or {}).plan or {}
+    devils_advocate = plan_cfg.devils_advocate ~= false
+  end
+
+  -- Plan-level session continuity: reuse the provider session captured
+  -- during plan_author so every step picks up where the previous one left
+  -- off. The on_session_id callback rotates the stored id whenever the
+  -- agent emits a new one (claude/codex assign new ids on every --resume).
+  local provider_for_continuity = opts.provider or (state.config and state.config.provider) or "claude"
+  local plan_continuity = nil
+  local plan_cfg = (state.config or {}).plan or {}
+  local continuity_mode = opts.continuity or plan_cfg.session_continuity or "plan"
+  if continuity_mode == "plan" then
+    local resume_id = plan.provider_sessions and plan.provider_sessions[provider_for_continuity] or nil
+    plan_continuity = {
+      resume_session_id = resume_id,
+      on_session_id = function(new_id)
+        if not new_id or new_id == "" then
+          return
+        end
+        -- on_session_id fires from agents.run's stdout libuv callback (a
+        -- "fast event context"). vim.fn.mkdir / vim.fn.writefile inside
+        -- persist_plan are forbidden there; defer to the main loop.
+        vim.schedule(function()
+          local fresh = M.get(plan.id)
+          if not fresh then
+            return
+          end
+          fresh.provider_sessions = fresh.provider_sessions or {}
+          if fresh.provider_sessions[provider_for_continuity] ~= new_id then
+            fresh.provider_sessions[provider_for_continuity] = new_id
+            persist_plan(fresh)
+          end
+        end)
+      end,
+    }
+  end
+
+  -- on_run_failed: edit lane invokes this when the agent run exits non-zero
+  -- (e.g. claude rejected our --resume id with "No conversation found").
+  -- We clear the bad id so the next attempt starts fresh instead of looping
+  -- forever on the same broken resume.
+  local on_run_failed = function(info)
+    if info and info.stale_resume then
+      vim.schedule(function()
+        local fresh = M.get(plan.id)
+        if fresh and fresh.provider_sessions then
+          fresh.provider_sessions[provider_for_continuity] = nil
+          persist_plan(fresh)
+        end
+        vim.notify(
+          "nvime plan: provider rejected the stored session id (resume failed). "
+            .. "Cleared the captured id; press <CR> on the step to retry with a fresh session.",
+          vim.log.levels.WARN
+        )
+      end)
+    end
+  end
+
   require("nvime.edit").start({
     selection = selection,
     intent = intent,
@@ -984,6 +2011,14 @@ function M.execute_step(plan_id, step_id, opts)
     line2 = selection.line2,
     range = 2,
     provider = opts.provider,
+    -- Skip the question-shaped reroute: a plan step always wants the patch
+    -- worker, even if the intent or plan-context block contains words like
+    -- "review", "verify", "check", or "?".
+    force_edit = true,
+    on_resolved = on_resolved,
+    on_run_failed = on_run_failed,
+    devils_advocate = devils_advocate,
+    plan_continuity = plan_continuity,
   })
   return true
 end
@@ -993,6 +2028,32 @@ end
 -- ============================================================================
 
 install_plan_view_keymaps = function(bufnr, plan_id, step_index)
+  -- Defensive: clear any stale buffer-local maps so reusing the buffer across
+  -- opens doesn't leave dead closures, and so the global `gx` (vim.ui.open
+  -- in nvim 0.10+) can't sneak through if a previous install_*  removed and
+  -- failed to re-set our binding.
+  for _, lhs in ipairs({
+    "<CR>",
+    "gx",
+    "gp",
+    "gB",
+    "gT",
+    "]s",
+    "[s",
+    "gA",
+    "o",
+    "c",
+    "gd",
+    "gr",
+    "gW",
+    "gN",
+    "gE",
+    "q",
+    "<Esc>",
+    "?",
+  }) do
+    pcall(vim.keymap.del, "n", lhs, { buffer = bufnr })
+  end
   local opts = { buffer = bufnr, silent = true, nowait = true }
 
   local function step_or_warn()
@@ -1049,6 +2110,41 @@ install_plan_view_keymaps = function(bufnr, plan_id, step_index)
     vim.notify("nvime: running tests — " .. cmd, vim.log.levels.INFO)
     vim.cmd("botright split | resize 12 | terminal " .. vim.fn.shellescape("sh -lc '" .. cmd:gsub("'", "'\\''") .. "'"))
   end, vim.tbl_extend("force", opts, { desc = "nvime plan: run step tests" }))
+
+  vim.keymap.set("n", "gW", function()
+    -- "g write-test" — fire the test scaffolder for the step under cursor.
+    -- Lands in tests/headless_spec.lua (or your configured plan.test_file)
+    -- through the existing edit lane diff review.
+    local id = step_or_warn()
+    if id then
+      M.add_test_for_step(plan_id, id)
+    end
+  end, vim.tbl_extend("force", opts, { desc = "nvime plan: scaffold a regression test" }))
+
+  vim.keymap.set("n", "gN", function()
+    -- "g new-session" — clear the plan's captured provider session so the
+    -- next step / refinement starts fresh. Useful when the conversation has
+    -- gotten too long or off-track. Affects the current default provider;
+    -- pass a provider arg via :NvimePlan reset-session <id> [provider] for
+    -- finer control.
+    local plan = M.get(plan_id)
+    if not plan then
+      return
+    end
+    local provider_name = (state.config and state.config.provider) or "claude"
+    M.reset_session(plan_id, provider_name)
+  end, vim.tbl_extend("force", opts, { desc = "nvime plan: reset provider session (next step starts fresh)" }))
+
+  vim.keymap.set("n", "gE", function()
+    -- "g edit-then-execute" — open a compose buffer with the would-be intent
+    -- + plan context prefilled. The user can tweak (correct line numbers,
+    -- add hints, narrow the request) before <C-s> actually fires the
+    -- patch worker.
+    local id = step_or_warn()
+    if id then
+      M.compose_step(plan_id, id)
+    end
+  end, vim.tbl_extend("force", opts, { desc = "nvime plan: edit intent before firing" }))
 
   vim.keymap.set("n", "]s", function()
     local row = vim.api.nvim_win_get_cursor(0)[1]
@@ -1217,8 +2313,9 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   '      "intent": "Concrete instruction to a future patch worker. Include WHAT, not WHY.",',
   '      "file": "path/relative/to/repo",',
   '      "range": { "line1": 12, "line2": 45 },   // or "new"',
+  '      "range_anchor": "first verbatim line of original content at line 12",',
   '      "depends_on": [],',
-  '      "tests": ["./scripts/test"],',
+  '      "tests": ["<project-native test runner>"],',
   '      "status": "pending",',
   '      "notes": "optional context"',
   "    }",
@@ -1230,6 +2327,50 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "  - If the work has uncertainty, encode the choice in `notes`. Don't punt.",
   "  - Prefer 4-12 small steps over 1-2 huge steps.",
   "  - If the codebase already has a tracked roadmap (e.g. IMPROVEMENTS.md), cite the relevant section in `why`.",
+  "",
+  "Tests are load-bearing:",
+  "  Every step that changes runtime behavior MUST have ONE of the following:",
+  "    (a) a `tests` field whose entries are real shell commands that exercise the new behavior (NOT just the project test runner unless the existing tests cover the new behavior); OR",
+  "    (b) an explicit follow-up step in the plan that adds a regression test, with `depends_on` pointing back at the behavior step.",
+  '  Pure cosmetic / formatting / dead-code-removal steps are exempt: mark them with `notes: "no behavior change; lint-only"`.',
+  "  When in doubt, pick (b) — a separate test step is small, reviewable, and catches the case where the implementation drifts.",
+  "",
+  "  Use the project's NATIVE test runner. Detect it from markers in the repo root:",
+  "    Cargo.toml      → `cargo test --quiet`",
+  "    build.zig       → `zig build test`",
+  "    go.mod          → `go test ./...`",
+  "    pyproject.toml / pytest.ini / setup.py → `pytest -q`",
+  "    package.json    → `npm test --silent`",
+  "    pom.xml         → `mvn -q test`",
+  "    build.gradle    → `gradle -q test`",
+  "    CMakeLists.txt  → `ctest --output-on-failure`",
+  "    Makefile        → `make test`",
+  "    scripts/test    → `./scripts/test`",
+  "  Linters/formatters are language-specific too: pick what the project actually uses",
+  "  (`stylua --check`, `rustfmt --check`, `gofmt -d`, `black --check`, `prettier --check`,",
+  "  `clang-format --dry-run -Werror`, `zig fmt --check`, `ktlint`, etc.).",
+  "  Example bad entries:",
+  '    "manually verify in <editor>"   (not automatable)',
+  '    "add tests later"               (not a check)',
+  "",
+  "Plan acceptance bar:",
+  "  The top-level `acceptance` array must include AT LEAST one item per acceptance category that applies:",
+  "    - functional: the behavior the user asked for is observable",
+  "    - regression: a green run of the project test runner AFTER the last step",
+  "    - lint: the project's formatter / linter is clean on the touched files",
+  "  Each acceptance entry should be a checkable shell command or an observable behavior, not vague phrases.",
+  "",
+  "Range anchors (resilience to file drift):",
+  "  When earlier steps modify the same file as a later step, line numbers shift.",
+  '  For every step whose `range` is a line block (NOT "new"), include an additional',
+  "  `range_anchor` field: the FIRST 1-3 lines of the original content at that range,",
+  "  copied verbatim including leading whitespace. nvime searches the file for this",
+  "  anchor at execute time and re-anchors the range to wherever the content has",
+  "  drifted to. Without an anchor, line drift can push the target out of the",
+  "  declared range and the patch worker will refuse the step.",
+  "  Example:",
+  '    "range": { "line1": 627, "line2": 632 },',
+  '    "range_anchor": "      detail = table.concat(detail, \\" \\")",',
   "",
 }, "\n")
 
@@ -1274,9 +2415,10 @@ local function open_run_window(bufnr)
     border = dim.border,
     title = " nvime plan author ",
     title_pos = "center",
-    footer = " streaming · <C-c> cancel · q close ",
+    footer = " streaming · <C-c> cancel · q/<Esc> close (output preserved) ",
     footer_pos = "center",
     zindex = 54,
+    focusable = true,
   }
   if existing and existing.winid and vim.api.nvim_win_is_valid(existing.winid) then
     vim.api.nvim_win_set_buf(existing.winid, bufnr)
@@ -1286,7 +2428,7 @@ local function open_run_window(bufnr)
   end
   local winid = vim.api.nvim_open_win(bufnr, true, config)
   configure_window(winid)
-  state.panels.plan_run.winid = winid
+  state.panels.plan_run = { bufnr = bufnr, winid = winid }
   return winid
 end
 
@@ -1299,7 +2441,36 @@ local function close_run_window()
   close_backdrop("run")
 end
 
+local function install_run_panel_keymaps(bufnr)
+  for _, lhs in ipairs({ "q", "<Esc>", "<C-c>" }) do
+    pcall(vim.keymap.del, "n", lhs, { buffer = bufnr })
+  end
+  local opts = { buffer = bufnr, silent = true, nowait = true }
+  vim.keymap.set("n", "q", close_run_window, vim.tbl_extend("force", opts, { desc = "nvime plan run: close" }))
+  vim.keymap.set("n", "<Esc>", close_run_window, vim.tbl_extend("force", opts, { desc = "nvime plan run: close" }))
+  vim.keymap.set("n", "<C-c>", function()
+    local active = state.plan and state.plan.active_run
+    if active and active.handle and active.handle.kill then
+      pcall(active.handle.kill, active.handle, "sigterm")
+      vim.notify("nvime: cancelled plan author run", vim.log.levels.INFO)
+    else
+      close_run_window()
+    end
+  end, vim.tbl_extend("force", opts, { desc = "nvime plan run: cancel running" }))
+end
+
 local function run_panel_append(text)
+  -- agents.run's on_text / on_progress fire from libuv callbacks (a "fast
+  -- event context"). nvim_buf_is_valid and nvim_buf_set_lines are NOT safe
+  -- there; we must defer to the main loop via vim.schedule. Without this,
+  -- streaming output crashes the plan author the instant the first chunk
+  -- arrives.
+  if vim.in_fast_event and vim.in_fast_event() then
+    vim.schedule(function()
+      run_panel_append(text)
+    end)
+    return
+  end
   local panel = state.panels.plan_run
   if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
     return
@@ -1376,18 +2547,101 @@ function M.create(opts)
   seed[#seed + 1] = ""
   vim.api.nvim_buf_set_lines(run_bufnr, 0, -1, false, seed)
   vim.bo[run_bufnr].modifiable = false
+  close_all_backdrops_except("run")
   open_backdrop("run")
-  open_run_window(run_bufnr)
+  local run_winid = open_run_window(run_bufnr)
+  install_run_panel_keymaps(run_bufnr)
+  if run_winid then
+    pcall(vim.api.nvim_set_current_win, run_winid)
+  end
 
-  state.plan.active_run = { provider = provider, intent = intent, started_at = now_ts() }
+  -- Pull a short title from the intent (first non-empty line, capped) for
+  -- display in the picker while the run is in flight.
+  local title_excerpt = nil
+  for _, line in ipairs(vim.split(intent or "", "\n", { plain = true })) do
+    line = (line or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if line ~= "" then
+      title_excerpt = line:gsub("^Plan title:%s*", "")
+      if #title_excerpt > 64 then
+        title_excerpt = title_excerpt:sub(1, 61) .. "..."
+      end
+      break
+    end
+  end
+  state.plan.active_run = {
+    provider = provider,
+    intent = intent,
+    title = title_excerpt or "(plan author run)",
+    started_at = now_ts(),
+    bufnr = run_bufnr,
+    refine_id = opts.refine_id,
+    status = "drafting",
+  }
+  -- Live picker refresh: while the run is in flight, refresh the picker every
+  -- 1.5s so the elapsed-time meta updates in place. The timer is cancelled
+  -- when active_run is cleared.
+  if state.plan._tick_timer then
+    pcall(state.plan._tick_timer.stop, state.plan._tick_timer)
+    pcall(state.plan._tick_timer.close, state.plan._tick_timer)
+  end
+  local timer = (vim.uv or vim.loop).new_timer()
+  state.plan._tick_timer = timer
+  timer:start(
+    1500,
+    1500,
+    vim.schedule_wrap(function()
+      if not state.plan.active_run or state.plan.active_run.finished_at then
+        if state.plan._tick_timer == timer then
+          pcall(timer.stop, timer)
+          pcall(timer.close, timer)
+          state.plan._tick_timer = nil
+        end
+        return
+      end
+      if
+        state.panels.plan_picker
+        and state.panels.plan_picker.winid
+        and vim.api.nvim_win_is_valid(state.panels.plan_picker.winid)
+      then
+        refresh_picker()
+      end
+    end)
+  )
 
   audit.write({ event = "plan_author_start", provider = provider, intent = intent })
 
   local handle
+  -- Plan-level session continuity: when refining an existing plan, resume
+  -- the captured provider session so the architect retains its prior
+  -- investigation context. When drafting a new plan we still ask the agent
+  -- to persist the session so subsequent refinements can resume.
+  --
+  -- IMPORTANT: plan_author runs in a temp workspace (prepare_plan_workspace);
+  -- the session id Claude assigns is scoped to that cwd. plan_exec runs in
+  -- the real repo root with a different cwd, so it cannot resume a session
+  -- captured here. Author sessions therefore live in `author_provider_sessions`
+  -- (used only by future plan_author refinements). plan_exec uses the
+  -- separate `provider_sessions` table, which it owns and rotates itself.
+  local resume_session_id = nil
+  if opts.refine_id and opts.refine_id ~= "" then
+    local existing_plan = M.get(opts.refine_id)
+    if existing_plan and existing_plan.author_provider_sessions then
+      resume_session_id = existing_plan.author_provider_sessions[provider]
+    end
+  end
+  local captured_session_id = resume_session_id
+
   handle = agents.run({
     provider = provider,
     lane = "plan",
     prompt = prompt,
+    persist_session = true,
+    resume_session_id = resume_session_id,
+    on_session_id = function(id)
+      if id and id ~= "" then
+        captured_session_id = id
+      end
+    end,
     on_text = function(text)
       response[#response + 1] = text
       run_panel_append(text)
@@ -1413,37 +2667,81 @@ function M.create(opts)
         marker = marker,
       })
       run_panel_append("\n" .. string.rep("─", 78) .. "\n")
-      if result.code ~= 0 then
-        run_panel_append("[nvime] plan author failed (code " .. tostring(result.code) .. ")\n")
-        return
-      end
-      if #synced == 0 then
-        run_panel_append("[nvime] no plan files were written; the agent may have refused.\n")
-        return
-      end
+
       local plan_id = nil
-      if marker and marker.id then
-        plan_id = marker.id
+      local final_status = "ok"
+      if result.code ~= 0 then
+        final_status = "failed"
+        run_panel_append("[nvime] plan author failed (code " .. tostring(result.code) .. ")\n")
+      elseif #synced == 0 then
+        final_status = "no_output"
+        run_panel_append("[nvime] no plan files were written; the agent may have refused.\n")
       else
-        for _, rel in ipairs(synced) do
-          local id = rel:match("^%.nvime/plans/([^/]+)/plan%.json$")
-          if id then
-            plan_id = id
-            break
+        if marker and marker.id then
+          plan_id = marker.id
+        else
+          for _, rel in ipairs(synced) do
+            local id = rel:match("^%.nvime/plans/([^/]+)/plan%.json$")
+            if id then
+              plan_id = id
+              break
+            end
           end
         end
+        run_panel_append(
+          string.format("[nvime] synced %d plan file(s)%s\n", #synced, plan_id and (" · plan " .. plan_id) or "")
+        )
+        M.refresh()
+        -- Persist the captured author session under author_provider_sessions
+        -- so future refinements (which also run in the temp workspace cwd)
+        -- can resume. Do NOT write to provider_sessions — that is owned by
+        -- plan_exec and lives in a different cwd, where this id won't work.
+        if plan_id and captured_session_id then
+          local fresh = M.get(plan_id)
+          if fresh then
+            fresh.author_provider_sessions = fresh.author_provider_sessions or {}
+            fresh.author_provider_sessions[provider] = captured_session_id
+            persist_plan(fresh)
+          end
+        end
+        if plan_id and (plan_config().auto_open ~= false) then
+          vim.defer_fn(function()
+            close_run_window()
+            M.open(plan_id)
+          end, 250)
+        end
       end
-      run_panel_append(
-        string.format("[nvime] synced %d plan file(s)%s\n", #synced, plan_id and (" · plan " .. plan_id) or "")
-      )
-      M.refresh()
-      if plan_id and (plan_config().auto_open ~= false) then
-        vim.defer_fn(function()
-          close_run_window()
-          M.open(plan_id)
-        end, 250)
+
+      -- Always update active_run state with terminal status, never leak it.
+      if state.plan.active_run then
+        state.plan.active_run.finished_at = now_ts()
+        state.plan.active_run.status = final_status
+        state.plan.active_run.plan_id = plan_id
       end
-      state.plan.active_run = nil
+      -- Clear after a brief grace window so the picker can show "just finished"
+      -- if the user opens it within the next few seconds.
+      vim.defer_fn(function()
+        if state.plan.active_run and state.plan.active_run.finished_at then
+          state.plan.active_run = nil
+          if
+            state.panels.plan_picker
+            and state.panels.plan_picker.winid
+            and vim.api.nvim_win_is_valid(state.panels.plan_picker.winid)
+          then
+            refresh_picker()
+          end
+        end
+      end, 8000)
+
+      -- Refresh the picker right now if it's open so the user sees the
+      -- terminal state immediately.
+      if
+        state.panels.plan_picker
+        and state.panels.plan_picker.winid
+        and vim.api.nvim_win_is_valid(state.panels.plan_picker.winid)
+      then
+        refresh_picker()
+      end
     end,
   })
 end
@@ -1479,7 +2777,7 @@ local function picker_buffer()
   return bufnr
 end
 
-local function close_picker()
+close_picker = function()
   local panel = state.panels.plan_picker
   if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
     pcall(vim.api.nvim_win_close, panel.winid, true)
@@ -1500,6 +2798,9 @@ refresh_picker = function()
   local row_index = {}
 
   local function push(line, hl, line_data)
+    -- Same defense as render_plan_lines.push: plan.title or active_run.title
+    -- may contain embedded newlines from agent-authored JSON.
+    line = tostring(line or ""):gsub("\r", ""):gsub("\n", " ↵ ")
     lines[#lines + 1] = line
     if hl then
       marks[#marks + 1] = { row = #lines - 1, hl = hl, line = true }
@@ -1519,6 +2820,68 @@ refresh_picker = function()
   push(string.format("  %d plan(s) in %s", #plans, plans_dir()), "NvimePlanWhy")
   push("  " .. string.rep("─", 76), "NvimePlanRule")
   push("")
+
+  -- Active-run row at the very top: shows the in-flight (or just-finished)
+  -- plan author run so the user sees it in the picker without having to
+  -- remember a separate command.
+  local active = state.plan and state.plan.active_run
+  if active then
+    local elapsed = os.time() - (active.started_at or os.time())
+    local elapsed_label
+    if elapsed < 60 then
+      elapsed_label = elapsed .. "s"
+    else
+      elapsed_label = math.floor(elapsed / 60) .. "m " .. (elapsed % 60) .. "s"
+    end
+    local status_word, status_hl_active, icon
+    if active.finished_at then
+      if active.status == "ok" then
+        status_word = "drafted"
+        status_hl_active = "NvimePlanStepDone"
+        icon = ui.icon("success") ~= "" and ui.icon("success") or "v"
+      elseif active.status == "failed" then
+        status_word = "failed"
+        status_hl_active = "NvimePlanStepBlocked"
+        icon = ui.icon("error") ~= "" and ui.icon("error") or "x"
+      else
+        status_word = active.status or "finished"
+        status_hl_active = "NvimePlanWhy"
+        icon = "·"
+      end
+    else
+      status_word = "drafting"
+      status_hl_active = "NvimePlanStepProgress"
+      icon = ui.icon("active") ~= "" and ui.icon("active") or "*"
+    end
+    local title = active.title or "(plan author run)"
+    local id_label = active.plan_id and (" " .. active.plan_id .. " ") or " new "
+    local row_text = "  " .. icon .. "  " .. id_label .. "  " .. title
+    local row = push(row_text, nil, { active_run = true })
+    mark_range(row, 2, 2 + #icon, status_hl_active)
+    local idx_start = 2 + #icon + 2
+    mark_range(
+      row,
+      idx_start,
+      idx_start + #id_label,
+      status_hl_active == "NvimePlanStepProgress" and "NvimePlanStepIndex"
+        or (status_hl_active == "NvimePlanStepDone" and "NvimePlanStepIndexDone" or "NvimePlanStepIndexBlocked")
+    )
+    local title_start = idx_start + #id_label + 2
+    mark_range(row, title_start, #row_text, "NvimePlanIntent")
+
+    local provider_label = active.provider or "?"
+    local refine_suffix = active.refine_id and (" · refining " .. active.refine_id) or ""
+    local meta = string.format(
+      "        %s · %s%s · elapsed %s · <CR> to view",
+      status_word,
+      provider_label,
+      refine_suffix,
+      elapsed_label
+    )
+    push(meta, "NvimePlanMeta")
+    push("  " .. string.rep("─", 76), "NvimePlanRule")
+    push("")
+  end
 
   if #plans == 0 then
     push("    (no plans yet — press n to draft one)", "NvimePlanWhy")
@@ -1592,11 +2955,15 @@ refresh_picker = function()
   vim.b[bufnr].nvime_picker_rows = row_index
 end
 
-local function plan_id_at_cursor()
+local function picker_row_at_cursor()
   local bufnr = vim.api.nvim_get_current_buf()
   local rows = vim.b[bufnr].nvime_picker_rows or {}
   local row = vim.api.nvim_win_get_cursor(0)[1]
-  local entry = rows[row]
+  return rows[row]
+end
+
+local function plan_id_at_cursor()
+  local entry = picker_row_at_cursor()
   if entry then
     return entry.plan_id
   end
@@ -1604,19 +2971,41 @@ local function plan_id_at_cursor()
 end
 
 install_picker_keymaps = function(bufnr)
+  -- Defensive: clear any stale buffer-local maps for the keys we own. The
+  -- picker buffer is reused across opens, so a previously-deleted closure
+  -- could otherwise still be held.
+  for _, lhs in ipairs({ "<CR>", "n", "N", "R", "dd", "r", "q", "<Esc>" }) do
+    pcall(vim.keymap.del, "n", lhs, { buffer = bufnr })
+  end
   local opts = { buffer = bufnr, silent = true, nowait = true }
+
   vim.keymap.set("n", "<CR>", function()
-    local id = plan_id_at_cursor()
-    if not id then
+    local entry = picker_row_at_cursor()
+    if not entry then
       return
     end
-    close_picker()
-    M.open(id)
+    if entry.active_run then
+      -- The active-run row jumps to the run panel so the user can watch
+      -- streaming or scroll the just-finished output.
+      close_picker()
+      M.reopen_run()
+      return
+    end
+    if entry.plan_id then
+      close_picker()
+      M.open(entry.plan_id)
+    end
   end, vim.tbl_extend("force", opts, { desc = "nvime plan: open" }))
 
-  vim.keymap.set("n", "n", function()
-    M.prompt_new()
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: new" }))
+  -- Both `n` and `N` (and a friendlier `<C-n>`) start a new plan compose
+  -- session. Picker users may reach for either; netrw / other plugins'
+  -- overrides on `n` are sidestepped by also offering `N`.
+  local new_action = function()
+    M.compose({})
+  end
+  vim.keymap.set("n", "n", new_action, vim.tbl_extend("force", opts, { desc = "nvime plan: new" }))
+  vim.keymap.set("n", "N", new_action, vim.tbl_extend("force", opts, { desc = "nvime plan: new" }))
+  vim.keymap.set("n", "<C-n>", new_action, vim.tbl_extend("force", opts, { desc = "nvime plan: new" }))
 
   vim.keymap.set("n", "R", function()
     local id = plan_id_at_cursor()
@@ -1670,18 +3059,25 @@ function M.picker()
     footer = " <CR> open  n new  R refine  dd delete  r refresh  q close ",
     footer_pos = "center",
     zindex = 54,
+    focusable = true,
   }
   local existing_winid = picker_winid()
+  close_all_backdrops_except("picker")
   open_backdrop("picker")
+  local winid
   if existing_winid then
     vim.api.nvim_win_set_buf(existing_winid, bufnr)
     vim.api.nvim_win_set_config(existing_winid, config)
     configure_window(existing_winid)
+    winid = existing_winid
   else
-    local winid = vim.api.nvim_open_win(bufnr, true, config)
+    winid = vim.api.nvim_open_win(bufnr, true, config)
     configure_window(winid)
-    state.panels.plan_picker = { bufnr = bufnr, winid = winid }
   end
+  state.panels.plan_picker = { bufnr = bufnr, winid = winid }
+  -- Force focus into the picker float; nvim_open_win(enter=true) is a hint
+  -- that loses to other plugins' WinEnter shenanigans, so make it explicit.
+  pcall(vim.api.nvim_set_current_win, winid)
   install_picker_keymaps(bufnr)
   refresh_picker()
 end
@@ -1784,7 +3180,7 @@ local function compose_decorate(bufnr)
         { " cancel running  ", "NvimePlanFooter" },
         { "q", "NvimeKey" },
         { " close (draft preserved)  ", "NvimePlanFooter" },
-        { "gx", "NvimeKey" },
+        { "gC", "NvimeKey" },
         { " clear template", "NvimePlanFooter" },
       },
     },
@@ -1813,9 +3209,10 @@ local function compose_window_config(refining_id)
     border = cfg.border or "rounded",
     title = title,
     title_pos = "center",
-    footer = " <C-s> submit · <C-c> cancel · q close · gx clear template ",
+    footer = " <C-s> submit · <C-c> cancel · q close · gC clear template ",
     footer_pos = "center",
     zindex = 54,
+    focusable = true,
   }
 end
 
@@ -1823,8 +3220,8 @@ local function close_compose_window()
   local panel = state.panels.plan_compose
   if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
     pcall(vim.api.nvim_win_close, panel.winid, true)
-    panel.winid = nil
   end
+  state.panels.plan_compose = nil
   close_backdrop("compose")
 end
 
@@ -1877,7 +3274,15 @@ local function install_compose_keymaps(bufnr, refining_id)
     end
   end, vim.tbl_extend("force", opts, { desc = "nvime plan: cancel running / close compose" }))
 
-  vim.keymap.set("n", "gx", function()
+  -- Use gC (not gx — vim 0.10+ ships a global gx that calls vim.ui.open which
+  -- on some systems spawns an external terminal/browser. We unconditionally
+  -- delete any existing buffer-local gx so it falls through to the global
+  -- handler only when the user really wants to open a URL outside compose;
+  -- inside compose, gx is intentionally a no-op to avoid surprises.)
+  pcall(vim.keymap.del, "n", "gx", { buffer = bufnr })
+  vim.keymap.set("n", "gx", "<Nop>", vim.tbl_extend("force", opts, { desc = "nvime plan: gx disabled in compose" }))
+
+  vim.keymap.set("n", "gC", function()
     local choice = vim.fn.confirm("Reset compose buffer to template?", "&Reset\n&Cancel", 2)
     if choice == 1 then
       vim.bo[bufnr].modifiable = true
@@ -1894,7 +3299,7 @@ local function install_compose_keymaps(bufnr, refining_id)
         "<C-s>  submit the draft and start the plan author agent",
         "<C-c>  cancel a running agent (or close if idle)",
         "q     close the float (your draft is preserved)",
-        "gx    reset the buffer to the template",
+        "gC    reset the buffer to the template",
         "Buffer is plain markdown; sections under '# Title', '# Intent', '# Notes' are extracted.",
       }, "\n"),
       vim.log.levels.INFO
@@ -1913,7 +3318,17 @@ end
 
 function M.compose(opts)
   opts = opts or {}
+  -- Close the picker if it's open so we don't stack zindex-54 floats with
+  -- ambiguous focus order. Also closes the picker backdrop.
+  close_picker()
+
   local bufnr, fresh = compose_buffer()
+
+  -- Always force the buffer modifiable on (re)open. Reusing a hidden buffer
+  -- from a prior session can leave it stale-locked.
+  vim.bo[bufnr].modifiable = true
+  vim.bo[bufnr].readonly = false
+
   if opts.refine_id and opts.refine_id ~= "" then
     -- Pre-fill from the existing plan when refining
     local plan = M.get(opts.refine_id)
@@ -1941,25 +3356,34 @@ function M.compose(opts)
     end
   end
 
+  close_all_backdrops_except("compose")
   open_backdrop("compose")
   local existing = state.panels.plan_compose
   local config = compose_window_config(opts.refine_id)
+  local winid
   if existing and existing.winid and vim.api.nvim_win_is_valid(existing.winid) then
     vim.api.nvim_win_set_buf(existing.winid, bufnr)
     vim.api.nvim_win_set_config(existing.winid, config)
     configure_window(existing.winid)
+    winid = existing.winid
   else
-    local winid = vim.api.nvim_open_win(bufnr, true, config)
+    winid = vim.api.nvim_open_win(bufnr, true, config)
     configure_window(winid)
-    state.panels.plan_compose = { bufnr = bufnr, winid = winid, refine_id = opts.refine_id }
   end
+  state.panels.plan_compose = { bufnr = bufnr, winid = winid, refine_id = opts.refine_id }
+
+  -- Force focus into the float — `enter=true` on nvim_open_win is a hint, not
+  -- a guarantee, especially when an existing window of the same zindex is
+  -- being replaced. Without this, the user's cursor stays in netrw / the
+  -- previous buffer and they get the read-only banner from THAT buffer.
+  pcall(vim.api.nvim_set_current_win, winid)
 
   install_compose_keymaps(bufnr, opts.refine_id)
   compose_decorate(bufnr)
 
   -- Position cursor at the title field on first open
   if fresh then
-    pcall(vim.api.nvim_win_set_cursor, 0, { 3, 0 })
+    pcall(vim.api.nvim_win_set_cursor, winid, { 3, 0 })
   end
 end
 
@@ -2000,6 +3424,20 @@ function M.command(args)
     end
     return
   end
+  if sub == "close" then
+    M.close_all()
+    return
+  end
+  if sub == "focus" then
+    if not M.focus() then
+      vim.notify("nvime: no open plan UI to focus", vim.log.levels.INFO)
+    end
+    return
+  end
+  if sub == "run-log" or sub == "log" or sub == "stream" then
+    M.reopen_run()
+    return
+  end
   if sub == "open" or sub == "show" then
     if #fargs == 0 then
       vim.notify("nvime: usage `:NvimePlan open <id>`", vim.log.levels.ERROR)
@@ -2037,6 +3475,22 @@ function M.command(args)
     M.discuss(fargs[1])
     return
   end
+  if sub == "add-test" or sub == "test" then
+    if #fargs < 2 then
+      vim.notify("nvime: usage `:NvimePlan add-test <plan-id> <step-id>`", vim.log.levels.ERROR)
+      return
+    end
+    M.add_test_for_step(fargs[1], fargs[2], { provider = provider_name })
+    return
+  end
+  if sub == "reset-session" or sub == "fresh" then
+    if #fargs < 1 then
+      vim.notify("nvime: usage `:NvimePlan reset-session <plan-id> [provider]`", vim.log.levels.ERROR)
+      return
+    end
+    M.reset_session(fargs[1], fargs[2] or provider_name)
+    return
+  end
   -- Treat any unrecognized first arg as a plan id to open
   M.open(sub)
 end
@@ -2055,7 +3509,20 @@ function M._next_pending_step(plan_id)
 end
 
 function M.complete_subcommands(_, line)
-  local subs = { "new", "compose", "open", "run", "delete", "discuss", "refresh" }
+  local subs = {
+    "new",
+    "compose",
+    "open",
+    "run",
+    "delete",
+    "discuss",
+    "refresh",
+    "close",
+    "focus",
+    "run-log",
+    "add-test",
+    "reset-session",
+  }
   local out = {}
   local plans = M.plans()
   for _, sub in ipairs(subs) do
@@ -2065,6 +3532,66 @@ function M.complete_subcommands(_, line)
     out[#out + 1] = plan.id
   end
   return out
+end
+
+-- Public escape hatch: tear down every plan UI surface (floats + backdrops).
+-- Useful when a backdrop gets stuck or you want to start clean.
+function M.close_all()
+  close_all_plan_ui()
+end
+
+-- Bring focus back to whichever plan UI float is currently open. Answers the
+-- "<C-w>w doesn't reach the float" complaint when the user has navigated
+-- away with another binding. Priority: run (active streaming) > compose >
+-- picker > view. The run panel wins so the user always sees fresh agent
+-- output even if they accidentally closed the float.
+function M.focus()
+  local order = { "plan_run", "plan_compose", "plan_picker", "plan" }
+  for _, key in ipairs(order) do
+    local panel = state.panels[key]
+    if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+      pcall(vim.api.nvim_set_current_win, panel.winid)
+      return true
+    end
+  end
+  -- Special case: the run buffer may exist (with streaming output in it) but
+  -- its window was closed. Reopen the float and refocus.
+  local active = state.plan and state.plan.active_run
+  if active and active.bufnr and vim.api.nvim_buf_is_valid(active.bufnr) then
+    close_all_backdrops_except("run")
+    open_backdrop("run")
+    local winid = open_run_window(active.bufnr)
+    install_run_panel_keymaps(active.bufnr)
+    if winid then
+      pcall(vim.api.nvim_set_current_win, winid)
+    end
+    return true
+  end
+  return false
+end
+
+-- Reopen the most recent run panel (active or finished) so the user can see
+-- streaming output again after `:q`. Equivalent to focus() when there is a
+-- run-panel buffer; otherwise no-op.
+function M.reopen_run()
+  local panel = state.panels.plan_run
+  local bufnr = panel and panel.bufnr
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    local active = state.plan and state.plan.active_run
+    bufnr = active and active.bufnr
+  end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    vim.notify("nvime: no run panel to reopen", vim.log.levels.INFO)
+    return false
+  end
+  close_all_backdrops_except("run")
+  open_backdrop("run")
+  local winid = open_run_window(bufnr)
+  install_run_panel_keymaps(bufnr)
+  if winid then
+    pcall(vim.api.nvim_set_current_win, winid)
+  end
+  return true
 end
 
 function M.statusline_components()

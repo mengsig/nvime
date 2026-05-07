@@ -189,6 +189,8 @@ COMMANDS                                                        *nvime-commands*
 :NvimePlan refresh
 :NvimePlan delete <id>
 :NvimePlan discuss <id>
+:NvimePlan add-test <id> <step>
+:NvimePlan reset-session <id> [provider]
         Drive the plan author and executor lanes (see |nvime-plan|). With no
         args, opens the plan picker. `new` drafts a plan via the plan author
         agent — restricted to writing files under .nvime/plans/<id>/. `open`
@@ -377,6 +379,14 @@ Common options:
             auto_open = true,           -- open the plan view after authoring
             auto_in_progress = true,    -- mark a step in_progress on execute
             inject_context_chars = 480, -- plan-context block budget per step
+            devils_advocate = true,     -- read-only critic on every step diff
+            test_file = nil,            -- defaults to auto-detect, e.g. tests/headless_spec.lua
+            test_runner = nil,          -- defaults to auto-detect from project markers
+            session_continuity = "plan",-- "plan" (steps share session) | "none"
+          },
+          diff = {
+            max_visual_block_lines = 12,
+            devils_advocate = false,    -- enable critic for ALL edit-lane diffs (off by default)
           },
         })
 <
@@ -467,10 +477,14 @@ Plan storage:
 
 Plan view buffer mappings (nvime://plan/<id>):
     <CR>        execute the step under the cursor (opens file, fires edit lane)
+    gE          edit-then-execute: open a compose buffer with the would-be
+                intent + plan-context prefilled; tweak, then <C-s> to fire
     gx          mark the step under the cursor as done
     gp          mark the step as pending
     gB          mark the step as blocked
     gT          run the step's tests in a split terminal
+    gW          scaffold a regression test for the step (test author lane)
+    gN          reset the plan's provider session (next step starts fresh)
     ]s, [s      next/previous step
     gA          execute the next pending step
     gd          discuss/refine the step (re-enters plan author lane)
@@ -480,13 +494,64 @@ Plan view buffer mappings (nvime://plan/<id>):
     q, <Esc>    close the plan view
     ?           show keymap help
 
+Plan executor enhancements:
+    - Range anchors. Each step may carry a `range_anchor` (1-3 verbatim
+      lines from the original target). At execute-time nvime searches the
+      file for the anchor and re-anchors the line range to wherever the
+      content has drifted to. This survives the case where earlier steps
+      modify the same file and shift the line numbers of later steps.
+    - Edit-then-execute. Press gE on a step to open a compose buffer with
+      the would-be intent + plan-context prefilled. Edit freely (correct a
+      stale line range, narrow the request, add a hint), then <C-s> to
+      actually run the patch worker against your edited intent.
+    - Auto test-runner detection. The test scaffolder (gW) and the default
+      runner picked when a step has no `tests` field are auto-detected from
+      project markers: Cargo.toml → cargo test, build.zig → zig build test,
+      go.mod → go test ./..., pyproject.toml/pytest.ini → pytest -q,
+      package.json → npm test, pom.xml → mvn test, build.gradle →
+      gradle test, CMakeLists.txt → ctest, Makefile → make test, and
+      `scripts/test` always wins when present. Override via
+      plan.test_runner.
+    - Before running step.tests nvime saves the modified buffer to disk so
+      tools that read from disk (stylua --check, ./scripts/test, rg, etc.)
+      see the new content rather than the pre-patch file.
+    - When all blocks of a step's diff are resolved, nvime auto-runs
+      step.tests and offers Done / Pending / Cancel on green; on red it
+      offers Rollback / Blocked / Pending / Cancel. Rollback restores the
+      file to its pre-step content using the snapshot the diff session
+      captured.
+    - With plan.devils_advocate = true (default), every plan-step diff is
+      shadowed by a read-only critic agent that returns APPROVE / FLAG /
+      REJECT in one sentence. The verdict appears as a colored banner at
+      the top of the diff review and is advisory only — it never blocks
+      the user.
+    - Per-plan session continuity (plan.session_continuity = "plan",
+      default): all steps of a plan share a provider conversation, so
+      step 5 retains the architectural context built up by steps 1-4.
+      The session id is captured on plan_author exit, stored in
+      plan.json under provider_sessions, and rotates as the agent emits
+      new ids on resume. Press gN in the plan view (or run
+      :NvimePlan reset-session <id> [provider]) to clear the captured id
+      and force the next step to start fresh — useful when the
+      conversation has accumulated too much context or gone off-track.
+      Set plan.session_continuity = "none" to revert to fresh-each-time.
+
 Plan picker buffer mappings (nvime://plans):
-    <CR>        open the plan under the cursor
-    n           draft a new plan
-    R           refine the plan under the cursor
-    dd          delete the plan under the cursor
-    r           refresh
-    q, <Esc>    close
+    <CR>            open the plan under the cursor
+    n, N, <C-n>     draft a new plan (compose buffer)
+    R               refine the plan under the cursor
+    dd              delete the plan under the cursor
+    r               refresh
+    q, <Esc>        close
+
+Plan compose buffer mappings (nvime://plan/compose):
+    <C-s>           submit the draft and start the plan author agent
+    <C-c>           cancel a running agent (or close if idle)
+    q, <Esc>        close the float (your draft is preserved)
+    gC              reset the buffer to the template
+    ?               show keymap help
+    `gx` is intentionally a no-op inside compose so the global vim.ui.open
+    handler can never accidentally launch an external opener.
 
 The full plan author response protocol is documented in PROTOCOL.md.
 

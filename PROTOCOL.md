@@ -4,10 +4,34 @@ This file is the stable contract between nvime's edit/perf lanes and an agent
 provider. The parser lives in `lua/nvime/diff.lua`; the prompt rules live in
 `lua/nvime/edit.lua`.
 
-Agents must return exactly one machine-readable response block. Normal edit mode
-forbids analysis, caveats, summaries, or prose outside the block. Perf mode may
-put one `BENCH: orig=<t1>s cand=<t2>s speedup=<x>x n=<size>` line before the
-block and no other prose.
+Agents must return exactly one machine-readable response block. The ONLY prose
+allowed before that block is one optional sentence-shaped line:
+
+- Normal edit mode: a `RATIONALE:` line that states the agent's self-check
+  (bug → patch → why correct), surfaced verbatim to the user in the diff
+  review header.
+- Perf mode: a single `BENCH: orig=<t1>s cand=<t2>s speedup=<x>x n=<size>`
+  line.
+
+Anything beyond that single line is ignored by the parser.
+
+## RATIONALE: line
+
+A single optional line of the form
+
+```text
+RATIONALE: <bug → patch → why-correct, in one sentence>
+```
+
+placed directly before any `NVIME_DIFF` or `NVIME_REPLACEMENT` marker. The
+parser captures the text after `RATIONALE:` and surfaces it in the inline
+diff review banner so the user sees the agent's self-check before accepting.
+Multi-line continuations are tolerated only when subsequent lines start with
+≥2 leading spaces; any other line ends the rationale.
+
+A rationale is intentionally cheap insurance against speculative edits: the
+prompt instructs the agent to emit `NVIME_NO_CHANGE` if it cannot justify the
+change in one sentence.
 
 ## Response Forms
 
@@ -139,11 +163,40 @@ Steps must:
 Step `status` is one of `pending`, `in_progress`, `done`, `blocked`,
 `abandoned`.
 
+`range_anchor` is an optional field that helps nvime survive line drift
+when an earlier step modified the same file. It should be the first 1-3
+verbatim lines of the original content at the recorded range. nvime
+searches the file for this anchor at execute-time and re-anchors the line
+range to wherever the content has drifted to.
+
 The executor lane (`:NvimePlan run <id> [step]`) does not invent a new
 prompt: it opens the step's file, visual-selects the step's range, and calls
 the existing edit lane with the step's intent (prefixed with a small
 constant-size plan-context block). Diff review remains the existing inline
 flow with content-match guards.
+
+### Fields nvime maintains on plan.json
+
+nvime writes a few additional fields back to `plan.json` over time. The
+agent does not need to author these — they are runtime state.
+
+- `provider_sessions` — `{ "<provider>": "<session-id>" }`. The provider
+  session id captured during plan_exec, rotated on every step. Lets all
+  steps of one plan share a provider conversation. Press `gN` in the plan
+  view (or `:NvimePlan reset-session <id> [provider]`) to clear it. nvime
+  also auto-clears it if the provider rejects the resume.
+- `author_provider_sessions` — `{ "<provider>": "<session-id>" }`. Same
+  shape, but for plan_author refinements (which run in a separate temp
+  workspace cwd). Kept distinct from `provider_sessions` because session
+  ids are not portable across cwds.
+
+Step-level fields nvime updates as the user works the plan:
+
+- `step.status` — flipped by keymaps in the plan view (`gx` done,
+  `gp` pending, `gB` blocked) and by the auto-test prompt after the diff
+  review.
+- `step.tests` — the test scaffolder (`gW`) appends the auto-detected
+  project test runner to this list when a regression test is added.
 
 ## Top-Level Prompt Rules
 
@@ -164,6 +217,14 @@ Perf edit mode says:
 - "NEVER write inside the user's repository."
 - "Only if candidate is correct AND faster ... produce NVIME_DIFF."
 - "You MAY emit one short BENCH line before the NVIME_* marker."
+
+Critic mode (devil's advocate) says:
+
+- "You are a critical reviewer of a proposed patch."
+- "You are read-only: Read/Grep/Glob/LS only — no Edit/Write/Bash/Web."
+- "Apply this critical lens, in order: does the patch solve the stated problem; does it introduce a new bug; is there a simpler change; did the worker overreach?"
+- "Output exactly ONE line: APPROVE: / FLAG: / REJECT: with one-sentence justification. No other prose."
+- "Bias: prefer FLAG over REJECT unless the patch is unambiguously wrong. The user makes the final call; your verdict is advisory."
 
 Plan author mode says:
 

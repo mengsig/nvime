@@ -48,7 +48,6 @@ end
 
 local function basename(value)
   value = tostring(value or "")
-  value = value:gsub("^env$", "")
   return vim.fn.fnamemodify(value, ":t")
 end
 

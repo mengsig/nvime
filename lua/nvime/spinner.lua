@@ -61,7 +61,13 @@ local function ensure_float(width, height)
   ui.ensure_highlights()
   local panel = state.panels[PANEL_KEY]
   local row, col = position(width, height)
-  if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) and panel.bufnr and vim.api.nvim_buf_is_valid(panel.bufnr) then
+  if
+    panel
+    and panel.winid
+    and vim.api.nvim_win_is_valid(panel.winid)
+    and panel.bufnr
+    and vim.api.nvim_buf_is_valid(panel.bufnr)
+  then
     pcall(vim.api.nvim_win_set_config, panel.winid, {
       relative = "editor",
       width = width,

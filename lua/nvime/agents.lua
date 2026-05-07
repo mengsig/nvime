@@ -172,6 +172,21 @@ local function claude_args(cfg, lane, prompt, run_opts)
       "--disallowedTools",
       claude_plan_disallowed(),
     })
+  elseif lane == "critic" then
+    -- The critic is read-only by design: it reviews a proposed patch and
+    -- returns APPROVE/FLAG/REJECT. No edits, no Bash, no web — strictly
+    -- inspect what's in the repo + reason about the diff in front of it.
+    local tools = "Read,Glob,Grep,LS"
+    vim.list_extend(args, {
+      "--permission-mode",
+      "dontAsk",
+      "--tools",
+      tools,
+      "--allowedTools",
+      tools,
+      "--disallowedTools",
+      "Edit,Write,MultiEdit,NotebookEdit,Bash,WebFetch,WebSearch",
+    })
   else
     local tools = claude_selection_tools()
     vim.list_extend(args, {

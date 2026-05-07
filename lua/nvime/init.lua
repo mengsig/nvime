@@ -161,8 +161,15 @@ local function install_keymaps()
   set_keymap("n", prefix .. (normal.last or "n"), M.open_last, "nvime reopen last conversation")
   set_keymap("n", prefix .. (normal.provider or "p"), provider.choose, "nvime choose provider")
   set_keymap("n", prefix .. (normal.plan or "P"), function()
-    require("nvime.plan").picker()
-  end, "nvime plans")
+    local plan = require("nvime.plan")
+    -- If a plan UI float is already open but unfocused, refocus it instead of
+    -- spawning a new picker on top. This is the answer to <C-w>w not reaching
+    -- the float — `<leader>nP` always brings you back to the active surface.
+    if plan.focus() then
+      return
+    end
+    plan.picker()
+  end, "nvime plans (or refocus)")
 
   set_keymap("x", prefix .. (visual.edit or "e"), visual_edit, "nvime edit visual selection")
   set_keymap("x", prefix .. (visual.ask or "q"), visual_ask, "nvime ask about visual selection")
@@ -387,6 +394,20 @@ function M.setup(opts)
       return out
     end,
     desc = "Open the nvime plan picker, draft a plan, or run a step",
+  })
+
+  vim.api.nvim_create_user_command("NvimePlanClose", function()
+    require("nvime.plan").close_all()
+  end, {
+    desc = "Tear down every nvime plan UI float and backdrop (escape hatch)",
+  })
+
+  vim.api.nvim_create_user_command("NvimePlanFocus", function()
+    if not require("nvime.plan").focus() then
+      vim.notify("nvime: no open plan UI to focus", vim.log.levels.INFO)
+    end
+  end, {
+    desc = "Refocus the active nvime plan UI float",
   })
 
   install_keymaps()

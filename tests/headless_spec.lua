@@ -1632,8 +1632,12 @@ assert(
   "edit prompt uses a strict machine-readable patch contract"
 )
 assert(
-  require("nvime.state").selection.last_edit_prompt:find("Do not write analysis", 1, true),
-  "edit prompt forbids prose outside the patch block"
+  require("nvime.state").selection.last_edit_prompt:find("ONLY prose allowed before the block is a single `RATIONALE:`", 1, true),
+  "edit prompt allows exactly one RATIONALE line and forbids any other prose"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("RATIONALIZATION", 1, true),
+  "edit prompt walks the agent through the bug → patch → why self-check"
 )
 local closed_selection_panel = require("nvime.state").panels.selection
 assert(
@@ -2387,6 +2391,54 @@ do
 end
 
 do
+  -- Rationale capture: the diff parser strips a leading RATIONALE: line and
+  -- stores the text on the session for review-time display.
+  vim.cmd.edit(tmp .. "/rationale.lua")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+    "local function add(a, b)",
+    "  return a + b",
+    "end",
+  })
+  local target = vim.api.nvim_get_current_buf()
+  local response = table.concat({
+    "RATIONALE: bug: nothing wrong; patch: rename param; why correct: pure rename, semantics unchanged.",
+    "NVIME_REPLACEMENT",
+    "```lua",
+    "local function add(left, right)",
+    "  return left + right",
+    "end",
+    "```",
+  }, "\n")
+  local result = require("nvime.diff").start_session({
+    bufnr = target,
+    line1 = 1,
+    line2 = 3,
+    path = "rationale.lua",
+    source = "test",
+  }, response, "claude", "")
+  assert_eq(result.status, "diff", "rationale-prefixed response opens cleanly")
+  assert(
+    result.session.rationale and result.session.rationale:find("rename param", 1, true),
+    "rationale captured on the session for the review banner"
+  )
+  require("nvime.diff").reject_all()
+
+  -- NVIME_NO_CHANGE response also carries a rationale field
+  local no_change_result = require("nvime.diff").start_session({
+    bufnr = target,
+    line1 = 1,
+    line2 = 3,
+    path = "rationale.lua",
+    source = "test",
+  }, "RATIONALE: bug: none; patch: none; why: code already correct.\nNVIME_NO_CHANGE\nalready handles this", "claude", "")
+  assert_eq(no_change_result.status, "no_change", "no_change still recognized after rationale")
+  assert(
+    no_change_result.rationale and no_change_result.rationale:find("already correct", 1, true),
+    "rationale exposed on no_change result"
+  )
+end
+
+do
   vim.cmd.edit(tmp .. "/balanced.lua")
   vim.api.nvim_buf_set_lines(0, 0, -1, false, {
     "local function add(a, b)",
@@ -2510,6 +2562,264 @@ end
     end
   end
   assert(saw_steps_header, "plan: view renders STEPS header")
+
+  -- Critic verdict parsing — robust against markdown emphasis, list
+  -- markers, headers, em/en dashes, mixed case, bare verbs.
+  local critic = require("nvime.critic")
+  local lenient_cases = {
+    { "APPROVE: minimal rename, semantics unchanged.", "APPROVE" },
+    { "**APPROVE**: minimal rename.", "APPROVE" },
+    { "**APPROVE** — minimal rename.", "APPROVE" },
+    { "approve: rename ok", "APPROVE" },
+    { "Approve - rename ok", "APPROVE" },
+    { "## APPROVE: looks fine", "APPROVE" },
+    { "- REJECT: bad approach", "REJECT" },
+    { "1. REJECT: bad approach", "REJECT" },
+    { "`APPROVE`: minimal", "APPROVE" },
+    { "REJECT", "REJECT" },
+    { "FLAG", "FLAG" },
+    { "> APPROVE: looks fine", "APPROVE" },
+    { "Looking at this...\n\nAPPROVE: it's correct.", "APPROVE" },
+    { "*APPROVE*: rename only", "APPROVE" },
+    { "APPROVE :: minimal change", "APPROVE" },
+  }
+  for _, c in ipairs(lenient_cases) do
+    local v = critic._parse_verdict(c[1])
+    assert(
+      v and v.decision == c[2],
+      "critic parser fails on: " .. vim.inspect(c[1]) .. " → got " .. vim.inspect(v)
+    )
+  end
+  assert(critic._parse_verdict("not a verdict") == nil, "critic: garbage returns nil")
+  assert(critic._parse_verdict("APPROVED for landing") == nil, "critic: word boundary stops APPROVED")
+  assert(critic._parse_verdict("REJECTION is harsh") == nil, "critic: word boundary stops REJECTION")
+
+  -- on_resolved exposes the pre-step snapshot for rollback
+  vim.cmd.edit(tmp .. "/rollback_target.lua")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "local x = 1", "local y = 2" })
+  local rollback_target = vim.api.nvim_get_current_buf()
+  local rollback_result = require("nvime.diff").start_session({
+    bufnr = rollback_target, line1 = 1, line2 = 2, path = "rollback_target.lua", source = "test",
+  }, "NVIME_REPLACEMENT\n```lua\nlocal a = 1\nlocal b = 2\n```", "claude", "")
+  assert(rollback_result.session, "rollback test: session opened")
+  local captured = nil
+  rollback_result.session.on_resolved = function(s) captured = s end
+  require("nvime.diff").accept_all()
+  assert(captured and captured.original_lines, "rollback test: original_lines exposed in summary")
+  assert(captured.original_lines[1] == "local x = 1", "rollback test: snapshot preserved")
+  assert(captured.target_bufnr == rollback_target, "rollback test: target_bufnr exposed")
+  -- Rollback by restoring (mirrors plan.rollback_step)
+  vim.api.nvim_buf_set_lines(rollback_target, 0, -1, false, captured.original_lines)
+  local rolled_back = vim.api.nvim_buf_get_lines(rollback_target, 0, -1, false)
+  assert(rolled_back[1] == "local x = 1", "rollback test: restored to pre-step")
+
+  -- add-test scaffolder is exposed
+  assert(type(plan.add_test_for_step) == "function", "plan: add_test_for_step is exported")
+  assert(vim.fn.exists(":NvimePlan") == 2, "NvimePlan command supports add-test sub-command")
+
+  -- compose_step exists and prefills the buffer with intent + plan-context
+  assert(type(plan.compose_step) == "function", "plan: compose_step is exported")
+
+  -- Render must survive multi-line fields in plan.json (intent/notes/why/
+  -- acceptance/title may all contain embedded newlines from JSON-encoded
+  -- agent output; nvim_buf_set_lines rejects items with embedded \n).
+  do
+    local nl_dir = tmp .. "/nl-plans"
+    vim.fn.mkdir(nl_dir .. "/0099-nl/", "p")
+    local nl_data = {
+      version = 1, id = "0099-nl",
+      title = "Title\nwith newline",
+      why = "Multi-line\nwhy",
+      created_at = os.time(), updated_at = os.time(),
+      files_estimated = {},
+      acceptance = { { id = 1, text = "Multi-line\nacceptance", status = "pending" } },
+      steps = {
+        {
+          id = 1,
+          intent = "Step intent\nwith newlines",
+          file = "foo.lua",
+          range = { line1 = 1, line2 = 3 },
+          notes = "Step notes\nalso multi-line",
+          depends_on = {},
+          tests = {},
+          status = "pending",
+        },
+      },
+    }
+    local nl_fd = io.open(nl_dir .. "/0099-nl/plan.json", "w")
+    nl_fd:write(vim.json.encode(nl_data))
+    nl_fd:close()
+    state.config.plan.dir = nl_dir
+    state.plan.loaded = false
+    state.plan.plans = nil
+    local ok_view = pcall(plan.open, "0099-nl")
+    assert(ok_view, "plan.open survives multi-line fields")
+    local ok_picker = pcall(plan.picker)
+    assert(ok_picker, "plan.picker survives multi-line plan.title")
+    -- Restore previous dir for downstream tests
+    state.config.plan.dir = plans_dir
+    state.plan.loaded = false
+    state.plan.plans = nil
+  end
+
+  -- range anchor: drift correction works
+  assert(type(plan._reanchor_range) == "function", "plan: _reanchor_range is exposed for tests")
+  do
+    local lines = { "alpha", "beta", "moved target", "delta", "epsilon", "zeta" }
+    local l1, l2, notice = plan._reanchor_range(lines, 5, 6, "moved target")
+    assert(l1 == 3, "anchor re-found at line 3 (was recorded at 5)")
+    assert(l2 == 4, "span preserved when anchor drifts")
+    assert(notice and notice:find("drifted", 1, true), "notice describes drift")
+
+    l1, l2, notice = plan._reanchor_range(lines, 3, 4, "moved target")
+    assert(l1 == 3 and l2 == 4 and notice == nil, "no-drift returns no notice")
+
+    -- anchor missing AND a useful symbol in the intent: symbol fallback wins
+    local big = {}
+    for i = 1, 100 do big[i] = "filler line " .. i end
+    big[80] = "  local function mark_conflict(session, block)"
+    local sl1, sl2, sn = plan._reanchor_range(big, 30, 40, nil, "Make `mark_conflict`'s audit field consistent.")
+    assert(sl1 == 80, "symbol fallback found mark_conflict at line 80")
+    assert(sn and sn:find("symbols matched", 1, true), "symbol fallback emits a notice")
+
+    -- anchor missing AND no helpful symbols → clamp recorded
+    local cl1, cl2, cn = plan._reanchor_range(big, 30, 40, nil, "do something somewhere")
+    assert(cl1 == 30 and cl2 == 40 and cn == nil, "no anchor + no symbols clamps recorded")
+  end
+
+  -- intent symbol extraction picks up backtick-quoted ids
+  assert(type(plan._extract_intent_symbols) == "function", "plan: _extract_intent_symbols exported")
+  do
+    local syms =
+      plan._extract_intent_symbols("Fix `mark_conflict` and `block_force_applied`. Tweak `start_line`/`end_line`.")
+    local seen = {}
+    for _, s in ipairs(syms) do
+      seen[s] = true
+    end
+    assert(seen.mark_conflict and seen.block_force_applied, "extracted backtick refs")
+    assert(seen.start_line and seen.end_line, "extracted multi-word backtick refs")
+  end
+
+  -- test runner auto-detection (cargo / zig / go / py / npm / etc.)
+  assert(type(plan.detect_test_runner) == "function", "plan: detect_test_runner is exported")
+  -- Without project markers and with the default scripts/test in this repo,
+  -- the runner falls back to ./scripts/test:
+  do
+    local runner = plan.detect_test_runner()
+    assert(runner == "./scripts/test", "in this repo, runner detects ./scripts/test, got: " .. tostring(runner))
+  end
+
+  -- Stale-resume self-recovery: when the agent rejects a stored session id
+  -- with "No conversation found", plan_exec auto-clears the bad id so the
+  -- next attempt starts fresh. Without this, the failed-resume response
+  -- rotates a new bad id we'd persist, looping forever.
+  do
+    local stale_dir = tmp .. "/stale-resume-plans"
+    vim.fn.mkdir(stale_dir .. "/0001-stale/", "p")
+    local stale_data = {
+      version = 1, id = "0001-stale", title = "Stale", why = "test",
+      created_at = os.time(), updated_at = os.time(),
+      files_estimated = {}, acceptance = {},
+      provider_sessions = { claude = "stale-session-id" },
+      steps = {
+        { id = 1, intent = "Do something", file = "stale_target.lua",
+          range = { line1 = 1, line2 = 3 },
+          depends_on = {}, tests = {}, status = "pending" },
+      },
+    }
+    local sd = io.open(stale_dir .. "/0001-stale/plan.json", "w")
+    sd:write(vim.json.encode(stale_data))
+    sd:close()
+    vim.fn.writefile({ "a", "b", "c" }, tmp .. "/stale_target.lua")
+    state.config.plan.dir = stale_dir
+    state.plan.loaded = false
+    state.plan.plans = nil
+
+    -- Stub agents.run to simulate "No conversation found"
+    local agents_mod = require("nvime.agents")
+    local original_agents_run = agents_mod.run
+    agents_mod.run = function(opts)
+      if opts.on_handle then
+        opts.on_handle({ kill = function() end })
+      end
+      vim.schedule(function()
+        if opts.on_text then
+          opts.on_text("No conversation found with session ID: stale-session-id\n")
+        end
+        if opts.on_exit then
+          opts.on_exit({ code = 1, signal = 0 })
+        end
+      end)
+      return { kill = function() end }
+    end
+
+    package.loaded["nvime.git"].root = function() return tmp end
+
+    vim.cmd("edit " .. tmp .. "/stale_target.lua")
+    plan.execute_step("0001-stale", 1)
+
+    vim.wait(500, function()
+      state.plan.loaded = false
+      state.plan.plans = nil
+      local p = plan.get("0001-stale")
+      return p
+        and p.provider_sessions
+        and not p.provider_sessions.claude
+    end)
+
+    state.plan.loaded = false
+    state.plan.plans = nil
+    local refreshed = plan.get("0001-stale")
+    assert(
+      not (refreshed.provider_sessions and refreshed.provider_sessions.claude),
+      "stale-session id auto-cleared after resume failure"
+    )
+
+    agents_mod.run = original_agents_run
+    state.config.plan.dir = plans_dir
+    state.plan.loaded = false
+    state.plan.plans = nil
+  end
+
+  -- Per-plan session continuity helpers exist and persist correctly
+  assert(type(plan.reset_session) == "function", "plan: reset_session is exported")
+  vim.fn.mkdir(plans_dir .. "/0002-continuity", "p")
+  local cont_path = plans_dir .. "/0002-continuity/plan.json"
+  local cont_fd = io.open(cont_path, "w")
+  cont_fd:write(vim.json.encode({
+    version = 1, id = "0002-continuity", title = "Continuity", why = "test",
+    created_at = os.time(), updated_at = os.time(),
+    files_estimated = {}, acceptance = {},
+    provider_sessions = { claude = "session-from-disk" },
+    steps = {},
+  }))
+  cont_fd:close()
+  state.plan.loaded = false
+  state.plan.plans = nil
+  local cont_plan = plan.get("0002-continuity")
+  assert(
+    cont_plan.provider_sessions and cont_plan.provider_sessions.claude == "session-from-disk",
+    "plan loads provider_sessions from disk"
+  )
+  assert(plan.reset_session("0002-continuity", "claude"), "reset_session ok")
+  state.plan.loaded = false
+  state.plan.plans = nil
+  cont_plan = plan.get("0002-continuity")
+  assert(
+    not (cont_plan.provider_sessions and cont_plan.provider_sessions.claude),
+    "reset_session cleared the captured id"
+  )
+  plan.delete("0002-continuity")
+
+  -- Public escape hatches exist for the user when a backdrop sticks.
+  assert(type(plan.close_all) == "function", "plan: close_all is exported")
+  assert(type(plan.focus) == "function", "plan: focus is exported")
+  assert(vim.fn.exists(":NvimePlanClose") == 2, "NvimePlanClose command exists")
+  assert(vim.fn.exists(":NvimePlanFocus") == 2, "NvimePlanFocus command exists")
+  -- close_all is safe to call when nothing is open.
+  plan.close_all()
+  -- focus() returns false when there's no float to focus on.
+  assert(plan.focus() == false, "plan.focus returns false when nothing is open")
 
   -- Compose buffer is persistent: open, edit, close, reopen, draft survives.
   plan.compose({})

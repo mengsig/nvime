@@ -20,7 +20,7 @@ local function audit_dir()
 end
 
 local function check_writable_dir(path)
-  vim.fn.mkdir(path, "p")
+  pcall(vim.fn.mkdir, path, "p")
   return vim.fn.isdirectory(path) == 1 and vim.fn.filewritable(path) == 2
 end
 

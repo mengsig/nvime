@@ -6,8 +6,9 @@ local M = {}
 
 local function git_diff(args)
   local cwd = (vim.uv or vim.loop).cwd()
+  local root = git.root(cwd) or cwd
   local cmd =
-    { "git", "-C", cwd, "diff", "--no-ext-diff", "--no-color", "--find-renames", "--find-copies", "--unified=80" }
+    { "git", "-C", root, "diff", "--no-ext-diff", "--no-color", "--find-renames", "--find-copies", "--unified=80" }
   vim.list_extend(cmd, args or {})
   return table.concat(git.systemlist(cmd), "\n")
 end

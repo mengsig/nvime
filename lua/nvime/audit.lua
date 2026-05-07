@@ -84,7 +84,7 @@ local function redact(event)
     local tool = tostring(copy.tool or ""):match("%S+") or ""
     local tool_name = vim.fn.fnamemodify(tool, ":t")
     local argv = tostring(copy.argv)
-    if tool_name == "claude" or tool_name == "codex" or argv:find("claude", 1, true) or argv:find("codex", 1, true) then
+    if tool_name == "claude" or tool_name == "codex" then
       copy.argv = (tool ~= "" and tool or (argv:match("^%S+") or "agent")) .. " [redacted]"
     end
   end

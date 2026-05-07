@@ -801,9 +801,6 @@ local function install_buffer_maps(session)
   vim.keymap.set("n", "gB", function()
     require("nvime.diff").reject_all()
   end, opts)
-  vim.keymap.set("n", "gu", function()
-    require("nvime.diff").undo_last_accept()
-  end, opts)
   vim.keymap.set("n", "gR", function()
     require("nvime.diff").reject_all()
   end, opts)
@@ -1177,6 +1174,27 @@ local function render_visual_group(session, group)
   local has_old_lines = false
 
   local virt_lines = {}
+  if (group.index or 1) == 1 and session.rationale and session.rationale ~= "" then
+    -- Show the agent's self-rationalization once per session, on the first
+    -- visual group, so the user has the "why" before they hit ga.
+    local rationale_text = "  " .. ui.icon("review") .. " rationale: " .. session.rationale
+    virt_lines[#virt_lines + 1] = {
+      { clip_review_text(session, rationale_text), "NvimeQuote" },
+    }
+  end
+  if (group.index or 1) == 1 and session.verdict_pending then
+    virt_lines[#virt_lines + 1] = {
+      { clip_review_text(session, "  " .. ui.icon("pending") .. " critic reviewing patch…"), "NvimeMuted" },
+    }
+  end
+  if (group.index or 1) == 1 and session.verdict then
+    local d = session.verdict.decision or "FLAG"
+    local hl = (d == "APPROVE" and "NvimeStatusSuccess") or (d == "REJECT" and "NvimeStatusError") or "NvimeStatusWarn"
+    local text = string.format("  critic %s: %s", d, session.verdict.justification or "")
+    virt_lines[#virt_lines + 1] = {
+      { clip_review_text(session, text), hl },
+    }
+  end
   if session.warnings and #session.warnings > 0 and (group.index or 1) == 1 then
     for _, msg in ipairs(session.warnings) do
       virt_lines[#virt_lines + 1] = {
@@ -1278,9 +1296,28 @@ local function render_session(session, opts)
   end
 
   local pending = 0
+  local accepted = 0
   for _, block in ipairs(session.blocks) do
     if is_unresolved(block) then
       pending = pending + 1
+    elseif block.status == "accepted" then
+      accepted = accepted + 1
+    end
+  end
+  -- Fire on_resolved exactly once when all blocks have been decided. This is
+  -- the hook the plan executor uses to auto-run the step's tests and offer
+  -- to mark it done. Pass the pre-patch snapshot so the caller can offer a
+  -- rollback if the post-acceptance tests fail.
+  if pending == 0 and not session.on_resolved_fired then
+    session.on_resolved_fired = true
+    if type(session.on_resolved) == "function" then
+      pcall(session.on_resolved, {
+        accepted = accepted,
+        total = #session.blocks,
+        original_lines = session.original_lines,
+        target_bufnr = session.target_bufnr,
+        path = session.file,
+      })
     end
   end
   if not opts.silent then
@@ -1298,6 +1335,10 @@ local function render_session(session, opts)
           .. ". Review carefully before accepting.",
         vim.log.levels.ERROR
       )
+    end
+    if session.rationale and session.rationale ~= "" and not session.rationale_announced then
+      session.rationale_announced = true
+      vim.notify("nvime rationale — " .. session.rationale, vim.log.levels.INFO)
     end
   end
   refresh_review_view(session)
@@ -1345,7 +1386,52 @@ local function build_single_hunk(selection, replacement_text)
   return lines
 end
 
+-- Capture an optional `RATIONALE:` block emitted before the first NVIME_*
+-- marker. The protocol allows a single rationale paragraph (one line, or
+-- multi-line continuation lines indented by ≥2 spaces) so the patch worker
+-- has to justify its change before the diff is shown to the user. We stop
+-- collecting at the first NVIME_* marker or at any new top-level "tag" line
+-- so a stray BENCH:/etc line in perf mode doesn't get absorbed.
+local function extract_rationale(response)
+  if type(response) ~= "string" or response == "" then
+    return nil
+  end
+  local lines = split_lines(response)
+  local out = {}
+  local started = false
+  for _, line in ipairs(lines) do
+    if line:match("^%s*NVIME_[A-Z_]+%s*$") or line:match("^%s*```") then
+      break
+    end
+    local rationale_start = line:match("^%s*RATIONALE:%s*(.*)$")
+    if rationale_start then
+      started = true
+      if rationale_start ~= "" then
+        out[#out + 1] = rationale_start
+      end
+    elseif started then
+      if line:match("^%s*$") then
+        -- Blank line ends the rationale paragraph.
+        if #out > 0 then
+          break
+        end
+      elseif line:match("^%s%s") then
+        out[#out + 1] = vim.trim(line)
+      else
+        -- A non-indented, non-blank line after rationale starts is treated
+        -- as the boundary; further lines aren't part of the rationale.
+        break
+      end
+    end
+  end
+  if #out == 0 then
+    return nil
+  end
+  return table.concat(out, " ")
+end
+
 function M.start_session(selection, response, provider, prompt)
+  local rationale = extract_rationale(response)
   local mode, body = response_mode(response)
   body = body or response
 
@@ -1353,6 +1439,7 @@ function M.start_session(selection, response, provider, prompt)
     return {
       status = "no_change",
       message = trim(body) ~= "" and trim(body) or "agent reported no change needed",
+      rationale = rationale,
     }
   end
 
@@ -1430,6 +1517,7 @@ function M.start_session(selection, response, provider, prompt)
     hunks = hunks,
     provider = provider,
     prompt = prompt,
+    rationale = rationale,
     applied = {},
     applied_history = {},
   }
@@ -2140,6 +2228,14 @@ function M.remaining_text()
   lines[#lines + 1] = ""
   vim.list_extend(lines, block_state_lines("Unresolved lines:", pending))
   return table.concat(lines, "\n")
+end
+
+-- Re-render an arbitrary session (used by the critic lane after its async
+-- verdict lands so the diff banner gains a verdict badge).
+function M.refresh_session(session)
+  if session and session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
+    render_session(session, { silent = true })
+  end
 end
 
 return M

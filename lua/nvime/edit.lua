@@ -116,7 +116,7 @@ local function build_prompt(selection, intent)
   return table.concat({
     "NVIME EDIT MODE.",
     "You are a constrained patch worker, not a reviewer.",
-    "Return exactly one machine-readable response block. Do not write analysis, caveats, summaries, or prose outside the block.",
+    "Return exactly one machine-readable response block. The ONLY prose allowed before the block is a single `RATIONALE:` line (described below) — no analysis, caveats, or summaries beyond that.",
     "You may only propose changes for the selected range in the current file.",
     "You may use read/search, web fetch/search, and shell commands such as curl for inspection, external docs, or tests when available.",
     "Do not edit files directly. Do not mention patches for other files or ranges.",
@@ -132,16 +132,28 @@ local function build_prompt(selection, intent)
       .. ", +++ b/"
       .. selection.path
       .. ", and ranged @@ -line,count +line,count @@ headers.",
+    "",
+    "RATIONALIZATION (mandatory before NVIME_DIFF or NVIME_REPLACEMENT):",
+    "Before emitting a patch you must convince yourself the change is correct. Walk through it as a self-check:",
+    "  1. What is the bug, missing feature, or literal request? State it in one clause.",
+    "  2. What does the patch do? State it in one clause.",
+    "  3. Does the patch actually fix step 1 — and only that — without breaking other behavior visible from the selected range?",
+    "If you cannot answer all three to your own satisfaction, emit NVIME_NO_CHANGE instead. If you CAN, emit ONE rationale line of the form:",
+    "  RATIONALE: <one sentence: bug → patch → why it's correct>",
+    "directly above the NVIME_* marker. The user sees this verbatim in the diff review header before they accept any block, so be honest. No multi-line essays; one line. nvime drops the rationale if you over-explain.",
+    "",
     "Use one response form:",
     "",
     "NVIME_NO_CHANGE",
     "<brief explanation>",
     "",
+    "RATIONALE: <one-line self-check>",
     "NVIME_REPLACEMENT",
     "```",
     "<full replacement for the selected range only>",
     "```",
     "",
+    "RATIONALE: <one-line self-check>",
     "NVIME_DIFF",
     "```diff",
     "--- a/" .. selection.path,
@@ -237,6 +249,34 @@ run_edit = function(selection, intent, provider, session_opts)
   local lane = (session_opts.lane == "perf") and "perf" or "edit"
   local prompt = (lane == "perf") and build_perf_prompt(selection, intent) or build_prompt(selection, intent)
   local agent_session = selection_state.agent_run_opts(session_id, provider)
+  -- Plan-level continuity override: when the caller passes a plan_continuity
+  -- table, its resume_session_id wins over the selection-session one (so all
+  -- steps of one plan share a provider conversation), and its on_session_id
+  -- callback is layered on top so the plan's stored session id rotates
+  -- naturally as the agent emits new ids.
+  local plan_continuity = session_opts.plan_continuity
+  local effective_resume = agent_session.resume_session_id
+  local effective_on_session_id = agent_session.on_session_id
+  if plan_continuity then
+    -- Plan continuity is AUTHORITATIVE for plan-driven runs. A nil
+    -- resume_session_id here means "the user explicitly reset; start
+    -- fresh", not "fall back to selection state". Otherwise gN wouldn't
+    -- actually clear the conversation.
+    if plan_continuity.resume_session_id and plan_continuity.resume_session_id ~= "" then
+      effective_resume = plan_continuity.resume_session_id
+    else
+      effective_resume = nil
+    end
+    if type(plan_continuity.on_session_id) == "function" then
+      local selection_cb = agent_session.on_session_id
+      effective_on_session_id = function(id)
+        if selection_cb then
+          selection_cb(id)
+        end
+        plan_continuity.on_session_id(id)
+      end
+    end
+  end
   state.selection.last_edit_prompt = prompt
   selection_state.set_busy(true, session_id)
   local handle
@@ -245,8 +285,8 @@ run_edit = function(selection, intent, provider, session_opts)
     lane = lane,
     prompt = prompt,
     persist_session = agent_session.persist_session,
-    resume_session_id = agent_session.resume_session_id,
-    on_session_id = agent_session.on_session_id,
+    resume_session_id = effective_resume,
+    on_session_id = effective_on_session_id,
     on_text = function(text)
       response[#response + 1] = text
       selection_state.append(text, session_id)
@@ -283,6 +323,23 @@ run_edit = function(selection, intent, provider, session_opts)
       local opened_diff = false
       if result.code ~= 0 then
         selection_state.append("\n[nvime] edit failed with code " .. tostring(result.code) .. "\n", session_id)
+        -- Detect the "stale resume id" failure mode (claude/codex reject a
+        -- session id we tried to --resume) and notify the caller via
+        -- session_opts.on_run_failed so it can clear the bad id. This
+        -- prevents the infinite-retry loop where each failed resume
+        -- rotates a new bad id that we then resume against.
+        local response_text = table.concat(response or {})
+        local stale_resume = response_text:find("No conversation found", 1, true) ~= nil
+          or response_text:find("session not found", 1, true) ~= nil
+          or response_text:find("session_id", 1, true) ~= nil
+            and response_text:lower():find("not found", 1, true) ~= nil
+        if type(session_opts.on_run_failed) == "function" then
+          pcall(session_opts.on_run_failed, {
+            code = result.code,
+            stale_resume = stale_resume,
+            response_excerpt = response_text:sub(1, 500),
+          })
+        end
       else
         local ok, diff_result = pcall(diff.start_session, selection, table.concat(response), provider, prompt)
         if not ok then
@@ -291,6 +348,29 @@ run_edit = function(selection, intent, provider, session_opts)
           selection_state.append("\n[nvime] no patch opened.\n", session_id)
         elseif diff_result and diff_result.session then
           diff_result.session.selection_session_id = session_id
+          -- Plumb the caller's on_resolved hook onto the new diff session.
+          -- Used by plan.execute_step to auto-run step.tests when the user
+          -- accepts/rejects every block.
+          if type(session_opts.on_resolved) == "function" then
+            diff_result.session.on_resolved = session_opts.on_resolved
+          end
+          -- Devil's-advocate critic: opt-in. Fire async; the verdict banner
+          -- appears in the diff review when it lands. Never blocks the user.
+          local cfg_diff = (state.config or {}).diff or {}
+          local enable_critic = session_opts.devils_advocate
+          if enable_critic == nil then
+            enable_critic = cfg_diff.devils_advocate == true
+          end
+          if enable_critic then
+            local ok_critic, critic = pcall(require, "nvime.critic")
+            if ok_critic and critic and type(critic.review) == "function" then
+              critic.review(diff_result.session, {
+                provider = provider,
+                intent = intent,
+                rationale = diff_result.session.rationale,
+              })
+            end
+          end
           opened_diff = true
         end
       end
@@ -334,6 +414,11 @@ function M.start(opts)
 
   local provider = opts.provider or require("nvime.state").config.provider
   local intent = opts.intent
+  -- `force_edit = true` skips the question-shaped reroute. Used by the plan
+  -- executor where the agent ALWAYS needs to be the patch worker, regardless
+  -- of words like "review" / "verify" / "?" appearing in the plan-context
+  -- header that we prepend to the intent.
+  local force_edit = opts.force_edit == true
   local function proceed(session_opts)
     session_opts = session_opts or {}
     local proceed_provider = session_opts.provider or provider
@@ -351,7 +436,7 @@ function M.start(opts)
       return
     end
 
-    if looks_like_question(intent) then
+    if not force_edit and looks_like_question(intent) then
       require("nvime.ask").start({
         selection = selection,
         provider = proceed_provider,
@@ -387,7 +472,7 @@ function M.start(opts)
     return
   end
 
-  if looks_like_question(intent) then
+  if not force_edit and looks_like_question(intent) then
     require("nvime.ask").start({
       selection = selection,
       provider = provider,
@@ -398,7 +483,14 @@ function M.start(opts)
     return
   end
 
-  run_edit(selection, intent, provider, { session_id = opts.session_id, new_session = opts.new_session })
+  run_edit(selection, intent, provider, {
+    session_id = opts.session_id,
+    new_session = opts.new_session,
+    on_resolved = opts.on_resolved,
+    on_run_failed = opts.on_run_failed,
+    devils_advocate = opts.devils_advocate,
+    plan_continuity = opts.plan_continuity,
+  })
 end
 
 function M.continue_remaining()

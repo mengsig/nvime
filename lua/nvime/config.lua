@@ -57,6 +57,11 @@ M.defaults = {
   },
   diff = {
     max_visual_block_lines = 12,
+    -- Devil's-advocate critic. When true, every accepted-into-review patch
+    -- triggers a separate read-only agent that returns APPROVE / FLAG /
+    -- REJECT in one sentence. The verdict is advisory and never blocks the
+    -- user. Costs roughly one extra agent call per diff.
+    devils_advocate = false,
   },
   chat = {
     max_history_messages = 24,
@@ -67,6 +72,27 @@ M.defaults = {
     auto_open = true, -- open the rendered plan view after authoring
     auto_in_progress = true, -- mark a step in_progress when its edit lane fires
     inject_context_chars = 480, -- per-step plan context block budget
+    -- Devil's-advocate critic for plan executions. Defaults to true here
+    -- (overrides diff.devils_advocate) because plan steps are structured,
+    -- pre-approved by the user via the plan, and a critical second pass is
+    -- worth the extra latency. Set to false to disable.
+    devils_advocate = true,
+    -- Default test file for the test scaffolder. Auto-detected when nil.
+    test_file = nil,
+    -- Default test runner shell command (e.g. "cargo test", "pytest -q",
+    -- "zig build test", "./scripts/test"). Auto-detected from project
+    -- markers (Cargo.toml, build.zig, go.mod, pyproject.toml,
+    -- package.json, pom.xml, build.gradle, CMakeLists.txt, Makefile,
+    -- scripts/test) when nil.
+    test_runner = nil,
+    -- Provider session continuity:
+    --   "plan" : all steps of one plan share a provider conversation; the
+    --            session id rotates and is persisted on plan.json. Press
+    --            gN in the plan view to clear it.
+    --   "none" : every step starts a fresh conversation (older nvime
+    --            behavior; safer for very large plans where the session
+    --            could blow past the context window).
+    session_continuity = "plan",
   },
   sessions = {
     enabled = true,
@@ -174,6 +200,8 @@ local optional_types = {
   ["sessions.chat_path"] = { "string", "nil" },
   ["ui.spinner_frames"] = { "table", "nil" },
   ["plan.dir"] = { "string", "nil" },
+  ["plan.test_file"] = { "string", "nil" },
+  ["plan.test_runner"] = { "string", "nil" },
 }
 
 local function type_label(value)
