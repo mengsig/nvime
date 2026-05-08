@@ -83,29 +83,38 @@ local function define_highlights()
   -- legible without hiding any text. Each heading also gets a subtle
   -- background tint so the line stands out from surrounding prose without
   -- needing an explicit blank line above it.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH1", { fg = "#ffd07a", bg = "#1f1a10", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH2", { fg = "#7be0ed", bg = "#0f1d20", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH3", { fg = "#9ef0d8", bg = "#0e1f1c", bold = true, default = true })
+  -- Headings use foreground hue + bold for differentiation. We dropped
+  -- per-level coloured backgrounds because, combined with the rule line
+  -- and the inline-span chips on the same row, the panel looked busy.
+  -- A single shared subtle bg on H1/H2/H3 still gives the heading row
+  -- its own band without injecting hue.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH1", { fg = "#ffd07a", bg = "#141821", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH2", { fg = "#7be0ed", bg = "#141821", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH3", { fg = "#9ef0d8", bg = "#141821", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownH4", { fg = "#c0c8d8", bold = true, italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownH5", { fg = "#a8b4c7", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownH6", { fg = "#8b919e", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownHeadingMarker", { fg = "#3f4858", default = true })
-  -- Strong text needs more than just `bold = true` because many fonts
-  -- render bold as only marginally heavier — boost to a warm amber so the
-  -- eye can find the emphasis word at a glance.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#ffe0a3", bold = true, default = true })
-  -- Italics get a hue shift to cool blue so emphasis is distinguishable
-  -- by colour, not just slant (slant-only italic disappears in many fonts).
-  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = "#a8c7ff", italic = true, default = true })
+  -- Strong / emphasis / inline-code show up MANY times per agent reply.
+  -- If each one carries a saturated colour, the panel reads as visual
+  -- chaos — every other word is a different highlight. Keep them subtle:
+  -- weight + slant + a faint chip background, no warm hue. Headings and
+  -- links remain the only saturated spans, so they still pop.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#e9eef6", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = "#b8c0d0", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownStrike", { fg = "#6f7a92", strikethrough = true, default = true })
-  -- Inline code: visibly darker than the panel background plus a saturated
-  -- amber fg, so the span reads as a chip rather than tinting prose.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = "#ffb86c", bg = "#1c2533", default = true })
+  -- Inline code: faint chip background with a barely-tinted body fg so a
+  -- backticked identifier reads as code without screaming. The chip alone
+  -- carries the "this is code" signal.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = "#c9d3e5", bg = "#1a2030", default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownLinkText", { fg = "#7be0ed", underline = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownLinkUrl", { fg = "#566075", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownPunct", { fg = "#3f4858", default = true })
-  vim.api.nvim_set_hl(0, "NvimeBullet", { fg = "#8bdc7c", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeBulletNumber", { fg = "#dca561", bold = true, default = true })
+  -- Bullets / numbered list markers: muted accent so they delineate
+  -- structure without competing with the content. Saturated bright was
+  -- overwhelming when every list item lit up.
+  vim.api.nvim_set_hl(0, "NvimeBullet", { fg = "#7c8aa6", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBulletNumber", { fg = "#7c8aa6", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeQuote", { fg = "#c099ff", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeQuoteGutter", { fg = "#9b73e0", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeCodeFence", { fg = "#56b6c2", bold = true, default = true })
