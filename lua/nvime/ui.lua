@@ -98,15 +98,24 @@ local function define_highlights()
   -- Strong / emphasis / inline-code show up MANY times per agent reply.
   -- If each one carries a saturated colour, the panel reads as visual
   -- chaos — every other word is a different highlight. Keep them subtle:
-  -- weight + slant + a faint chip background, no warm hue. Headings and
-  -- links remain the only saturated spans, so they still pop.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#e9eef6", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = "#b8c0d0", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownStrike", { fg = "#6f7a92", strikethrough = true, default = true })
-  -- Inline code: faint chip background with a barely-tinted body fg so a
-  -- backticked identifier reads as code without screaming. The chip alone
-  -- carries the "this is code" signal.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = "#c9d3e5", bg = "#1a2030", default = true })
+  -- weight + slant + foreground tint only, no backgrounds.
+  --
+  -- IMPORTANT: these three intentionally do NOT use `default = true`.
+  -- Some user colorschemes / theme frameworks predefine arbitrary
+  -- nvime.* group names with their own colours (red bg has been
+  -- observed) which `default = true` would honour, breaking our calm
+  -- palette. Force-set so nvime always wins for its own decoration
+  -- groups; users who really want a custom look can `:hi NvimeMarkdown*`
+  -- after setup() returns and our ColorScheme autocmd preserves it via
+  -- the same definition cycle.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#e9eef6", bold = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = "#b8c0d0", italic = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownStrike", { fg = "#6f7a92", strikethrough = true })
+  -- Inline code: foreground-only signal (no chip background) so we can't
+  -- conflict with a colorscheme that defines a red bg, with hardware
+  -- rendering our dark-navy as muddy red, or with overlays. fg + italic
+  -- reads as code; italic differentiates from emphasis-italic by colour.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = "#9bb3d4", italic = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownLinkText", { fg = "#7be0ed", underline = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownLinkUrl", { fg = "#566075", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownPunct", { fg = "#3f4858", default = true })
