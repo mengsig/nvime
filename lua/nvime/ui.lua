@@ -77,24 +77,33 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeUserText", { fg = "#d7dde8", default = true })
   vim.api.nvim_set_hl(0, "NvimeAgent", { fg = "#c8d26a", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeExit", { fg = "#6f7a92", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownHeading", { fg = "#56b6c2", bold = true, default = true })
-  -- Heading hierarchy: H1 brightest + bold, H2/H3 dimmer steps, H4+ italic.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownHeading", { fg = "#7be0ed", bold = true, default = true })
+  -- Heading hierarchy: H1 brightest + bold, H2/H3 saturated, H4+ italic.
   -- Markers (`#`, `##`, …) stay visible — we color them muted so structure is
-  -- legible without hiding any text.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH1", { fg = "#dca561", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH2", { fg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH3", { fg = "#4fd6be", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH4", { fg = "#a8b4c7", bold = true, italic = true, default = true })
+  -- legible without hiding any text. Each heading also gets a subtle
+  -- background tint so the line stands out from surrounding prose without
+  -- needing an explicit blank line above it.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH1", { fg = "#ffd07a", bg = "#1f1a10", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH2", { fg = "#7be0ed", bg = "#0f1d20", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH3", { fg = "#9ef0d8", bg = "#0e1f1c", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH4", { fg = "#c0c8d8", bold = true, italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownH5", { fg = "#a8b4c7", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownH6", { fg = "#8b919e", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownHeadingMarker", { fg = "#566075", default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#d7dde8", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = "#d7dde8", italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownHeadingMarker", { fg = "#3f4858", default = true })
+  -- Strong text needs more than just `bold = true` because many fonts
+  -- render bold as only marginally heavier — boost to a warm amber so the
+  -- eye can find the emphasis word at a glance.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#ffe0a3", bold = true, default = true })
+  -- Italics get a hue shift to cool blue so emphasis is distinguishable
+  -- by colour, not just slant (slant-only italic disappears in many fonts).
+  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = "#a8c7ff", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownStrike", { fg = "#6f7a92", strikethrough = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = "#f4bf75", bg = "#11151d", default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownLinkText", { fg = "#56b6c2", underline = true, default = true })
+  -- Inline code: visibly darker than the panel background plus a saturated
+  -- amber fg, so the span reads as a chip rather than tinting prose.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = "#ffb86c", bg = "#1c2533", default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownLinkText", { fg = "#7be0ed", underline = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeMarkdownLinkUrl", { fg = "#566075", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownPunct", { fg = "#566075", default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownPunct", { fg = "#3f4858", default = true })
   vim.api.nvim_set_hl(0, "NvimeBullet", { fg = "#8bdc7c", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeBulletNumber", { fg = "#dca561", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeQuote", { fg = "#c099ff", italic = true, default = true })
@@ -136,8 +145,12 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimePlanStepIndexBlocked", { fg = "#10141d", bg = "#f4bf75", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanStepIndexPending", { fg = "#d7dde8", bg = "#263142", default = true })
   vim.api.nvim_set_hl(0, "NvimePlanWhy", { fg = "#a8b4c7", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanIntent", { fg = "#d7dde8", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanFile", { fg = "#56b6c2", default = true })
+  -- Step intent lines wrap to multiple visual rows when long; bolding the
+  -- whole sentence becomes a wall of bold and shouts. Use bright body fg
+  -- without bold and let inline_spans (`code`, **bold**, _em_) provide the
+  -- visual anchors.
+  vim.api.nvim_set_hl(0, "NvimePlanIntent", { fg = "#e9eef6", default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanFile", { fg = "#7be0ed", default = true })
   vim.api.nvim_set_hl(0, "NvimePlanRange", { fg = "#7c8aa6", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanMetaLabel", { fg = "#9aa6c2", bold = true, italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanHeadingMarker", { fg = "#3f4858", default = true })
@@ -157,6 +170,20 @@ function M.ensure_highlights()
   end
   define_highlights()
 end
+
+-- Re-apply our defaults whenever a colorscheme load wipes them. Without
+-- this, `:colorscheme X` after setup() leaves nvime's markdown / plan /
+-- diff highlights as the user's theme leaves them — usually unset, which
+-- means agent prose loses its bold/italic/code coloring entirely until
+-- the next panel render. Idempotent: define_highlights() uses
+-- `default = true` so the user's overrides still win.
+local colorscheme_group = vim.api.nvim_create_augroup("NvimeColorScheme", { clear = true })
+vim.api.nvim_create_autocmd("ColorScheme", {
+  group = colorscheme_group,
+  callback = function()
+    M.ensure_highlights()
+  end,
+})
 
 function M.icon(name)
   local cfg = (state.config or {}).ui or {}
