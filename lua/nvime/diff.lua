@@ -1062,8 +1062,25 @@ local function configure_review_window(winid, label, session)
   vim.wo[winid].scrollbind = true
   vim.wo[winid].foldenable = false
   vim.wo[winid].winfixwidth = true
-  vim.wo[winid].winhighlight =
-    "WinBar:NvimeTitle,WinSeparator:NvimeBorder,DiffAdd:NvimeDiffAdd,DiffDelete:NvimeDiffDelete,DiffChange:NvimeDiffHunk"
+  -- Per-pane semantics for the dual-pane review (`<leader>nv`):
+  --   proposed pane (LEFT)  → unique lines = ABOUT TO BE ADDED, paint green
+  --   editable pane (RIGHT) → unique lines = ABOUT TO BE REMOVED, paint red
+  -- Vim's diff mode is symmetric (both panes use `DiffAdd` for their own
+  -- unique lines), so without this per-pane flip the right pane shows the
+  -- to-be-deleted code in green, which is the exact confusion reported.
+  -- DiffText (the column-level diff inside a partially-changed line) gets
+  -- the same per-pane colour so character-level changes also read green
+  -- on the proposed side and red on the editable side.
+  -- DiffDelete (the `~` filler placeholder where one side has lines the
+  -- other doesn't) stays neutral via NvimeDiffHunk — the colored lines on
+  -- the other pane already say what's happening, no need to echo here.
+  local diff_hl
+  if label == "editable" then
+    diff_hl = "DiffAdd:NvimeDiffDelete,DiffDelete:NvimeDiffHunk,DiffChange:NvimeDiffHunk,DiffText:NvimeDiffDelete"
+  else
+    diff_hl = "DiffAdd:NvimeDiffAdd,DiffDelete:NvimeDiffHunk,DiffChange:NvimeDiffHunk,DiffText:NvimeDiffAdd"
+  end
+  vim.wo[winid].winhighlight = "WinBar:NvimeTitle,WinSeparator:NvimeBorder," .. diff_hl
   set_review_winbar(winid, label, session)
 end
 

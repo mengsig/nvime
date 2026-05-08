@@ -4,14 +4,14 @@
 
 It is a Neovim Lua plugin for getting real work done with Claude Code and Codex CLI through explicit engineering lanes:
 
-- review/docs lane: broad repo inspection, shell/test output, Markdown docs writes only
-- edit lane: one selected range or Tree-sitter detected function, one current file, written intent required
-- generation lane: selected blank ranges can become new code/text, and selected non-code ranges such as `.gitignore` can be completed
-- plan lane: the agent drafts a structured roadmap (`.nvime/plans/<id>/plan.json` + `plan.md`) that you navigate, execute step-by-step through the existing edit lane, and mark complete — the contract for "agent writes code, but only where you reviewed and approved the architecture"
-- patch worker rationalizes: every edit-lane response carries a one-line `RATIONALE:` self-check (bug → patch → why correct), surfaced in the diff banner before you accept any block
-- devil's-advocate critic: opt-in read-only second-pass agent that reviews each diff and returns APPROVE / FLAG / REJECT (advisory; never blocks). Default-on for plan execution
-- auto-rollback on test failure: when a plan step's tests fail post-accept, one keystroke restores the file to its pre-step content
-- test scaffolder: `:NvimePlan add-test <id> <step>` (or `gW` in the plan view) fires the edit lane against your test file with a "write a regression test for this step" intent
+- **review/docs**: roam the repo, read shell/tests, write Markdown — no code edits
+- **edit**: one range, one file, written intent or it doesn't move
+- **generation**: fill blank ranges or non-code files like `.gitignore`
+- **plan**: agent drafts a roadmap (`.nvime/plans/<id>/plan.json` + `plan.md`); you execute step-by-step — code lands only where you approved the shape
+- **rationalized patches**: every edit ships a one-line `RATIONALE:` (bug → patch → why) in the diff banner before you accept
+- **devil's-advocate critic**: opt-in second pass returns APPROVE / FLAG / REJECT — advisory, never blocks. Default-on for plans
+- **auto-rollback**: tests fail after accept? one keystroke restores the pre-step file
+- **test scaffolder**: `:NvimePlan add-test <id> <step>` (or `gW`) fires the edit lane to write a regression test for that step
 
 ### Plan picker
 

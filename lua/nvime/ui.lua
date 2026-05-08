@@ -129,8 +129,15 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeCodeFence", { fg = "#56b6c2", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeCodeLang", { fg = "#dca561", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeCode", { fg = "#ccd6e3", bg = "#11151d", default = true })
-  vim.api.nvim_set_hl(0, "NvimeDiffAdd", { fg = "#9bd18b", bg = "#16231b", default = true })
-  vim.api.nvim_set_hl(0, "NvimeDiffDelete", { fg = "#ff7b86", bg = "#28191f", default = true })
+  -- Diff add / delete backgrounds need to be unambiguously green / red:
+  -- the user reads them at a glance to tell additions from deletions.
+  -- Earlier values (#16231b / #28191f) were so dim and desaturated that
+  -- on many displays they read as plain gray, making accept/reject
+  -- decisions confusing. Force-set with no `default = true` so a user
+  -- colorscheme that links these custom group names can never paint
+  -- them gray or red-where-it-should-be-green.
+  vim.api.nvim_set_hl(0, "NvimeDiffAdd", { fg = "#b8e8a8", bg = "#1f3a25" })
+  vim.api.nvim_set_hl(0, "NvimeDiffDelete", { fg = "#ffa0aa", bg = "#3a1f25" })
   vim.api.nvim_set_hl(0, "NvimeDiffHunk", { fg = "#d7dde8", bg = "#252b35", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeConflict", { fg = "#f4bf75", bg = "#2d2412", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeError", { fg = "#ff6b7a", bold = true, default = true })
