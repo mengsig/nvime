@@ -138,6 +138,9 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimePlanWhy", { fg = "#a8b4c7", italic = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanIntent", { fg = "#d7dde8", bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanFile", { fg = "#56b6c2", default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanRange", { fg = "#7c8aa6", italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanMetaLabel", { fg = "#9aa6c2", bold = true, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanHeadingMarker", { fg = "#3f4858", default = true })
 end
 
 function M.ensure_highlights()

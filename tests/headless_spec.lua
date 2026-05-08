@@ -3406,6 +3406,142 @@ end)();
   require_in(protocol_md, "NVIME_DIFF", "PROTOCOL.md")
   require_in(protocol_md, "NVIME_PLAN", "PROTOCOL.md")
   require_in(protocol_md, "RATIONALE:", "PROTOCOL.md")
+end)();
+
+-- Plan view inline-span decoration: opening a plan with backticked
+-- intent / notes runs the prose through render.inline_spans so the
+-- buffer picks up the same NvimeMarkdownInlineCode highlights as
+-- agent scrollback. Without changing buffer text — every backtick
+-- must remain visible in the buffer.
+(function()
+  local plan = require("nvime.plan")
+  local plan_dir = tmp .. "/inline_plans"
+  vim.fn.mkdir(plan_dir, "p")
+  require("nvime.state").config.plan = require("nvime.state").config.plan or {}
+  require("nvime.state").config.plan.dir = plan_dir
+  require("nvime.state").plan = require("nvime.state").plan or {}
+  require("nvime.state").plan.loaded = false
+  require("nvime.state").plan.plans = nil
+
+  local plan_id = "0098-inline-render"
+  local plan_path = plan_dir .. "/" .. plan_id
+  vim.fn.mkdir(plan_path, "p")
+  local plan_obj = {
+    version = 1,
+    id = plan_id,
+    title = "Inline span render",
+    why = "Make `backticked` prose readable inside the plan view.",
+    created_at = os.time(),
+    updated_at = os.time(),
+    files_estimated = { "lua/nvime/plan.lua" },
+    acceptance = { { text = "uses `inline_spans`", status = "pending" } },
+    steps = {
+      {
+        id = 1,
+        intent = "Wrap `fd:close()` in `pcall`",
+        file = "lua/nvime/plan.lua",
+        range = { line1 = 71, line2 = 90 },
+        depends_on = {},
+        tests = { "stylua --check `lua/nvime/plan.lua`" },
+        notes = "Reference: `chat.lua:120-145`.",
+        status = "pending",
+      },
+    },
+  }
+  vim.fn.writefile({ vim.json.encode(plan_obj) }, plan_path .. "/plan.json")
+  vim.fn.writefile({ "# Inline render", "" }, plan_path .. "/plan.md")
+  require("nvime.state").plan.loaded = false
+
+  -- Open the plan view and check the buffer text + extmarks.
+  plan.open(plan_id)
+  local view_buf = nil
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_get_name(b)
+    if name:find(plan_id, 1, true) and vim.bo[b].filetype == "nvimeplan" then
+      view_buf = b
+      break
+    end
+  end
+  assert(view_buf, "plan view: buffer was created")
+
+  local lines = vim.api.nvim_buf_get_lines(view_buf, 0, -1, false)
+  local intent_row = nil
+  local notes_row = nil
+  local tests_row = nil
+  local why_row = nil
+  for i, line in ipairs(lines) do
+    if line:find("Wrap `fd:close()` in `pcall`", 1, true) then
+      intent_row = i - 1
+    elseif line:find("notes · Reference: `chat.lua:120-145`.", 1, true) then
+      notes_row = i - 1
+    elseif line:find("tests · stylua --check `lua/nvime/plan.lua`", 1, true) then
+      tests_row = i - 1
+    elseif line:find("Make `backticked` prose readable", 1, true) then
+      why_row = i - 1
+    end
+  end
+  assert(intent_row, "plan view: step intent line present")
+  assert(notes_row, "plan view: notes line present")
+  assert(tests_row, "plan view: tests line present")
+  assert(why_row, "plan view: why paragraph present")
+
+  -- Buffer text MUST still contain literal backticks — no concealment.
+  assert(lines[intent_row + 1]:find("`fd:close()`", 1, true), "plan view: backticks remain in intent line")
+  assert(lines[notes_row + 1]:find("`chat.lua:120-145`", 1, true), "plan view: backticks remain in notes line")
+
+  -- Collect extmarks across all namespaces and look for the
+  -- NvimeMarkdownInlineCode highlight on the backticked spans.
+  local function has_hl_at(row, hl)
+    local marks = vim.api.nvim_buf_get_extmarks(view_buf, -1, { row, 0 }, { row, -1 }, { details = true })
+    for _, m in ipairs(marks) do
+      if m[4] and m[4].hl_group == hl then
+        return true
+      end
+    end
+    return false
+  end
+
+  assert(has_hl_at(intent_row, "NvimeMarkdownInlineCode"), "plan view: intent line has NvimeMarkdownInlineCode mark")
+  assert(has_hl_at(notes_row, "NvimeMarkdownInlineCode"), "plan view: notes line has NvimeMarkdownInlineCode mark")
+  assert(has_hl_at(tests_row, "NvimeMarkdownInlineCode"), "plan view: tests line has NvimeMarkdownInlineCode mark")
+  assert(has_hl_at(why_row, "NvimeMarkdownInlineCode"), "plan view: why paragraph has NvimeMarkdownInlineCode mark")
+
+  -- The "tests · " label gets the NvimePlanMetaLabel highlight separate
+  -- from the body, so the eye lands on the label first.
+  assert(has_hl_at(tests_row, "NvimePlanMetaLabel"), "plan view: tests label gets NvimePlanMetaLabel")
+  assert(has_hl_at(notes_row, "NvimePlanMetaLabel"), "plan view: notes label gets NvimePlanMetaLabel")
+
+  -- Section heading marker is dimmed separately from the heading body.
+  local why_heading_row = nil
+  for i, line in ipairs(lines) do
+    if line:find("▎ WHY", 1, true) then
+      why_heading_row = i - 1
+      break
+    end
+  end
+  assert(why_heading_row, "plan view: WHY section heading present")
+  assert(
+    has_hl_at(why_heading_row, "NvimePlanHeadingMarker"),
+    "plan view: WHY heading marker gets NvimePlanHeadingMarker"
+  )
+
+  -- Step file/range row separates the path from the L<n>-<m> label.
+  local file_row = nil
+  for i, line in ipairs(lines) do
+    if line:find("lua/nvime/plan.lua  L71-90", 1, true) then
+      file_row = i - 1
+      break
+    end
+  end
+  assert(file_row, "plan view: file/range row present")
+  assert(has_hl_at(file_row, "NvimePlanFile"), "plan view: file row has NvimePlanFile mark")
+  assert(has_hl_at(file_row, "NvimePlanRange"), "plan view: file row has NvimePlanRange mark")
+
+  -- Cleanup so other tests don't see this plan.
+  pcall(vim.api.nvim_buf_delete, view_buf, { force = true })
+  require("nvime.state").config.plan.dir = nil
+  require("nvime.state").plan.loaded = false
+  require("nvime.state").plan.plans = nil
 end)()
 
 print("nvime headless spec passed")

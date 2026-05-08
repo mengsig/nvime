@@ -623,8 +623,19 @@ local close_picker
 
 local function render_plan_lines(plan)
   local lines = {}
-  local marks = {} -- { row, hl, line = true } | { row, hl, col_start, col_end } | { row, virt = true, chunks = {...} }
+  local marks = {} -- { row, hl, line = true } | { row, hl, col_start, col_end, priority? } | { row, virt = true, chunks = {...} }
   local step_index = {} -- step_id -> { first_row, last_row }
+
+  -- Lazy-loaded so plan.lua does not hard-require nvime.render. We use it
+  -- for the inline_spans scanner (backticks, **bold**, _em_, [links]) so
+  -- prose inside the plan view picks up the same markdown decoration as
+  -- the agent scrollback. A nil scanner means we silently fall back to
+  -- plain coloring — no behavior change.
+  local ok_render, render = pcall(require, "nvime.render")
+  local inline_spans_fn = nil
+  if ok_render and render and type(render.inline_spans) == "function" then
+    inline_spans_fn = render.inline_spans
+  end
 
   local function push(line, hl)
     -- Defensive: nvim_buf_set_lines rejects items containing \n. plan.json
@@ -642,8 +653,34 @@ local function render_plan_lines(plan)
     return #lines - 1
   end
 
-  local function mark_range(row, col_start, col_end, hl)
-    marks[#marks + 1] = { row = row, hl = hl, col_start = col_start, col_end = col_end }
+  local function mark_range(row, col_start, col_end, hl, priority)
+    marks[#marks + 1] = {
+      row = row,
+      hl = hl,
+      col_start = col_start,
+      col_end = col_end,
+      priority = priority,
+    }
+  end
+
+  -- Overlay inline-span marks on top of whatever line-level coloring the
+  -- caller already pushed. Only scans bytes at/after `start_col` so leading
+  -- indent or section glyph never confuses the scanner. inline_spans returns
+  -- 1-indexed Lua positions; convert to 0-indexed extmark cols. Higher
+  -- priority than the line-level mark so e.g. `code` highlight wins over
+  -- the dim italic NvimePlanWhy that was applied to the whole line.
+  local function apply_inline(row, line, start_col)
+    if not inline_spans_fn or line == nil or line == "" then
+      return
+    end
+    start_col = start_col or 0
+    local body = line:sub(start_col + 1)
+    if body == "" then
+      return
+    end
+    for _, span in ipairs(inline_spans_fn(body)) do
+      mark_range(row, start_col + span[1] - 1, start_col + span[2], span[3], 200)
+    end
   end
 
   local function push_blank()
@@ -654,6 +691,17 @@ local function render_plan_lines(plan)
     push("  " .. string.rep("─", 76), "NvimePlanRule")
   end
 
+  -- Section heading like "  ▎ WHY". Dim the leading "▎ " marker so the
+  -- text reads as the header, mirroring how render.scrollback dims the
+  -- `#` markers on H1..H6. Indent prefix is preserved as-is.
+  local function push_section(label, prefix)
+    prefix = prefix or "  "
+    local marker = "▎ "
+    local row = push(prefix .. marker .. label, "NvimePlanHeading")
+    mark_range(row, #prefix, #prefix + #marker, "NvimePlanHeadingMarker", 250)
+    return row
+  end
+
   local title = plan.title or plan.id or "(unnamed plan)"
   local status = plan_overall_status(plan)
   local c = counts_for_plan(plan)
@@ -661,10 +709,13 @@ local function render_plan_lines(plan)
   local updated_label = updated and ui.relative_time(updated) or "new"
 
   push_blank()
-  -- Header line: "  ┃ PLAN ┃  0001-audit-prune                           v0.3.0  •  updated 5m"
+  -- Header line: "  ▎  PLAN  0001-audit-prune                           v0.3.0  •  updated 5m"
   local id_label = " " .. (plan.id or "?") .. " "
   local label = "  ▎  PLAN " .. id_label
   local row = push(label, "NvimePlanHeading")
+  -- Dim the leading "  ▎  " gutter glyph so the eye reads the PLAN word
+  -- as the headline, matching push_section() on later headings.
+  mark_range(row, 2, 5, "NvimePlanHeadingMarker", 250)
   -- Color the id segment as a badge
   local prefix = "  ▎  PLAN "
   mark_range(row, #prefix, #prefix + #id_label, "NvimePlanBadgeKey")
@@ -726,35 +777,51 @@ local function render_plan_lines(plan)
   push_blank()
 
   if plan.why and plan.why ~= "" then
-    push("  ▎ WHY", "NvimePlanHeading")
+    push_section("WHY")
     for _, paragraph in ipairs(vim.split(plan.why, "\n", { plain = true })) do
-      push("      " .. paragraph, "NvimePlanWhy")
+      local prow = push("      " .. paragraph, "NvimePlanWhy")
+      apply_inline(prow, lines[prow + 1], 6)
     end
     push_blank()
   end
 
   if plan.acceptance and #plan.acceptance > 0 then
-    push("  ▎ ACCEPTANCE", "NvimePlanHeading")
+    push_section("ACCEPTANCE")
     for _, item in ipairs(plan.acceptance) do
       local itxt = type(item) == "table" and (item.text or "") or tostring(item)
       local istatus = type(item) == "table" and item.status or "pending"
       local arow = push("      " .. status_icon(istatus) .. "  " .. itxt)
       mark_range(arow, 6, 6 + #status_icon(istatus), status_hl(istatus))
-      mark_range(arow, 6 + #status_icon(istatus), #(lines[arow + 1] or ""), "NvimePlanWhy")
+      local body_start = 6 + #status_icon(istatus)
+      mark_range(arow, body_start, #(lines[arow + 1] or ""), "NvimePlanWhy")
+      apply_inline(arow, lines[arow + 1], body_start)
     end
     push_blank()
   end
 
   if plan.files_estimated and #plan.files_estimated > 0 then
-    push("  ▎ FILES", "NvimePlanHeading")
+    push_section("FILES")
     for _, file in ipairs(plan.files_estimated) do
       push("      " .. tostring(file), "NvimePlanFile")
     end
     push_blank()
   end
 
-  push("  ▎ STEPS", "NvimePlanHeading")
+  push_section("STEPS")
   push_blank()
+
+  -- Helper: meta-style row with a labelled prefix ("tests · ", "notes · ",
+  -- "deps "). Highlights the indent + label distinctly from the body and
+  -- runs inline_spans on the body so backticked code/identifiers light up.
+  local META_INDENT = "         " -- 9 spaces
+  local function push_meta(label, body)
+    local prefix = META_INDENT .. label
+    local line = prefix .. body
+    local mrow = push(line, "NvimePlanMeta")
+    mark_range(mrow, #META_INDENT, #prefix, "NvimePlanMetaLabel", 240)
+    apply_inline(mrow, line, #prefix)
+    return mrow
+  end
 
   for _, step in ipairs(plan.steps or {}) do
     local s = step_status(step)
@@ -771,26 +838,39 @@ local function render_plan_lines(plan)
     -- Highlight the intent
     local intent_start = idx_start + #index_label + 2
     mark_range(first, intent_start, #first_line, "NvimePlanIntent")
+    -- Inline spans (`code`, **bold**, _em_, [link](url)) on the intent
+    -- body. Higher priority overlay so e.g. backticked code wins over
+    -- the bold NvimePlanIntent. Stops at the start of the buffer line so
+    -- nothing misfires on the leading icon/badge.
+    apply_inline(first, first_line, intent_start)
 
-    -- File and range
-    local file_line = "         " .. (step.file or "?") .. "  " .. range_label(step)
+    -- File and range. Distinguish the file path (clickable-feeling color)
+    -- from the range label (line-number-y dim italic) so the eye can find
+    -- the file fast even on a dense plan.
+    local file_text = step.file or "?"
+    local range_text = range_label(step)
+    local file_line = META_INDENT .. file_text .. "  " .. range_text
     local file_row = push(file_line)
-    mark_range(file_row, 9, 9 + #(step.file or "?"), "NvimePlanFile")
-    mark_range(file_row, 9 + #(step.file or "?"), #file_line, "NvimePlanMeta")
+    local file_start = #META_INDENT
+    local file_end = file_start + #file_text
+    local range_start = file_end + 2
+    local range_end = range_start + #range_text
+    mark_range(file_row, file_start, file_end, "NvimePlanFile")
+    mark_range(file_row, range_start, range_end, "NvimePlanRange")
 
     if step.depends_on and #step.depends_on > 0 then
       local labels = {}
       for _, dep in ipairs(step.depends_on) do
         labels[#labels + 1] = "#" .. tostring(dep)
       end
-      push("         deps " .. table.concat(labels, " "), "NvimePlanMeta")
+      push_meta("deps ", table.concat(labels, " "))
     end
     if step.tests and #step.tests > 0 then
-      push("         tests · " .. table.concat(step.tests, " ; "), "NvimePlanMeta")
+      push_meta("tests · ", table.concat(step.tests, " ; "))
     end
     if step.notes and step.notes ~= "" then
       for _, line in ipairs(vim.split(step.notes, "\n", { plain = true })) do
-        push("         notes · " .. line, "NvimePlanMeta")
+        push_meta("notes · ", line)
       end
     end
     local last = #lines - 1
@@ -893,10 +973,14 @@ local function render_plan(plan, opts)
       local col_start = math.max(0, math.min(mark.col_start or 0, #line))
       local col_end = math.max(col_start, math.min(mark.col_end or #line, #line))
       if col_end > col_start then
-        vim.api.nvim_buf_set_extmark(bufnr, PLAN_NS, mark.row, col_start, {
+        local extmark_opts = {
           end_col = col_end,
           hl_group = mark.hl,
-        })
+        }
+        if mark.priority then
+          extmark_opts.priority = mark.priority
+        end
+        vim.api.nvim_buf_set_extmark(bufnr, PLAN_NS, mark.row, col_start, extmark_opts)
       end
     end
   end
