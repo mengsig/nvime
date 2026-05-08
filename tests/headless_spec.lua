@@ -3281,6 +3281,55 @@ end)();
   end
 end)();
 
+-- Decorative virt_lines above headings: H1/H2 get a thin rule, H3 gets a
+-- blank line, but ONLY when the previous buffer line is non-empty (so we
+-- don't double the spacing) and we're not at the top of the buffer.
+-- Levels 4+ never get a virt_line (already muted-italic, doesn't need it).
+-- Crucially, the buffer text is unchanged — every `#` stays visible, so
+-- copy/paste returns exactly what the agent wrote.
+(function()
+  local render = require("nvime.render")
+  local buf = vim.api.nvim_create_buf(false, true)
+  local body = {
+    "intro line",
+    "## After prose H2", -- row 1: prev row 0 = "intro line" → ABOVE rule
+    "more prose",
+    "### After prose H3", -- row 3: prev row 2 = "more prose" → ABOVE blank
+    "",
+    "### After blank H3", -- row 5: prev row 4 = blank → NO virt_line
+    "body",
+    "#### Level four", -- row 7: level > 3 → NO virt_line
+    "# Top-level when not at top", -- row 8: prev row 7 has prose → ABOVE rule
+  }
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, body)
+  local ns = vim.api.nvim_create_namespace("nvime.test.virt")
+  render.scrollback(buf, ns)
+
+  -- Snapshot buffer text — must NOT have changed.
+  local after = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  for i, original in ipairs(body) do
+    assert_eq(after[i], original, "virt_lines: buffer text unchanged at row " .. i)
+  end
+
+  local function virt_at(row)
+    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, { row, 0 }, { row, -1 }, { details = true })
+    for _, m in ipairs(marks) do
+      if m[4] and m[4].virt_lines and m[4].virt_lines_above then
+        local first_chunk = m[4].virt_lines[1] and m[4].virt_lines[1][1]
+        return first_chunk and first_chunk[1] or ""
+      end
+    end
+    return nil
+  end
+
+  assert(virt_at(1) and virt_at(1):find("─", 1, true), "virt_lines: H2-after-prose has rule above")
+  local h3 = virt_at(3)
+  assert(h3 ~= nil and h3 == "", "virt_lines: H3-after-prose has blank above")
+  assert(virt_at(5) == nil, "virt_lines: H3-after-blank has nothing above (would double space)")
+  assert(virt_at(7) == nil, "virt_lines: level-4 heading never gets virt_line")
+  assert(virt_at(8) and virt_at(8):find("─", 1, true), "virt_lines: H1-after-prose has rule above")
+end)();
+
 -- :NvimeRecap (#10): prompt building, hash stability, command parsing.
 (function()
   local recap = require("nvime.recap")

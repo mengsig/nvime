@@ -318,6 +318,32 @@ function M.scrollback(bufnr, ns)
       end
       mark(row, body_start, #line, HEADING_HL[level] or "NvimeMarkdownHeading")
       apply_inline(row, line)
+
+      -- Decorative virt_lines above H1/H2/H3 to break the section visually
+      -- from preceding prose. Pure decoration: the buffer line count and
+      -- text content are unchanged, so copy/paste / yank / save still
+      -- return exactly what the agent generated. Skip when the heading
+      -- is at the very top of the buffer or when the previous buffer
+      -- line is already blank (would double the spacing).
+      if level <= 3 and row > 0 then
+        local prev_line = lines[row] or ""
+        if vim.trim(prev_line) ~= "" then
+          local virt_line
+          if level <= 2 then
+            -- H1/H2 get a thin dim rule above so the section break reads
+            -- as a chapter marker.
+            virt_line = { { string.rep("─", 60), "NvimeMarkdownHeadingMarker" } }
+          else
+            -- H3 gets only an extra blank line — a softer break.
+            virt_line = { { "", "NvimeMarkdownHeadingMarker" } }
+          end
+          vim.api.nvim_buf_set_extmark(bufnr, ns, row, 0, {
+            virt_lines = { virt_line },
+            virt_lines_above = true,
+            priority = 100,
+          })
+        end
+      end
     elseif line:match("^%s*[-*+]%s+") then
       -- Unordered bullet: highlight the marker, then process inline
       -- spans on the body so `**bold**` and `*em*` still render even
