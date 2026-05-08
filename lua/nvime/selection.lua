@@ -101,6 +101,13 @@ local function save_sessions_now()
   if not sessions_enabled() then
     return
   end
+  -- Refuse to write when load_sessions has never run. See chat.lua for
+  -- the same guard — without it, a run that opens nvime but never opens
+  -- the selection panel will overwrite the on-disk file with the empty
+  -- in-memory default at VimLeavePre, silently destroying prior selections.
+  if not sessions_loaded then
+    return
+  end
   local sessions = state.selection and state.selection.sessions or {}
   local max_sessions = tonumber(sessions_config().max) or 100
   local out = {}

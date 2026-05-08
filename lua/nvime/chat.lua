@@ -92,6 +92,14 @@ local function save_sessions_now()
   if not sessions_enabled() then
     return
   end
+  -- Refuse to write when load_sessions has never run. Without this guard,
+  -- a Neovim run that opens nvime but never opens the chat panel would
+  -- still fire flush_sessions() at VimLeavePre and overwrite the on-disk
+  -- file with the empty in-memory default — silently destroying prior
+  -- chats. We only persist after we've loaded the existing baseline.
+  if not sessions_loaded then
+    return
+  end
   local sessions = state.chat and state.chat.sessions or {}
   local max_sessions = tonumber(sessions_config().max) or 100
   local out = {}
