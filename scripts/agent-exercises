@@ -318,6 +318,43 @@ EXERCISES: dict[str, dict[str, Any]] = {
                     unittest.main()
             """,
         },
+        "hidden_files": {
+            "test_hidden_json_patch.py": """
+                import unittest
+
+                from json_patch import apply_patch
+
+
+                class HiddenJsonPatchTests(unittest.TestCase):
+                    def test_root_replacement_and_tilde_key(self):
+                        original = {"~": {"nested": True}}
+                        self.assertEqual(
+                            apply_patch(original, [
+                                {"op": "replace", "path": "/~0/nested", "value": False},
+                                {"op": "add", "path": "", "value": {"root": "replaced"}},
+                            ]),
+                            {"root": "replaced"},
+                        )
+                        self.assertEqual(original, {"~": {"nested": True}})
+
+                    def test_rejects_append_marker_outside_add(self):
+                        with self.assertRaises(ValueError):
+                            apply_patch({"items": [1]}, [{"op": "replace", "path": "/items/-", "value": 2}])
+
+                    def test_partial_failure_does_not_mutate_nested_result(self):
+                        original = {"items": [{"name": "old"}]}
+                        with self.assertRaises(ValueError):
+                            apply_patch(original, [
+                                {"op": "replace", "path": "/items/0/name", "value": "new"},
+                                {"op": "remove", "path": "/items/1/name"},
+                            ])
+                        self.assertEqual(original, {"items": [{"name": "old"}]})
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
     },
     "extremely_difficult_topological_batches": {
         "difficulty": "extremely_difficult",
@@ -375,6 +412,39 @@ EXERCISES: dict[str, dict[str, Any]] = {
                         before = copy.deepcopy(tasks)
                         build_batches(tasks)
                         self.assertEqual(tasks, before)
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+        "hidden_files": {
+            "test_hidden_scheduler.py": """
+                import unittest
+
+                from scheduler import build_batches
+
+
+                class HiddenSchedulerTests(unittest.TestCase):
+                    def test_diamond_preserves_global_input_order_per_layer(self):
+                        tasks = [
+                            {"id": "deploy", "deps": ["package", "migrate"]},
+                            {"id": "fetch", "deps": []},
+                            {"id": "package", "deps": ["build"]},
+                            {"id": "migrate", "deps": ["fetch"]},
+                            {"id": "build", "deps": ["fetch"]},
+                        ]
+                        self.assertEqual(build_batches(tasks), [["fetch"], ["migrate", "build"], ["package"], ["deploy"]])
+
+                    def test_empty_input_is_empty_batches(self):
+                        self.assertEqual(build_batches([]), [])
+
+                    def test_duplicate_is_checked_before_missing_dependency(self):
+                        with self.assertRaises(ValueError):
+                            build_batches([
+                                {"id": "a", "deps": ["missing"]},
+                                {"id": "a", "deps": []},
+                            ])
 
 
                 if __name__ == "__main__":
@@ -441,6 +511,41 @@ PLAN_EXERCISES: dict[str, dict[str, Any]] = {
                 # Service
 
                 The service currently accepts every request.
+            """,
+        },
+        "hidden_files": {
+            "test_hidden_service.py": """
+                import unittest
+
+                import service
+                from service import handle_request
+
+
+                class HiddenServiceTests(unittest.TestCase):
+                    def test_window_boundary_and_limit_do_not_increment_after_limit(self):
+                        store = {}
+                        self.assertEqual([handle_request("alice", t, store) for t in (0, 10, 20)], ["ok", "ok", "ok"])
+                        self.assertEqual(handle_request("alice", 30, store), "rate_limited")
+                        self.assertEqual(handle_request("alice", 59, store), "rate_limited")
+                        self.assertEqual(handle_request("alice", 60, store), "ok")
+
+                    def test_users_are_independent(self):
+                        store = {}
+                        for t in (0, 1, 2):
+                            self.assertEqual(handle_request("alice", t, store), "ok")
+                        self.assertEqual(handle_request("alice", 3, store), "rate_limited")
+                        self.assertEqual(handle_request("bob", 3, store), "ok")
+
+                    def test_default_store_is_backward_compatible_and_stateful(self):
+                        service._DEFAULT_STORE.clear()
+                        self.assertEqual(handle_request("carol", 0), "ok")
+                        self.assertEqual(handle_request("carol", 1), "ok")
+                        self.assertEqual(handle_request("carol", 2), "ok")
+                        self.assertEqual(handle_request("carol", 3), "rate_limited")
+
+
+                if __name__ == "__main__":
+                    unittest.main()
             """,
         },
     }
@@ -524,6 +629,12 @@ def prepare_general_exercise(name: str, root: Path) -> None:
 def prepare_plan_exercise(name: str, root: Path) -> None:
     write_project_files(root, PLAN_EXERCISES[name]["files"])
     init_repo(root)
+
+
+def write_hidden_files(root: Path, exercise: dict[str, Any]) -> list[str]:
+    hidden = exercise.get("hidden_files") or {}
+    write_project_files(root, hidden)
+    return sorted(hidden)
 
 
 def build_nvime_prompt(workspace: Path, exercise: dict[str, Any], selection: dict[str, Any], intent: str | None = None) -> str:
@@ -847,7 +958,13 @@ def feedback_intent(original: str, runner: str, previous: dict[str, Any]) -> str
         "",
         "Failure details:",
         "----",
-        failure_tail(previous.get("apply_error") or "", previous.get("test_stdout") or "", previous.get("test_stderr") or ""),
+        failure_tail(
+            previous.get("apply_error") or "",
+            previous.get("test_stdout") or "",
+            previous.get("test_stderr") or "",
+            previous.get("hidden_stdout") or "",
+            previous.get("hidden_stderr") or "",
+        ),
         "----",
     ]
     return "\n".join(bits)
@@ -943,6 +1060,261 @@ def validate_plan_output(workspace: Path, final_text: str) -> tuple[dict[str, bo
     details["status_paths"] = touched
     checks["only_plan_files_changed"] = all(path.startswith(".nvime/plans/") for path in touched)
     return checks, details
+
+
+def load_single_plan(workspace: Path) -> dict[str, Any] | None:
+    plan_jsons = sorted((workspace / ".nvime" / "plans").glob("*/plan.json"))
+    if len(plan_jsons) != 1:
+        return None
+    try:
+        return json.loads(plan_jsons[0].read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def plan_repair_prompt(original_prompt: str, validation: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            original_prompt,
+            "",
+            "The previous plan failed nvime validation.",
+            "Repair the plan in place under `.nvime/plans/<plan-id>/` and emit only the final NVIME_PLAN marker.",
+            "Do not modify source files.",
+            "Validation result:",
+            "```json",
+            json.dumps(validation, indent=2, sort_keys=True),
+            "```",
+        ]
+    )
+
+
+def step_execution_intent(plan: dict[str, Any], step: dict[str, Any]) -> str:
+    lines = [
+        "Execute this nvime plan step only.",
+        "Do not implement later steps. Do not edit files outside this step's file/range.",
+        "",
+        f"Plan: {plan.get('id')} - {plan.get('title')}",
+        f"Step {step.get('id')}: {step.get('intent')}",
+    ]
+    if step.get("notes"):
+        lines.extend(["", "Step notes:", str(step["notes"])])
+    if step.get("tests"):
+        lines.extend(["", "Step tests:", *[f"- {cmd}" for cmd in step.get("tests") or []]])
+    return "\n".join(lines)
+
+
+def locate_step_range(workspace: Path, step: dict[str, Any]) -> tuple[int, int]:
+    range_value = step.get("range")
+    path = workspace / str(step.get("file"))
+    if range_value == "new":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("\n", encoding="utf-8")
+        return 1, max(1, len(path.read_text(encoding="utf-8").splitlines()))
+    if not isinstance(range_value, dict):
+        raise RuntimeError(f"unsupported plan step range: {range_value!r}")
+    line1 = int(range_value.get("line1") or 1)
+    line2 = int(range_value.get("line2") or line1)
+    anchor = step.get("range_anchor")
+    if not anchor:
+        return line1, line2
+    lines = path.read_text(encoding="utf-8").splitlines()
+    anchor_lines = str(anchor).splitlines()
+    if not anchor_lines:
+        return line1, line2
+    width = max(0, line2 - line1)
+    for index in range(0, len(lines) - len(anchor_lines) + 1):
+        if lines[index : index + len(anchor_lines)] == anchor_lines:
+            return index + 1, index + 1 + width
+    return line1, line2
+
+
+def expected_plan_change_files(plan: dict[str, Any]) -> set[str]:
+    out = {str(step.get("file")) for step in plan.get("steps") or [] if isinstance(step, dict) and step.get("file")}
+    return out
+
+
+def execute_plan_steps(
+    workspace: Path,
+    plan: dict[str, Any],
+    provider: str,
+    timeout: int,
+    fix_attempts: int,
+) -> list[dict[str, Any]]:
+    steps = [step for step in plan.get("steps") or [] if isinstance(step, dict)]
+    steps.sort(key=lambda step: int(step.get("id") or 0))
+    results: list[dict[str, Any]] = []
+    completed: set[int] = set()
+    for step in steps:
+        step_id = int(step.get("id") or 0)
+        missing_deps = [dep for dep in step.get("depends_on") or [] if int(dep) not in completed]
+        if missing_deps:
+            results.append(
+                {
+                    "step": step_id,
+                    "success": False,
+                    "applied": "dependency_blocked",
+                    "error": f"missing dependencies: {missing_deps}",
+                }
+            )
+            break
+        step_result: dict[str, Any] | None = None
+        for attempt_no in range(fix_attempts + 1):
+            line1, line2 = locate_step_range(workspace, step)
+            target = str(step["file"])
+            selection = {"path": target, "line1": line1, "line2": line2}
+            prompt = build_nvime_prompt(
+                workspace,
+                {"target": target, "intent": str(step.get("intent") or "")},
+                selection,
+                step_execution_intent(plan, step),
+            )
+            proc, final_text = call_provider(provider, "nvime", prompt, workspace, timeout)
+            apply_error = None
+            try:
+                applied = apply_nvime_response(workspace, {"target": target}, selection, final_text)
+            except Exception as exc:  # noqa: BLE001 - surfaced in JSON
+                applied = "apply_failed"
+                apply_error = str(exc)
+            changed = changed_files(workspace)
+            allowed = expected_plan_change_files(plan) | {f".nvime/plans/{plan.get('id')}/plan.json", f".nvime/plans/{plan.get('id')}/plan.md"}
+            scope_ok = set(changed) <= allowed
+            success = proc.returncode == 0 and applied not in {"unparsed", "no_change", "apply_failed"} and scope_ok
+            step_result = {
+                "step": step_id,
+                "attempt": attempt_no + 1,
+                "provider_exit": proc.returncode,
+                "applied": applied,
+                "apply_error": apply_error,
+                "scope_ok": scope_ok,
+                "changed_files": changed,
+                "success": success,
+                "final_text": final_text[-1600:],
+            }
+            if success or attempt_no >= fix_attempts:
+                break
+            step["intent"] = feedback_intent(str(step.get("intent") or ""), RUNNER, step_result)
+        assert step_result is not None
+        results.append(step_result)
+        if not step_result["success"]:
+            break
+        completed.add(step_id)
+    return results
+
+
+def run_plan_execute_one(name: str, provider: str, live: bool, keep: bool, timeout: int, fix_attempts: int) -> dict[str, Any]:
+    workspace = Path(tempfile.mkdtemp(prefix=f"nvime-plan-exec-{name}-"))
+    exercise = PLAN_EXERCISES[name]
+    try:
+        prepare_plan_exercise(name, workspace)
+        baseline = run(RUNNER, workspace, timeout=120)
+        prompt = build_plan_prompt(workspace, exercise["intent"])
+        checks = prompt_checks(prompt, "plan", baseline.returncode)
+        prompt_ok = all(checks.values())
+        if not live:
+            return {
+                "exercise": name,
+                "difficulty": exercise["difficulty"],
+                "mode": "plan-execute",
+                "provider": provider,
+                "workspace": str(workspace) if keep else None,
+                "baseline_exit": baseline.returncode,
+                "prompt_chars": len(prompt),
+                "prompt_checks": checks,
+                "prompt_ok": prompt_ok,
+                "live": False,
+            }
+        if not prompt_ok:
+            return {
+                "exercise": name,
+                "difficulty": exercise["difficulty"],
+                "title": exercise["title"],
+                "mode": "plan-execute",
+                "provider": provider,
+                "workspace": str(workspace) if keep else None,
+                "baseline_exit": baseline.returncode,
+                "prompt_checks": checks,
+                "prompt_ok": False,
+                "success": False,
+                "error": "plan prompt self-check failed",
+            }
+
+        plan_attempts: list[dict[str, Any]] = []
+        final_text = ""
+        plan_checks: dict[str, bool] = {}
+        plan_details: dict[str, Any] = {}
+        for attempt_no in range(fix_attempts + 1):
+            proc, final_text = call_provider(provider, "plan", prompt, workspace, timeout)
+            plan_checks, plan_details = validate_plan_output(workspace, final_text)
+            plan_attempt = {
+                "attempt": attempt_no + 1,
+                "provider_exit": proc.returncode,
+                "success": proc.returncode == 0 and all(plan_checks.values()),
+                "plan_checks": plan_checks,
+                "plan_details": plan_details,
+                "final_text": final_text[-1200:],
+            }
+            plan_attempts.append(plan_attempt)
+            if plan_attempt["success"] or attempt_no >= fix_attempts:
+                break
+            prompt = plan_repair_prompt(prompt, plan_attempt)
+
+        plan = load_single_plan(workspace)
+        if not plan or not all(plan_checks.values()):
+            return {
+                "exercise": name,
+                "difficulty": exercise["difficulty"],
+                "title": exercise["title"],
+                "mode": "plan-execute",
+                "provider": provider,
+                "workspace": str(workspace) if keep else None,
+                "baseline_exit": baseline.returncode,
+                "prompt_checks": checks,
+                "prompt_ok": prompt_ok,
+                "plan_attempts": plan_attempts,
+                "success": False,
+                "error": "plan validation failed",
+            }
+
+        step_results = execute_plan_steps(workspace, plan, provider, timeout, fix_attempts)
+        visible = run(RUNNER, workspace, timeout=120)
+        hidden_files = write_hidden_files(workspace, exercise)
+        hidden = run(RUNNER, workspace, timeout=120) if hidden_files else None
+        changed = changed_files(workspace)
+        allowed = expected_plan_change_files(plan) | {f".nvime/plans/{plan.get('id')}/plan.json", f".nvime/plans/{plan.get('id')}/plan.md"}
+        scope_ok = set(changed) <= allowed
+        success = (
+            all(item.get("success") for item in step_results)
+            and visible.returncode == 0
+            and (hidden is None or hidden.returncode == 0)
+            and scope_ok
+        )
+        return {
+            "exercise": name,
+            "difficulty": exercise["difficulty"],
+            "title": exercise["title"],
+            "mode": "plan-execute",
+            "provider": provider,
+            "workspace": str(workspace) if keep else None,
+            "baseline_exit": baseline.returncode,
+            "prompt_checks": checks,
+            "prompt_ok": prompt_ok,
+            "plan_attempts": plan_attempts,
+            "step_results": step_results,
+            "visible_exit": visible.returncode,
+            "visible_stdout": visible.stdout[-2000:],
+            "visible_stderr": visible.stderr[-2000:],
+            "hidden_files": hidden_files,
+            "hidden_exit": hidden.returncode if hidden else None,
+            "hidden_stdout": hidden.stdout[-2000:] if hidden else "",
+            "hidden_stderr": hidden.stderr[-2000:] if hidden else "",
+            "scope_ok": scope_ok,
+            "changed_files": changed,
+            "success": success,
+        }
+    finally:
+        if not keep:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 def run_general_one(name: str, provider: str, live: bool, keep: bool, timeout: int) -> dict[str, Any]:
@@ -1146,9 +1518,21 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
           tests = run(RUNNER, workspace, timeout=120)
           files = changed_files(workspace)
           scope_ok = files == [exercise["target"]]
+          hidden_files: list[str] = []
+          hidden_exit: int | None = None
+          hidden_stdout = ""
+          hidden_stderr = ""
+          if proc.returncode == 0 and tests.returncode == 0 and scope_ok and applied not in {"unparsed", "no_change", "apply_failed"}:
+              hidden_files = write_hidden_files(workspace, exercise)
+              if hidden_files:
+                  hidden = run(RUNNER, workspace, timeout=120)
+                  hidden_exit = hidden.returncode
+                  hidden_stdout = hidden.stdout[-2000:]
+                  hidden_stderr = hidden.stderr[-2000:]
           success = (
               proc.returncode == 0
               and tests.returncode == 0
+              and (hidden_exit in {None, 0})
               and scope_ok
               and applied not in {"unparsed", "no_change", "apply_failed"}
           )
@@ -1164,6 +1548,10 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
               "final_text": final_text[-2000:],
               "test_stdout": tests.stdout[-2000:],
               "test_stderr": tests.stderr[-2000:],
+              "hidden_files": hidden_files,
+              "hidden_exit": hidden_exit,
+              "hidden_stdout": hidden_stdout,
+              "hidden_stderr": hidden_stderr,
           }
           attempts.append(attempt)
           result = attempt
@@ -1199,6 +1587,10 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
           "final_text": result["final_text"],
           "test_stdout": result["test_stdout"],
           "test_stderr": result["test_stderr"],
+          "hidden_files": result.get("hidden_files", []),
+          "hidden_exit": result.get("hidden_exit"),
+          "hidden_stdout": result.get("hidden_stdout", ""),
+          "hidden_stderr": result.get("hidden_stderr", ""),
           "attempts": attempts,
       }
     finally:
@@ -1209,7 +1601,7 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", choices=["codex", "claude"], default="codex")
-    parser.add_argument("--mode", choices=["nvime", "default", "general", "plan"], default="nvime")
+    parser.add_argument("--mode", choices=["nvime", "default", "general", "plan", "plan-execute"], default="nvime")
     parser.add_argument(
         "--exercise",
         choices=["all", *EXERCISES.keys(), *GENERAL_EXERCISES.keys(), *PLAN_EXERCISES.keys()],
@@ -1229,6 +1621,7 @@ def main() -> int:
             print(f"general\t{key}\t{exercise['difficulty']}\t{exercise['title']}")
         for key, exercise in PLAN_EXERCISES.items():
             print(f"plan\t{key}\t{exercise['difficulty']}\t{exercise['title']}")
+            print(f"plan-execute\t{key}\t{exercise['difficulty']}\t{exercise['title']}")
         return 0
 
     if args.mode in {"nvime", "default"}:
@@ -1246,12 +1639,21 @@ def main() -> int:
         if unknown:
             parser.error(f"general mode does not include exercises: {', '.join(unknown)}")
         results = [run_general_one(name, args.provider, args.live, args.keep, args.timeout) for name in selected]
-    else:
+    elif args.mode == "plan":
         selected = list(PLAN_EXERCISES) if args.exercise == "all" else [args.exercise]
         unknown = [name for name in selected if name not in PLAN_EXERCISES]
         if unknown:
             parser.error(f"plan mode does not include exercises: {', '.join(unknown)}")
         results = [run_plan_one(name, args.provider, args.live, args.keep, args.timeout) for name in selected]
+    else:
+        selected = list(PLAN_EXERCISES) if args.exercise == "all" else [args.exercise]
+        unknown = [name for name in selected if name not in PLAN_EXERCISES]
+        if unknown:
+            parser.error(f"plan-execute mode does not include exercises: {', '.join(unknown)}")
+        results = [
+            run_plan_execute_one(name, args.provider, args.live, args.keep, args.timeout, max(args.fix_attempts, 0))
+            for name in selected
+        ]
     print(json.dumps({"results": results}, indent=2, sort_keys=True))
     if any(not item.get("prompt_ok", True) for item in results):
         return 1
