@@ -146,6 +146,11 @@ require("nvime").setup({
   },
   edit = {
     context_lines = 0,
+    inject_context = true,
+    context_max_chars = 6000,
+    related_test_limit = 4,
+    symbol_limit = 24,
+    recent_diff_limit = 5,
   },
   diff = {
     max_visual_block_lines = 12,
@@ -158,6 +163,28 @@ require("nvime").setup({
     path = nil, -- defaults to .nvime/selection-sessions.json in a git repo
     chat_path = nil, -- defaults to .nvime/chat-sessions.json in a git repo
     max = 100,
+  },
+  usage = {
+    enabled = true,
+    path = nil, -- defaults to .nvime/usage.json in a git repo
+    max_days = 90,
+    statusline = true,
+    rates = {},
+  },
+  test_loop = {
+    enabled = true,
+    runner = nil, -- nil means plan.test_runner / auto-detect
+    auto_fix = false,
+    max_retries = 2,
+    capture_lines = 200,
+  },
+  mcp = {
+    enabled = true,
+    config_path = nil, -- defaults to .nvime/mcp.json in a git repo
+    servers = {},
+    expose_self = true,
+    self_command = nil,
+    codex_bypass_for_mcp = false,
   },
   keys = {
     enabled = true,
@@ -173,6 +200,9 @@ require("nvime").setup({
       diff = "v",
       last = "n",
       provider = "p",
+      plan = "P",
+      blame = "b",
+      usage = "u",
     },
     visual = {
       edit = "e",
@@ -243,6 +273,18 @@ require("nvime").setup({
   workspace, and writes a `plan.md` narrative under `.nvime/plans/recap-<hash>/`
   explaining what changed, why, and what is untested. Auto-opens in the plan
   view.
+- `:NvimeMcp [list|config|edit]` lists configured MCP servers, opens the merged
+  config, or edits the project-local `.nvime/mcp.json`.
+- `:NvimeTestLoop [on|off|auto|ask|reset]` configures nvime's after-diff
+  test-feedback loop (enable, disable, force auto-fix, ask before fix, or
+  reset retry counters).
+- `:NvimePlan` opens the plan picker, drafts a plan, or runs a step (e.g.
+  `:NvimePlan add-test <id> <step>`). `:NvimePlanFocus` refocuses the active
+  plan UI float; `:NvimePlanClose` tears down every plan UI float and backdrop.
+- `:NvimeBlame [notify]` shows the agent attribution popup for the line under
+  the cursor.
+- `:NvimeUsage [summary|reset]` opens the token + cost dashboard, prints a
+  summary, or resets counters.
 
 ## Chat Panel
 
@@ -473,6 +515,12 @@ codex exec --json --ephemeral --ignore-user-config --ignore-rules \
 When `review.allow_markdown_writes = false`, Codex review/docs mode uses
 `-s read-only` instead.
 
+When `mcp.enabled = true`, Claude receives the merged nvime MCP config through
+`--mcp-config`. Codex receives equivalent `-c mcp_servers.*` overrides, but
+Codex `exec` cancels MCP tool calls unless `mcp.codex_bypass_for_mcp = true`
+adds `--dangerously-bypass-approvals-and-sandbox`. That option is deliberately
+off by default because it disables Codex's OS-level sandbox.
+
 The edit-lane response protocol is documented in [PROTOCOL.md](PROTOCOL.md).
 In help, see `:help nvime-protocol`.
 
@@ -513,3 +561,10 @@ reference still points at the wrapper; callers that resolve `vim.system`,
 ```
 
 The test uses a fake local `claude` executable and runs headless Neovim end to end.
+
+Prompt-performance exercises live in [doc/AGENT_EXERCISES.md](doc/AGENT_EXERCISES.md):
+
+```sh
+scripts/agent-exercises --list
+scripts/agent-exercises --provider codex --mode nvime --exercise all
+```

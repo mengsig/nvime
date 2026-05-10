@@ -27,6 +27,9 @@ require("nvime").setup({
     path = sessions_path,
     chat_path = chat_sessions_path,
   },
+  test_loop = {
+    enabled = false,
+  },
   guard = {
     notify = false,
     block_cmdline = false,
@@ -422,6 +425,17 @@ assert(
 )
 assert(require("nvime.chat").session_count() >= 1, "deleting one chat keeps older conversations")
 require("nvime.chat").save_sessions()
+do
+  local before_reload = require("nvime.chat").active_session_id()
+  assert(before_reload ~= nil, "chat has an active session prior to reload")
+  require("nvime.chat").save_sessions()
+  require("nvime.chat").reload_sessions()
+  assert_eq(
+    require("nvime.chat").active_session_id(),
+    before_reload,
+    "active chat session id is restored after reload"
+  )
+end
 require("nvime.chat").reload_sessions()
 assert(require("nvime.chat").session_count() >= 1, "general chat sessions reload from disk")
 vim.cmd("NvimeChat")
@@ -734,6 +748,23 @@ assert(
 assert(
   first_native_claude:find("--disallowedTools Edit,Write,MultiEdit,NotebookEdit", 1, true),
   "claude selection lane blocks direct write tools"
+)
+assert(
+  first_native_claude:find("Bash(git commit:*)", 1, true)
+    and first_native_claude:find("Bash(git push:*)", 1, true),
+  "claude selection lane disallows destructive git verbs"
+)
+assert(
+  first_native_claude:find("Bash(sudo:*)", 1, true) and first_native_claude:find("Bash(dd:*)", 1, true),
+  "claude selection lane disallows destructive shell binaries"
+)
+assert(
+  not first_native_claude:find("Bash(git diff", 1, true),
+  "claude selection lane keeps git diff readable"
+)
+assert(
+  not first_native_claude:find("Bash(git add", 1, true),
+  "claude selection lane keeps git add allowed"
 )
 assert(second_native_claude:find("--resume " .. native_claude_id, 1, true), "claude follow-up uses native resume")
 local old_selection_allow_shell = require("nvime.state").config.selection.allow_shell
@@ -1544,6 +1575,10 @@ vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "  return a-b",
   "end",
 })
+vim.fn.mkdir(tmp .. "/scripts", "p")
+vim.fn.writefile({ "#!/usr/bin/env sh", "exit 0" }, tmp .. "/scripts/test")
+vim.fn.setfperm(tmp .. "/scripts/test", "rwxr-xr-x")
+vim.fn.writefile({ "local sample = require('sample')", "return sample" }, tmp .. "/test_sample.lua")
 
 local target = vim.api.nvim_get_current_buf()
 require("nvime.state").current_diff = nil
@@ -1642,6 +1677,34 @@ assert(
 assert(
   require("nvime.state").selection.last_edit_prompt:find("RATIONALIZATION", 1, true),
   "edit prompt walks the agent through the bug → patch → why self-check"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("If nvime MCP tools are available", 1, true),
+  "edit prompt nudges agents toward bounded nvime MCP context tools"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("Do not narrate tool use", 1, true),
+  "edit prompt forbids tool-use narration before the machine-readable block"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("verification pass", 1, true),
+  "edit prompt asks agents to verify intent edge cases before patching"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("consume/validate the full input", 1, true),
+  "edit prompt calls out parser and normalizer completeness"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("Precomputed nvime project context", 1, true),
+  "edit prompt includes bounded precomputed project context"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("Detected test runner: ./scripts/test", 1, true),
+  "edit prompt detects the selected buffer's project test runner"
+)
+assert(
+  require("nvime.state").selection.last_edit_prompt:find("Related test file: test_sample.lua", 1, true),
+  "edit prompt includes a related test excerpt when available"
 )
 local closed_selection_panel = require("nvime.state").panels.selection
 assert(
@@ -3413,6 +3476,7 @@ end)();
   end
   local edit_src = read_file(root .. "/lua/nvime/edit.lua")
   local plan_src = read_file(root .. "/lua/nvime/plan.lua")
+  local chat_src = read_file(root .. "/lua/nvime/chat.lua")
   local critic_src = read_file(root .. "/lua/nvime/critic.lua")
   local protocol_md = read_file(root .. "/PROTOCOL.md")
 
@@ -3428,6 +3492,12 @@ end)();
   require_in(edit_src, "You may only propose changes for the selected range in the current file.", "edit.lua")
   require_in(edit_src, "Do not edit files directly.", "edit.lua")
   require_in(edit_src, "Prefer NVIME_DIFF for any change to existing nonblank text.", "edit.lua")
+  require_in(edit_src, "If nvime MCP tools are available", "edit.lua")
+  require_in(edit_src, "Do not narrate tool use", "edit.lua")
+  require_in(edit_src, "verification pass", "edit.lua")
+  require_in(edit_src, "consume/validate the full input", "edit.lua")
+  require_in(edit_src, "Precomputed nvime project context", "edit.lua")
+  require_in(edit_src, "Detected test runner", "edit.lua")
 
   -- Perf lane invariants
   require_in(edit_src, "If you cannot prove a real win with numbers, return NVIME_NO_CHANGE.", "edit.lua")
@@ -3436,9 +3506,15 @@ end)();
 
   -- Plan author invariants
   require_in(plan_src, "You are an architect drafting a structured implementation plan", "plan.lua")
+  require_in(plan_src, "Do not narrate tool use, investigation progress", "plan.lua")
   require_in(plan_src, "You MUST NOT modify any source code", "plan.lua")
   require_in(plan_src, "ONLY for paths under `.nvime/plans/<plan-id>/`.", "plan.lua")
   require_in(plan_src, "Decompose into ORDERED steps", "plan.lua")
+  require_in(plan_src, "plan is INVALID with fewer than 3 steps", "plan.lua")
+
+  -- General chat invariants
+  require_in(chat_src, "Never edit non-Markdown files from this lane", "chat.lua")
+  require_in(chat_src, "Do not narrate tool use or progress", "chat.lua")
 
   -- Critic invariants
   require_in(critic_src, "You are a critical reviewer of a proposed patch", "critic.lua")
@@ -3452,6 +3528,9 @@ end)();
   -- documents, so a doc rewrite that drops them surfaces here too.
   require_in(protocol_md, "NVIME_NO_CHANGE", "PROTOCOL.md")
   require_in(protocol_md, "NVIME_REPLACEMENT", "PROTOCOL.md")
+  require_in(protocol_md, "Precomputed nvime project context", "PROTOCOL.md")
+  require_in(protocol_md, "Do not narrate tool use, investigation progress", "PROTOCOL.md")
+  require_in(protocol_md, "fewer than 3 steps", "PROTOCOL.md")
   require_in(protocol_md, "NVIME_DIFF", "PROTOCOL.md")
   require_in(protocol_md, "NVIME_PLAN", "PROTOCOL.md")
   require_in(protocol_md, "RATIONALE:", "PROTOCOL.md")
@@ -3591,6 +3670,438 @@ end)();
   require("nvime.state").config.plan.dir = nil
   require("nvime.state").plan.loaded = false
   require("nvime.state").plan.plans = nil
+end)()
+
+-- ---------------------------------------------------------------------------
+-- nvime.usage parsing & ledger
+-- ---------------------------------------------------------------------------
+;
+(function()
+  local usage_path = tmp .. "/usage-test.json"
+  vim.fn.delete(usage_path)
+  require("nvime.state").config.usage = {
+    enabled = true,
+    path = usage_path,
+    max_days = 90,
+    statusline = true,
+    rates = {},
+  }
+  local usage = require("nvime.usage")
+  package.loaded["nvime.usage"] = nil
+  usage = require("nvime.usage")
+  usage.reset()
+
+  local claude_decoded = vim.json.decode([[
+    {"type":"result","subtype":"success","is_error":false,"session_id":"abc",
+     "total_cost_usd":0.5,"usage":{"input_tokens":100,"output_tokens":50,
+       "cache_creation_input_tokens":1000,"cache_read_input_tokens":250},
+     "modelUsage":{"claude-opus-4-7":{"costUSD":0.49},"claude-haiku-4-5":{"costUSD":0.01}}}
+  ]])
+  local claude_sample = usage.parse_claude(claude_decoded)
+  assert_eq(claude_sample.input, 100, "usage: claude input parsed")
+  assert_eq(claude_sample.output, 50, "usage: claude output parsed")
+  assert_eq(claude_sample.cache_creation, 1000, "usage: claude cache_creation parsed")
+  assert_eq(claude_sample.cache_read, 250, "usage: claude cache_read parsed")
+  assert_eq(claude_sample.cost_usd, 0.5, "usage: claude cost taken from total_cost_usd")
+  assert_eq(claude_sample.model, "claude-opus-4-7", "usage: claude model picked by highest cost")
+
+  local codex_decoded = vim.json.decode([[
+    {"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":1500,"output_tokens":40,"reasoning_output_tokens":120}}
+  ]])
+  local codex_sample = usage.parse_codex(codex_decoded)
+  assert_eq(codex_sample.input, 2000, "usage: codex input parsed")
+  assert_eq(codex_sample.cache_read, 1500, "usage: codex cached input mapped to cache_read")
+  assert_eq(codex_sample.reasoning, 120, "usage: codex reasoning parsed")
+
+  local rec = usage.record({ sample = claude_sample, provider = "claude", lane = "review", model = claude_sample.model })
+  assert(rec, "usage: record returns last_run")
+  assert_eq(rec.lane, "review", "usage: record lane preserved")
+
+  local crec = usage.record({ sample = codex_sample, provider = "codex", lane = "plan", model = codex_sample.model })
+  assert(crec, "usage: codex record returns last_run")
+  assert(crec.sample.cost_usd > 0, "usage: codex cost computed from rates when missing")
+
+  local ledger = usage.read()
+  assert_eq(ledger.totals.runs, 2, "usage: ledger totals.runs counts both records")
+  assert(ledger.by_lane.review and ledger.by_lane.plan, "usage: ledger has per-lane buckets")
+  assert(vim.fn.filereadable(usage_path) == 1, "usage: ledger persisted to disk")
+  local summary = usage.summary_text()
+  assert(summary:find("totals", 1, true), "usage: summary_text mentions totals")
+  assert(summary:find("review", 1, true) and summary:find("plan", 1, true), "usage: summary lists per-lane")
+end)()
+
+-- ---------------------------------------------------------------------------
+-- nvime.attribution: blame popup
+-- ---------------------------------------------------------------------------
+;
+(function()
+  local file = vim.fn.tempname() .. ".lua"
+  vim.fn.writefile({
+    "local M = {}",
+    "function M.greet(name)",
+    "  return 'hello ' .. name",
+    "end",
+    "return M",
+  }, file)
+  vim.cmd("edit " .. vim.fn.fnameescape(file))
+  local bufnr = vim.api.nvim_get_current_buf()
+  local rel = require("nvime.git").repo_relative_path(file) or file
+  -- Record an attribution entry covering lines 2-3
+  require("nvime.attribution").record({
+    file = rel,
+    line1 = 2,
+    line2 = 3,
+    lines = { "function M.greet(name)", "  return 'hello ' .. name" },
+    rationale = "added a greeting helper",
+    provider = "claude",
+    plan_id = "P1",
+    step_id = 1,
+  })
+  vim.api.nvim_win_set_cursor(0, { 3, 0 })
+  local matches = require("nvime.attribution").show_at_cursor()
+  assert(matches, "blame: show_at_cursor returns matches when an entry covers the line")
+  assert(#matches >= 1, "blame: at least one match")
+  local popup = vim.g.nvime_blame_popup
+  assert(popup and popup.bufnr and vim.api.nvim_buf_is_valid(popup.bufnr), "blame: popup buffer created")
+  local popup_lines = vim.api.nvim_buf_get_lines(popup.bufnr, 0, -1, false)
+  local joined = table.concat(popup_lines, "\n")
+  assert(joined:find(rel, 1, true), "blame: popup header lists file:line")
+  assert(joined:find("added a greeting helper", 1, true), "blame: popup includes rationale")
+  assert(joined:find("P1", 1, true), "blame: popup mentions plan id")
+  require("nvime.attribution").close_popup()
+  pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+end)()
+
+-- ---------------------------------------------------------------------------
+-- nvime.mcp_server: JSON-RPC over the in-process API
+-- ---------------------------------------------------------------------------
+;
+(function()
+  -- Earlier IIFEs (notably test_loop) chdir into temp dirs and may not
+  -- restore. Anchor the MCP server's repo_root via env so its tools
+  -- resolve against the actual project regardless of process cwd.
+  local prior_cwd = vim.fn.getcwd()
+  vim.env.NVIME_REPO_ROOT = root
+
+  local server = require("nvime.mcp_server")
+  local function send(req)
+    return server.handle_line(vim.json.encode(req))
+  end
+
+  local init = send({ jsonrpc = "2.0", id = 1, method = "initialize", params = { protocolVersion = "2025-03-26" } })
+  assert(init.result and init.result.serverInfo, "mcp: initialize returns serverInfo")
+  assert_eq(init.result.serverInfo.name, "nvime", "mcp: serverInfo.name is nvime")
+  assert_eq(init.result.protocolVersion, "2025-03-26", "mcp: initialize echoes a supported protocol version")
+
+  local bogus = send({ jsonrpc = "2.0", id = 99, method = "initialize", params = { protocolVersion = "9999-99-99" } })
+  assert(bogus.result.protocolVersion ~= "9999-99-99",
+    "mcp: initialize does NOT echo unsupported client protocol version")
+
+  local list = send({ jsonrpc = "2.0", id = 2, method = "tools/list" })
+  assert(list.result and list.result.tools, "mcp: tools/list returns tools")
+  local names = {}
+  for _, tool in ipairs(list.result.tools) do
+    names[tool.name] = true
+  end
+  assert(names["nvime.list_plans"], "mcp: list_plans tool advertised")
+  assert(names["nvime.recent_audits"], "mcp: recent_audits tool advertised")
+  assert(names["nvime.usage_summary"], "mcp: usage_summary tool advertised")
+  assert(names["nvime.search_attribution"], "mcp: search_attribution tool advertised")
+  assert(names["nvime.get_plan"], "mcp: get_plan tool advertised")
+  assert(names["nvime.tree_sitter_symbols"], "mcp: tree_sitter_symbols tool advertised")
+  assert(names["nvime.git_log"], "mcp: git_log tool advertised")
+  assert(names["nvime.git_blame"], "mcp: git_blame tool advertised")
+  assert(names["nvime.test_run"], "mcp: test_run tool advertised")
+  assert(names["nvime.session_search"], "mcp: session_search tool advertised")
+  assert(names["nvime.session_recent"], "mcp: session_recent tool advertised")
+  assert(names["nvime.recent_diffs"], "mcp: recent_diffs tool advertised")
+
+  local plans = send({
+    jsonrpc = "2.0", id = 3, method = "tools/call",
+    params = { name = "nvime.list_plans", arguments = {} },
+  })
+  assert(plans.result and plans.result.content, "mcp: list_plans returns content")
+  assert_eq(plans.result.content[1].type, "text", "mcp: list_plans content is text")
+
+  local bad = send({
+    jsonrpc = "2.0", id = 4, method = "tools/call",
+    params = { name = "does.not.exist", arguments = {} },
+  })
+  assert(bad.error and bad.error.code == -32601, "mcp: unknown tool returns method-not-found")
+
+  local unknown_method = send({ jsonrpc = "2.0", id = 5, method = "no_such_method" })
+  assert(unknown_method.error and unknown_method.error.code == -32601, "mcp: unknown method returns -32601")
+
+  local notification = send({ jsonrpc = "2.0", method = "notifications/initialized" })
+  assert(notification == nil, "mcp: notifications produce no response")
+
+  local unknown_notification = send({ jsonrpc = "2.0", method = "no_such_notification" })
+  assert(unknown_notification == nil, "mcp: unknown notifications produce no response")
+
+  -- Path traversal must be refused.
+  local traversal_search = send({
+    jsonrpc = "2.0", id = 10, method = "tools/call",
+    params = { name = "nvime.search_attribution", arguments = { file = "../../etc/passwd", line = 1 } },
+  })
+  assert(traversal_search.result and traversal_search.result.isError,
+    "mcp: search_attribution rejects parent traversal")
+
+  local absolute_search = send({
+    jsonrpc = "2.0", id = 11, method = "tools/call",
+    params = { name = "nvime.search_attribution", arguments = { file = "/etc/passwd", line = 1 } },
+  })
+  assert(absolute_search.result and absolute_search.result.isError,
+    "mcp: search_attribution rejects absolute paths")
+
+  do
+    local mcp_repo = vim.fn.tempname() .. "/mcp-repo"
+    local outside = vim.fn.tempname() .. "/outside"
+    vim.fn.mkdir(mcp_repo .. "/inside", "p")
+    vim.fn.mkdir(outside, "p")
+    vim.fn.writefile({ "return 'secret'" }, outside .. "/secret.lua")
+    local link_ok = pcall(vim.loop.fs_symlink, outside, mcp_repo .. "/inside/link")
+    if link_ok then
+      vim.env.NVIME_REPO_ROOT = mcp_repo
+      local symlink_escape = send({
+        jsonrpc = "2.0", id = 13, method = "tools/call",
+        params = { name = "nvime.tree_sitter_symbols", arguments = { file = "inside/link/secret.lua" } },
+      })
+      assert(symlink_escape.result and symlink_escape.result.isError,
+        "mcp: tree_sitter_symbols rejects symlink escapes")
+      vim.env.NVIME_REPO_ROOT = root
+    end
+  end
+
+  local traversal_plan = send({
+    jsonrpc = "2.0", id = 12, method = "tools/call",
+    params = { name = "nvime.get_plan", arguments = { id = "../../.." } },
+  })
+  assert(traversal_plan.result and traversal_plan.result.isError,
+    "mcp: get_plan rejects parent traversal")
+
+  -- tree_sitter_symbols on a real Lua file should yield > 0 symbols when
+  -- the lua tree-sitter parser is reachable; under -u NONE that's not
+  -- always the case, so we accept either a successful symbol list or
+  -- the documented "no parser" error.
+  local ts_call = send({
+    jsonrpc = "2.0", id = 20, method = "tools/call",
+    params = { name = "nvime.tree_sitter_symbols", arguments = { file = "lua/nvime/git.lua" } },
+  })
+  assert(ts_call.result and ts_call.result.content, "mcp: tree_sitter_symbols returns content")
+  if not ts_call.result.isError then
+    local ts_payload = vim.json.decode(ts_call.result.content[1].text)
+    assert_eq(ts_payload.filetype, "lua", "mcp: tree_sitter_symbols infers .lua filetype")
+    assert(ts_payload.count > 0, "mcp: tree_sitter_symbols returns at least one symbol")
+  else
+    -- Accept any documented error path: missing parser / parse failure /
+    -- unknown filetype. We're only verifying we got a structured failure.
+    assert(ts_call.result.content[1].text:sub(1, 6) == "error:",
+      "mcp: tree_sitter_symbols failure path returns a structured error")
+  end
+
+  local ts_traversal = send({
+    jsonrpc = "2.0", id = 21, method = "tools/call",
+    params = { name = "nvime.tree_sitter_symbols", arguments = { file = "../../etc/passwd" } },
+  })
+  assert(ts_traversal.result and ts_traversal.result.isError,
+    "mcp: tree_sitter_symbols rejects parent traversal")
+
+  -- git_log + git_blame against the project itself. The test runs from
+  -- the nvime checkout cwd which IS a git repo, so the happy path
+  -- exercises here. If it fails for any reason (e.g. a sandboxed CI
+  -- with no git binary) we want a clear failure rather than a json
+  -- decode crash.
+  local log_call = send({
+    jsonrpc = "2.0", id = 30, method = "tools/call",
+    params = { name = "nvime.git_log", arguments = { limit = 3 } },
+  })
+  assert(log_call.result and log_call.result.content, "mcp: git_log returns content")
+  assert(not log_call.result.isError,
+    "mcp: git_log succeeds in a git repo (got: " .. (log_call.result.content[1].text or ""):sub(1, 200) .. ")")
+  local log_payload = vim.json.decode(log_call.result.content[1].text)
+  assert(log_payload.commits and #log_payload.commits > 0, "mcp: git_log surfaces real commits")
+  assert(log_payload.commits[1].sha and log_payload.commits[1].author and log_payload.commits[1].subject,
+    "mcp: git_log entries carry sha+author+subject")
+
+  local blame_call = send({
+    jsonrpc = "2.0", id = 31, method = "tools/call",
+    params = { name = "nvime.git_blame", arguments = { path = "README.md", line = 1 } },
+  })
+  assert(blame_call.result and blame_call.result.content, "mcp: git_blame returns content")
+  assert(not blame_call.result.isError,
+    "mcp: git_blame succeeds (got: " .. (blame_call.result.content[1].text or ""):sub(1, 200) .. ")")
+  local blame_payload = vim.json.decode(blame_call.result.content[1].text)
+  assert(blame_payload.sha and blame_payload.author, "mcp: git_blame returns sha+author")
+
+  -- test_run against a synthetic command we know exits 0
+  local run_call = send({
+    jsonrpc = "2.0", id = 40, method = "tools/call",
+    params = { name = "nvime.test_run", arguments = { runner = "echo from-test && exit 0", timeout = 5000 } },
+  })
+  assert(run_call.result and run_call.result.content, "mcp: test_run returns content")
+  local run_payload = vim.json.decode(run_call.result.content[1].text)
+  assert_eq(run_payload.exit_code, 0, "mcp: test_run captures exit code 0")
+  assert(run_payload.stdout_tail:find("from-test", 1, true), "mcp: test_run captures stdout")
+
+  local run_fail = send({
+    jsonrpc = "2.0", id = 41, method = "tools/call",
+    params = { name = "nvime.test_run", arguments = { runner = "echo broke 1>&2 && exit 7", timeout = 5000 } },
+  })
+  local fail_payload = vim.json.decode(run_fail.result.content[1].text)
+  assert_eq(fail_payload.exit_code, 7, "mcp: test_run captures non-zero exit")
+  assert(fail_payload.stderr_tail:find("broke", 1, true), "mcp: test_run captures stderr")
+
+  local recent = send({
+    jsonrpc = "2.0", id = 50, method = "tools/call",
+    params = { name = "nvime.session_recent", arguments = { limit = 5 } },
+  })
+  assert(recent.result and recent.result.content, "mcp: session_recent returns content")
+  local recent_payload = vim.json.decode(recent.result.content[1].text)
+  assert(recent_payload.sessions, "mcp: session_recent returns sessions array")
+
+  local search = send({
+    jsonrpc = "2.0", id = 51, method = "tools/call",
+    params = { name = "nvime.session_search", arguments = { query = "asdfneverappearsxyz", limit = 5 } },
+  })
+  assert(search.result and search.result.content, "mcp: session_search returns content")
+  local search_payload = vim.json.decode(search.result.content[1].text)
+  assert_eq(search_payload.count, 0, "mcp: session_search returns 0 for impossible query")
+
+  local search_missing_query = send({
+    jsonrpc = "2.0", id = 52, method = "tools/call",
+    params = { name = "nvime.session_search", arguments = {} },
+  })
+  assert(search_missing_query.result and search_missing_query.result.isError,
+    "mcp: session_search rejects missing query")
+
+  vim.env.NVIME_REPO_ROOT = nil
+  pcall(vim.api.nvim_set_current_dir, prior_cwd)
+end)()
+
+-- ---------------------------------------------------------------------------
+-- nvime.mcp client: merged config has type=stdio + env on self entry
+-- ---------------------------------------------------------------------------
+;
+(function()
+  require("nvime.state").config.mcp = {
+    enabled = true,
+    expose_self = true,
+    servers = {},
+    config_path = nil,
+  }
+  local mcp = require("nvime.mcp")
+  local cfg = mcp.build_config()
+  assert(cfg.mcpServers.nvime, "mcp client: self server present")
+  assert_eq(cfg.mcpServers.nvime.type, "stdio", "mcp client: self server has type=stdio")
+  assert(cfg.mcpServers.nvime.env and cfg.mcpServers.nvime.env.NVIME_REPO_ROOT,
+    "mcp client: self server passes NVIME_REPO_ROOT env")
+
+  -- expose_self=false drops the self entry
+  require("nvime.state").config.mcp.expose_self = false
+  local cfg2 = require("nvime.mcp").build_config()
+  assert(not cfg2.mcpServers.nvime, "mcp client: self entry omitted when expose_self=false")
+  require("nvime.state").config.mcp.expose_self = true
+end)()
+
+-- ---------------------------------------------------------------------------
+-- nvime.test_loop: pass / fail / max-retries
+-- ---------------------------------------------------------------------------
+;
+(function()
+  local proj = vim.fn.tempname() .. "/loop-proj"
+  vim.fn.mkdir(proj .. "/scripts", "p")
+  local script = proj .. "/scripts/test"
+  vim.fn.writefile({
+    "#!/usr/bin/env sh",
+    "if [ -f \"$(dirname \"$0\")/../broken\" ]; then echo 'fail' >&2; exit 1; fi",
+    "echo 'ok'; exit 0",
+  }, script)
+  vim.fn.setfperm(script, "rwxr-xr-x")
+  vim.fn.writefile({ "stub" }, proj .. "/broken")
+
+  local target = proj .. "/main.lua"
+  vim.fn.writefile({ "-- placeholder", "return {}" }, target)
+  vim.cmd("edit " .. vim.fn.fnameescape(target))
+  local target_bufnr = vim.api.nvim_get_current_buf()
+
+  local prior_cwd = vim.fn.getcwd()
+  vim.api.nvim_set_current_dir(proj)
+
+  require("nvime.state").config.test_loop = {
+    enabled = true,
+    runner = "./scripts/test",
+    auto_fix = false,
+    max_retries = 1,
+    capture_lines = 100,
+  }
+  package.loaded["nvime.test_loop"] = nil
+  local test_loop = require("nvime.test_loop")
+  test_loop.reset_counters()
+
+  -- Stub vim.fn.confirm so the prompt path resolves immediately.
+  local original_confirm = vim.fn.confirm
+  vim.fn.confirm = function() return 2 end
+  local notifications = {}
+  local original_notify = vim.notify
+  vim.notify = function(msg, level)
+    notifications[#notifications + 1] = { msg = msg, level = level }
+  end
+
+  local payload_fail = {
+    accepted = 1,
+    total = 1,
+    target_bufnr = target_bufnr,
+    path = "main.lua",
+    provider = "claude",
+  }
+  test_loop.maybe_run(payload_fail)
+  vim.wait(15000, function()
+    for _, n in ipairs(notifications) do
+      if n.msg:find("exit=1", 1, true) then return true end
+    end
+    return false
+  end, 50)
+  local saw_fail = false
+  for _, n in ipairs(notifications) do
+    if n.msg:find("exit=1", 1, true) then saw_fail = true end
+  end
+  assert(saw_fail, "test_loop: failure path notifies with exit code")
+
+  -- Now make tests pass and verify the success path
+  vim.fn.delete(proj .. "/broken")
+  notifications = {}
+  test_loop.reset_counters()
+  test_loop.maybe_run(payload_fail)
+  vim.wait(15000, function()
+    for _, n in ipairs(notifications) do
+      if n.msg:find("passed", 1, true) then return true end
+    end
+    return false
+  end, 50)
+  local saw_pass = false
+  for _, n in ipairs(notifications) do
+    if n.msg:find("passed", 1, true) then saw_pass = true end
+  end
+  assert(saw_pass, "test_loop: success path emits a 'passed' notification")
+
+  -- Disabled config short-circuits without notifying
+  require("nvime.state").config.test_loop.enabled = false
+  notifications = {}
+  test_loop.maybe_run(payload_fail)
+  vim.wait(500, function() return false end, 50)
+  assert(#notifications == 0, "test_loop: disabled config produces no notifications")
+  require("nvime.state").config.test_loop.enabled = true
+
+  -- accepted=0 short-circuits even when enabled
+  notifications = {}
+  test_loop.maybe_run({ accepted = 0, total = 1, target_bufnr = target_bufnr, path = "main.lua" })
+  vim.wait(500, function() return false end, 50)
+  assert(#notifications == 0, "test_loop: zero accepted blocks short-circuits")
+
+  vim.notify = original_notify
+  vim.fn.confirm = original_confirm
+  vim.api.nvim_set_current_dir(prior_cwd)
+  pcall(vim.api.nvim_buf_delete, target_bufnr, { force = true })
 end)()
 
 print("nvime headless spec passed")

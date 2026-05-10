@@ -21,6 +21,7 @@ local INPUT_PROMPT_LINE = 1
 local sessions_loaded = false
 local save_pending = false
 local active_session
+local get_session
 local SESSION_VERSION = 1
 
 local function sessions_config()
@@ -129,6 +130,7 @@ local function save_sessions_now()
     local encoded = vim.json.encode({
       version = SESSION_VERSION,
       next_session_id = state.chat.next_session_id or 1,
+      active_session_id = state.chat.active_session_id,
       sessions = out,
     })
     local wrote, err1 = fd:write(encoded)
@@ -225,6 +227,10 @@ local function load_sessions()
     end
   end
   state.chat.next_session_id = math.max(tonumber(decoded.next_session_id) or 1, max_id + 1)
+  local restored = tonumber(decoded.active_session_id)
+  if restored and get_session(restored) then
+    state.chat.active_session_id = restored
+  end
 end
 
 local function provider()
@@ -449,7 +455,7 @@ local function create_session(opts)
   return session
 end
 
-local function get_session(id)
+get_session = function(id)
   if not id then
     return nil
   end
@@ -976,6 +982,13 @@ function M.open(opts)
   sync_active_panel_to_session()
 
   local session = opts.session_id and get_session(opts.session_id) or active_session()
+  if not session and not opts.session_id then
+    local newest = M.sessions()[1]
+    if newest then
+      state.chat.active_session_id = newest.id
+      session = get_session(newest.id)
+    end
+  end
   if not session then
     session = create_session()
   end
@@ -1268,6 +1281,7 @@ local function build_conversation_prompt(text, opts)
     "NVIME CHAT MODE.",
     "You are the side agent inside Neovim.",
     "You may answer questions, review code, and suggest changes.",
+    "Do not narrate tool use or progress. Answer with the final findings, reasoning, or next action after inspection.",
     markdown_policy,
     shell_policy,
     web_policy,
@@ -1836,5 +1850,7 @@ end
 function M.sessions_path()
   return sessions_path()
 end
+
+M._build_conversation_prompt = build_conversation_prompt
 
 return M

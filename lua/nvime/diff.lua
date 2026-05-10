@@ -1327,22 +1327,39 @@ local function render_session(session, opts)
   -- rollback if the post-acceptance tests fail.
   if pending == 0 and not session.on_resolved_fired then
     session.on_resolved_fired = true
+    local payload = {
+      accepted = accepted,
+      total = #session.blocks,
+      original_lines = session.original_lines,
+      target_bufnr = session.target_bufnr,
+      path = session.file,
+      session = session,
+      rationale = session.rationale,
+      verdict = session.verdict,
+      provider = session.provider,
+      applied_history = session.applied_history,
+      plan_id = session.plan_id,
+      plan_step_id = session.plan_step_id,
+    }
     if type(session.on_resolved) == "function" then
-      pcall(session.on_resolved, {
-        accepted = accepted,
-        total = #session.blocks,
-        original_lines = session.original_lines,
-        target_bufnr = session.target_bufnr,
-        path = session.file,
-        -- Extended payload (consumed by plan.md changelog hook and the
-        -- attribution ledger). The rationale is the patch worker's one-line
-        -- self-check; the verdict is the critic agent's APPROVE/FLAG/REJECT
-        -- when devil's-advocate is enabled.
-        rationale = session.rationale,
-        verdict = session.verdict,
-        provider = session.provider,
-        applied_history = session.applied_history,
-      })
+      pcall(session.on_resolved, payload)
+    end
+    audit.write({
+      event = "diff_resolved",
+      path = payload.path,
+      accepted = payload.accepted,
+      total = payload.total,
+      provider = payload.provider,
+      plan_id = payload.plan_id,
+      plan_step_id = payload.plan_step_id,
+      rationale = payload.rationale,
+      verdict = payload.verdict,
+    })
+    -- Fire global post-resolve hooks (e.g. nvime.test_loop). Listed in
+    -- state.diff_post_resolve_hooks so each module can register itself
+    -- once at setup() and stay decoupled from per-session callers.
+    for _, hook in ipairs(state.diff_post_resolve_hooks or {}) do
+      pcall(hook, payload)
     end
   end
   if not opts.silent then

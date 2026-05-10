@@ -208,6 +208,13 @@ Normal edit mode says:
 - "Do not edit files directly."
 - "Prefer NVIME_DIFF for any change to existing nonblank text."
 - "NVIME_DIFF must include --- a/path, +++ b/path, and ranged @@ headers."
+- "If nvime MCP tools are available", use their bounded project context helpers
+  before broad shell exploration.
+- "Precomputed nvime project context" may be included with repo root, detected
+  test runner, related test excerpts, nearby symbols, and recent accepted diffs.
+- "Before patching, you MUST do a verification pass" across the user's explicit
+  requirements, and parser/validator/path-helper edits must "consume/validate
+  the full input".
 
 Perf edit mode says:
 
@@ -229,8 +236,12 @@ Critic mode (devil's advocate) says:
 Plan author mode says:
 
 - "You are an architect drafting a structured implementation plan."
+- "Do not narrate tool use, investigation progress, or status updates."
 - "You MUST NOT modify any source code."
 - "You MAY create or edit files only inside `.nvime/plans/<plan-id>/`."
 - "Decompose into ORDERED steps. Each step targets exactly ONE file and ONE range."
+- Runtime behavior work that needs implementation plus tests is invalid with
+  fewer than 3 steps; split tests/compatibility into separate reviewable steps
+  rather than collapsing implementation and tests together.
 - "Acceptance items must be CHECKABLE — prefer commands and observable behavior."
 - "Emit one final NVIME_PLAN marker confirming the plan id, summary, step count, and files."

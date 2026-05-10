@@ -33,6 +33,7 @@ local M = {
     active_run = nil,
     last_opened = nil,
   },
+  diff_post_resolve_hooks = {},
 }
 
 return M

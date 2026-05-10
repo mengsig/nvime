@@ -1,7 +1,9 @@
 local audit = require("nvime.audit")
 local git = require("nvime.git")
 local policy = require("nvime.policy")
+local shellguard = require("nvime.shellguard")
 local state = require("nvime.state")
+local usage = require("nvime.usage")
 
 local M = {}
 
@@ -77,6 +79,9 @@ local function claude_nonreview_disallowed()
   if not selection_allows_web() then
     disallowed[#disallowed + 1] = claude_web_disallowed_tools()
   end
+  if selection_allows_shell() then
+    disallowed[#disallowed + 1] = shellguard.claude_disallow_patterns()
+  end
   return table.concat(disallowed, ",")
 end
 
@@ -89,6 +94,9 @@ local function claude_review_disallowed(markdown_writes)
   end
   if not review_allows_web() then
     disallowed[#disallowed + 1] = claude_web_disallowed_tools()
+  end
+  if review_allows_shell() then
+    disallowed[#disallowed + 1] = shellguard.claude_disallow_patterns()
   end
   return table.concat(disallowed, ",")
 end
@@ -117,6 +125,7 @@ local function claude_plan_disallowed()
   if not review_allows_web() then
     disallowed[#disallowed + 1] = claude_web_disallowed_tools()
   end
+  disallowed[#disallowed + 1] = shellguard.claude_disallow_patterns()
   return table.concat(disallowed, ",")
 end
 
@@ -201,6 +210,35 @@ local function claude_args(cfg, lane, prompt, run_opts)
     })
   end
 
+  -- Inject MCP servers (user-defined + nvime's own self-server) when
+  -- enabled. The critic lane stays mcp-free; only the working lanes
+  -- benefit from the extra tool surface.
+  if lane ~= "critic" then
+    local ok_mcp, mcp = pcall(require, "nvime.mcp")
+    if ok_mcp then
+      local config_path = mcp.config_path()
+      if config_path then
+        vim.list_extend(args, { "--mcp-config", config_path })
+        -- Claude requires every MCP tool to appear in --allowedTools.
+        -- Find the existing --tools / --allowedTools entries and append
+        -- one mcp__<server> grant per configured server (this wildcard
+        -- form covers every tool that server exposes).
+        local server_grants = {}
+        for name, _ in pairs(mcp.servers()) do
+          server_grants[#server_grants + 1] = "mcp__" .. name
+        end
+        if #server_grants > 0 then
+          local extra = "," .. table.concat(server_grants, ",")
+          for i = 1, #args - 1 do
+            if args[i] == "--tools" or args[i] == "--allowedTools" then
+              args[i + 1] = args[i + 1] .. extra
+            end
+          end
+        end
+      end
+    end
+  end
+
   return args
 end
 
@@ -253,6 +291,55 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
     "-C",
     cwd or repo_root(),
   })
+
+  -- Inject MCP servers via -c overrides. Codex stores mcp_servers in
+  -- config.toml; --ignore-user-config wipes the user's config so the
+  -- overrides we pass become the entire MCP namespace. Same servers
+  -- claude sees via --mcp-config. Codex still auto-cancels MCP tool
+  -- calls in non-interactive exec mode unless the explicit bypass flag
+  -- below is enabled.
+  -- Critic + perf lanes stay MCP-free (critic is a verdict-only call;
+  -- perf runs in a /tmp scratch dir where the project tools don't help).
+  if lane ~= "critic" and lane ~= "perf" then
+    local ok_mcp, mcp = pcall(require, "nvime.mcp")
+    if ok_mcp then
+      local servers = mcp.servers() or {}
+      local has_servers = false
+      for name, entry in pairs(servers) do
+        if type(entry) == "table" and entry.command then
+          has_servers = true
+          local prefix = "mcp_servers." .. name
+          local function toml_string(s)
+            return string.format("%q", tostring(s))
+          end
+          vim.list_extend(args, { "-c", prefix .. ".command=" .. toml_string(entry.command) })
+          if type(entry.args) == "table" and #entry.args > 0 then
+            local quoted = {}
+            for _, a in ipairs(entry.args) do
+              quoted[#quoted + 1] = toml_string(a)
+            end
+            vim.list_extend(args, { "-c", prefix .. ".args=[" .. table.concat(quoted, ",") .. "]" })
+          end
+          if type(entry.env) == "table" then
+            for k, v in pairs(entry.env) do
+              vim.list_extend(args, { "-c", prefix .. ".env." .. k .. "=" .. toml_string(v) })
+            end
+          end
+        end
+      end
+      if has_servers then
+        vim.list_extend(args, { "-c", "approval_policy=\"never\"" })
+        -- Codex auto-cancels MCP tool calls in `exec` mode unless we set
+        -- this flag, which also turns off codex's OS-level sandbox.
+        -- Gated behind explicit config so users opt-in knowingly.
+        local mcp_cfg = (state.config or {}).mcp or {}
+        if mcp_cfg.codex_bypass_for_mcp == true then
+          args[#args + 1] = "--dangerously-bypass-approvals-and-sandbox"
+        end
+      end
+    end
+  end
+
   return args
 end
 
@@ -575,6 +662,13 @@ local function parse_claude(line)
     return attach_session({ progress = "[claude] session started\n" })
   end
 
+  if decoded.type == "result" then
+    local sample = usage.parse_claude(decoded)
+    if sample then
+      return attach_session({ usage = sample })
+    end
+  end
+
   return session_id and attach_session({}) or nil
 end
 
@@ -642,6 +736,12 @@ local function parse_codex(line)
   if decoded.type == "turn.failed" and decoded.error then
     return out({ text = "\n[failed] " .. tostring(decoded.error) .. "\n" })
   end
+  if decoded.type == "turn.completed" then
+    local sample = usage.parse_codex(decoded)
+    if sample then
+      return out({ usage = sample })
+    end
+  end
   return session_id and out({}) or nil
 end
 
@@ -666,6 +766,7 @@ end
 
 local function consume_chunks(provider, on_text, on_progress, on_session_id, opts)
   opts = opts or {}
+  local on_usage = opts.on_usage or function() end
   local parse = parser_for(provider)
   local pending = ""
   local last_progress = nil
@@ -716,6 +817,9 @@ local function consume_chunks(provider, on_text, on_progress, on_session_id, opt
         last_progress = parsed.progress
         on_progress(parsed.progress)
       end
+    end
+    if parsed.usage then
+      on_usage(parsed.usage)
     end
   end
   return function(_err, data)
@@ -796,10 +900,28 @@ function M.run(opts)
       on_session_id(session_id)
     end
   end
-  local stdout, drain_stdout = consume_chunks(provider, on_text, on_progress, handle_session_id)
+  local observed_usage = nil
+  local function handle_usage(sample)
+    if not sample then
+      return
+    end
+    if not observed_usage then
+      observed_usage = sample
+      return
+    end
+    -- Multiple result events in one run (claude follow-on turns) — sum.
+    observed_usage.input = (observed_usage.input or 0) + (sample.input or 0)
+    observed_usage.output = (observed_usage.output or 0) + (sample.output or 0)
+    observed_usage.cache_read = (observed_usage.cache_read or 0) + (sample.cache_read or 0)
+    observed_usage.cache_creation = (observed_usage.cache_creation or 0) + (sample.cache_creation or 0)
+    observed_usage.reasoning = (observed_usage.reasoning or 0) + (sample.reasoning or 0)
+    observed_usage.cost_usd = (observed_usage.cost_usd or 0) + (sample.cost_usd or 0)
+    observed_usage.model = sample.model or observed_usage.model
+  end
+  local stdout, drain_stdout = consume_chunks(provider, on_text, on_progress, handle_session_id, { on_usage = handle_usage })
   local stderr, drain_stderr = consume_chunks(provider, function(text)
     on_text(text)
-  end, on_progress, handle_session_id, { stderr = true })
+  end, on_progress, handle_session_id, { stderr = true, on_usage = handle_usage })
   drain = function()
     drain_stdout()
     drain_stderr()
@@ -826,6 +948,7 @@ function M.run(opts)
       stdout = stdout,
       stderr = stderr,
       cwd = cwd,
+      env = shellguard.build_env(),
     }
     if stdin ~= nil then
       system_opts.stdin = stdin
@@ -836,6 +959,14 @@ function M.run(opts)
       vim.schedule(function()
         local synced = sync_markdown_workspace(workspace)
         local synced_plans = sync_plan_workspace(plan_workspace)
+        local recorded_usage
+        if observed_usage then
+          recorded_usage = usage.record({
+            sample = observed_usage,
+            provider = provider,
+            lane = lane,
+          })
+        end
         audit.write({
           event = "agent_exit",
           lane = lane,
@@ -846,10 +977,13 @@ function M.run(opts)
           provider_session_id = observed_session_id,
           synced_markdown = synced,
           synced_plan_files = synced_plans,
+          usage = observed_usage,
         })
         result.nvime_synced_markdown = synced
         result.nvime_synced_plan_files = synced_plans
         result.nvime_provider_session_id = observed_session_id
+        result.nvime_usage = observed_usage
+        result.nvime_usage_record = recorded_usage
         local ok, err = pcall(on_exit, result)
         cleanup_workspace(workspace)
         if plan_workspace and plan_workspace.tmp then

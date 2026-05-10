@@ -320,4 +320,7 @@ function M.start(opts)
   run(selection, question, provider, { session_id = opts.session_id, new_session = opts.new_session })
 end
 
+M._build_prompt = build_prompt
+M._wants_edit_followup = wants_edit_followup
+
 return M

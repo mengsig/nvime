@@ -170,6 +170,12 @@ local function install_keymaps()
     end
     plan.picker()
   end, "nvime plans (or refocus)")
+  set_keymap("n", prefix .. (normal.blame or "b"), function()
+    require("nvime.attribution").show_at_cursor()
+  end, "nvime blame: agent attribution for current line")
+  set_keymap("n", prefix .. (normal.usage or "u"), function()
+    require("nvime.usage").open_panel()
+  end, "nvime usage: token + cost dashboard")
 
   set_keymap("x", prefix .. (visual.edit or "e"), visual_edit, "nvime edit visual selection")
   set_keymap("x", prefix .. (visual.ask or "q"), visual_ask, "nvime ask about visual selection")
@@ -276,6 +282,10 @@ function M.setup(opts)
   if state.config.guard.enabled and not state.disabled then
     policy.install()
   end
+
+  pcall(function()
+    require("nvime.test_loop").setup()
+  end)
 
   vim.api.nvim_create_user_command("NvimeReview", function(args)
     require("nvime.review").start(command_opts(args))
@@ -423,7 +433,7 @@ function M.setup(opts)
 
   vim.api.nvim_create_user_command("NvimeAttribute", function(args)
     local attribution = require("nvime.attribution")
-    local sub = (args.args or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local sub = vim.trim(args.args or "")
     if sub == "show" or sub == "on" then
       attribution.toggle_overlay(nil, "show")
     elseif sub == "hide" or sub == "off" or sub == "clear" then
@@ -439,6 +449,129 @@ function M.setup(opts)
       return { "show", "hide", "toggle" }
     end,
     desc = "Show nvime attribution for the current line, or toggle the inline overlay",
+  })
+
+  vim.api.nvim_create_user_command("NvimeBlame", function(args)
+    local sub = vim.trim(args.args or "")
+    if sub == "notify" then
+      require("nvime.attribution").show_at_cursor({ notify = true })
+    else
+      require("nvime.attribution").show_at_cursor()
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      return { "notify" }
+    end,
+    desc = "Show nvime agent attribution popup for the line under the cursor",
+  })
+
+  vim.api.nvim_create_user_command("NvimeUsage", function(args)
+    local usage = require("nvime.usage")
+    local sub = vim.trim(args.args or "")
+    if sub == "reset" then
+      usage.reset()
+      vim.notify("nvime usage: counters reset", vim.log.levels.INFO)
+    elseif sub == "summary" then
+      vim.notify(usage.summary_text(), vim.log.levels.INFO)
+    else
+      usage.open_panel()
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      return { "summary", "reset" }
+    end,
+    desc = "Open nvime token + cost dashboard, or print summary",
+  })
+
+  vim.api.nvim_create_user_command("NvimeMcp", function(args)
+    local sub = vim.trim(args.args or "")
+    local mcp = require("nvime.mcp")
+    if sub == "list" or sub == "" then
+      local servers = mcp.servers()
+      local names = {}
+      for name, _ in pairs(servers) do
+        names[#names + 1] = name
+      end
+      table.sort(names)
+      local out = { "nvime mcp servers:" }
+      for _, name in ipairs(names) do
+        local entry = servers[name]
+        out[#out + 1] = string.format(
+          "  %s — %s %s",
+          name,
+          entry.command or "?",
+          table.concat(entry.args or {}, " ")
+        )
+      end
+      out[#out + 1] = "merged config: " .. tostring(mcp.config_path() or "(none)")
+      out[#out + 1] = "project file:  " .. mcp.project_config_path()
+      vim.notify(table.concat(out, "\n"), vim.log.levels.INFO)
+    elseif sub == "config" then
+      local path = mcp.config_path()
+      if not path then
+        vim.notify("nvime mcp: no servers configured", vim.log.levels.WARN)
+        return
+      end
+      vim.cmd("edit " .. vim.fn.fnameescape(path))
+    elseif sub == "edit" then
+      local path = mcp.project_config_path()
+      vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
+      if vim.fn.filereadable(path) ~= 1 then
+        vim.fn.writefile({ '{', '  "mcpServers": {', '  }', '}' }, path)
+      end
+      vim.cmd("edit " .. vim.fn.fnameescape(path))
+    else
+      vim.notify("nvime mcp: usage `:NvimeMcp [list|config|edit]`", vim.log.levels.WARN)
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      return { "list", "config", "edit" }
+    end,
+    desc = "List or edit nvime MCP server configuration",
+  })
+
+  vim.api.nvim_create_user_command("NvimeTestLoop", function(args)
+    local sub = vim.trim(args.args or "")
+    local cfg = state.config.test_loop or {}
+    if sub == "on" or sub == "enable" then
+      cfg.enabled = true
+      vim.notify("nvime test_loop: enabled (auto_fix=" .. tostring(cfg.auto_fix == true) .. ")", vim.log.levels.INFO)
+    elseif sub == "off" or sub == "disable" then
+      cfg.enabled = false
+      vim.notify("nvime test_loop: disabled", vim.log.levels.INFO)
+    elseif sub == "auto" then
+      cfg.enabled = true
+      cfg.auto_fix = true
+      vim.notify("nvime test_loop: auto_fix on", vim.log.levels.INFO)
+    elseif sub == "ask" then
+      cfg.enabled = true
+      cfg.auto_fix = false
+      vim.notify("nvime test_loop: ask before fix", vim.log.levels.INFO)
+    elseif sub == "reset" then
+      require("nvime.test_loop").reset_counters()
+      vim.notify("nvime test_loop: retry counters reset", vim.log.levels.INFO)
+    else
+      local plan_cfg = state.config.plan or {}
+      vim.notify(
+        string.format(
+          "nvime test_loop: enabled=%s auto_fix=%s max_retries=%s runner=%s",
+          tostring(cfg.enabled == true),
+          tostring(cfg.auto_fix == true),
+          tostring(cfg.max_retries or 2),
+          cfg.runner or plan_cfg.test_runner or require("nvime.plan").detect_test_runner() or "(none)"
+        ),
+        vim.log.levels.INFO
+      )
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      return { "on", "off", "auto", "ask", "reset" }
+    end,
+    desc = "Configure nvime's after-diff test-feedback loop",
   })
 
   vim.api.nvim_create_user_command("NvimePlanClose", function()
@@ -463,6 +596,9 @@ function M.setup(opts)
     callback = function()
       require("nvime.chat").flush_sessions()
       require("nvime.selection").flush_sessions()
+      pcall(function()
+        require("nvime.usage").flush()
+      end)
     end,
   })
 

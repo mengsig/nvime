@@ -159,4 +159,171 @@ function M.lines(range)
   return vim.api.nvim_buf_get_lines(bufnr, start_idx, end_idx, false)
 end
 
+-- Maps tree-sitter node types to a short symbol "kind". The kind set is
+-- intentionally coarse — agents use it to filter the symbol list, not to
+-- reason about language semantics. Anything not in the table is skipped.
+local SYMBOL_KIND = {
+  -- functions / methods (most languages)
+  function_declaration = "function",
+  function_definition = "function",
+  function_item = "function",
+  function_statement = "function",
+  function_specifier = "function",
+  method_declaration = "method",
+  method_definition = "method",
+  arrow_function = "function",
+  lambda_expression = "function",
+  constructor_declaration = "method",
+  -- types / structures
+  class_declaration = "class",
+  class_definition = "class",
+  class_specifier = "class",
+  struct_item = "struct",
+  struct_specifier = "struct",
+  struct_definition = "struct",
+  enum_item = "enum",
+  enum_declaration = "enum",
+  enum_specifier = "enum",
+  union_specifier = "union",
+  trait_item = "trait",
+  interface_declaration = "interface",
+  type_alias = "typealias",
+  type_alias_declaration = "typealias",
+  type_definition = "typealias",
+  -- modules / namespaces
+  module = "module",
+  module_declaration = "module",
+  namespace_definition = "namespace",
+  namespace_declaration = "namespace",
+  package_declaration = "package",
+}
+
+local NAME_FIELD_CANDIDATES = { "name", "declarator" }
+
+-- Some Tree-sitter grammars wrap the name in a deeper node (e.g. C/C++
+-- function_declarator → identifier). Walk down through these wrapper
+-- types to reach the actual leaf identifier.
+local NAME_UNWRAP_TYPES = {
+  function_declarator = true,
+  init_declarator = true,
+  pointer_declarator = true,
+  reference_declarator = true,
+  identifier_pattern = true,
+  scoped_identifier = true,
+  qualified_identifier = true,
+}
+
+local function node_text(node, bufnr)
+  if not node or not bufnr then
+    return nil
+  end
+  local ok, text = pcall(vim.treesitter.get_node_text, node, bufnr)
+  if not ok or type(text) ~= "string" then
+    return nil
+  end
+  return text
+end
+
+local UNWRAP_MAX_DEPTH = 8
+
+local function unwrap_to_identifier(node)
+  if not node then
+    return nil
+  end
+  local current = node
+  for _ = 1, UNWRAP_MAX_DEPTH do
+    if not NAME_UNWRAP_TYPES[current:type()] then
+      return current
+    end
+    local inner = current:field("declarator")
+    local next_node
+    if inner and inner[1] then
+      next_node = inner[1]
+    else
+      next_node = current:named_child(0)
+    end
+    if not next_node or next_node == current then
+      return current
+    end
+    current = next_node
+  end
+  return current
+end
+
+local function find_name(node, bufnr)
+  if not node then
+    return nil
+  end
+  for _, field in ipairs(NAME_FIELD_CANDIDATES) do
+    local ok, candidates = pcall(node.field, node, field)
+    if ok and candidates and candidates[1] then
+      local text = node_text(unwrap_to_identifier(candidates[1]), bufnr)
+      if text and text ~= "" then
+        return text
+      end
+    end
+  end
+  for child in node:iter_children() do
+    local t = child:type()
+    if t == "identifier" or t == "name" then
+      local text = node_text(child, bufnr)
+      if text and text ~= "" then
+        return text
+      end
+    end
+  end
+  return nil
+end
+
+-- Walk the parse tree and emit a list of definition-like symbols. Each
+-- entry has { kind, name, line_start, line_end, parent }. Parent is the
+-- enclosing definition's name (or nil at the top level).
+--
+-- Returns nil + error string when the buffer has no Tree-sitter parser
+-- (which is the common case for languages whose parser is not in the
+-- runtime path of the hosting nvim — e.g. the MCP server's --clean
+-- subprocess only ships nvim's builtin parsers).
+function M.walk_symbols(bufnr)
+  if not is_valid_buf(bufnr) then
+    return nil, "invalid buffer"
+  end
+  local parser_ok, parser = pcall(vim.treesitter.get_parser, bufnr)
+  if not parser_ok or not parser then
+    return nil, "no tree-sitter parser for this buffer"
+  end
+  local parse_ok = pcall(function()
+    parser:parse()
+  end)
+  if not parse_ok then
+    return nil, "tree-sitter parse failed"
+  end
+  local trees = parser:trees()
+  if not trees or not trees[1] then
+    return {}
+  end
+  local root = trees[1]:root()
+  local out = {}
+  local function visit(node, parent_name)
+    local kind = SYMBOL_KIND[node:type()]
+    local emitted_parent = parent_name
+    if kind then
+      local name = find_name(node, bufnr) or "<anonymous>"
+      local sr, _, er = node:range()
+      out[#out + 1] = {
+        kind = kind,
+        name = name,
+        line_start = sr + 1,
+        line_end = er + 1,
+        parent = parent_name,
+      }
+      emitted_parent = parent_name and (parent_name .. "." .. name) or name
+    end
+    for child in node:iter_children() do
+      visit(child, emitted_parent)
+    end
+  end
+  visit(root, nil)
+  return out
+end
+
 return M

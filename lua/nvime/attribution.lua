@@ -255,7 +255,88 @@ local function format_entry(entry)
   return lines
 end
 
-function M.show_at_cursor()
+local function close_blame_popup()
+  local popup = vim.g.nvime_blame_popup
+  if not popup then
+    return
+  end
+  vim.g.nvime_blame_popup = nil
+  if popup.winid and vim.api.nvim_win_is_valid(popup.winid) then
+    pcall(vim.api.nvim_win_close, popup.winid, true)
+  end
+  if popup.bufnr and vim.api.nvim_buf_is_valid(popup.bufnr) then
+    pcall(vim.api.nvim_buf_delete, popup.bufnr, { force = true })
+  end
+end
+
+local function open_blame_popup(lines, opts)
+  close_blame_popup()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].swapfile = false
+  vim.bo[bufnr].filetype = "nvime-blame"
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.bo[bufnr].modifiable = false
+  vim.bo[bufnr].readonly = true
+
+  local width = 0
+  for _, line in ipairs(lines) do
+    width = math.max(width, vim.fn.strdisplaywidth(line))
+  end
+  width = math.min(math.max(width + 2, 32), math.max(40, vim.o.columns - 4))
+  local height = math.min(#lines, math.max(6, vim.o.lines - 6))
+
+  local winid = vim.api.nvim_open_win(bufnr, false, {
+    relative = "cursor",
+    row = 1,
+    col = 0,
+    width = width,
+    height = height,
+    style = "minimal",
+    border = (((state.config or {}).ui or {}).border) or "rounded",
+    title = " " .. (opts and opts.title or "nvime attribution") .. " ",
+    title_pos = "left",
+    zindex = 60,
+  })
+  vim.wo[winid].wrap = false
+  vim.wo[winid].cursorline = false
+  vim.wo[winid].winhighlight = "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle"
+
+  vim.g.nvime_blame_popup = { winid = winid, bufnr = bufnr }
+
+  local group = vim.api.nvim_create_augroup("NvimeBlamePopup", { clear = true })
+  vim.api.nvim_create_autocmd({ "CursorMoved", "InsertEnter", "BufLeave", "WinLeave" }, {
+    group = group,
+    once = true,
+    callback = close_blame_popup,
+  })
+  vim.keymap.set("n", "q", close_blame_popup, { buffer = bufnr, silent = true, desc = "close nvime blame" })
+  vim.keymap.set("n", "<Esc>", close_blame_popup, { buffer = bufnr, silent = true, desc = "close nvime blame" })
+
+  return bufnr, winid
+end
+
+local function build_blame_lines(rel, lineno, matches)
+  local lines = { string.format("%s:%d", rel, lineno), string.rep("─", 32) }
+  for index, entry in ipairs(matches) do
+    if index > 1 then
+      lines[#lines + 1] = ""
+    end
+    local span = string.format("lines %d-%d", entry.match_line1, entry.match_line2)
+    lines[#lines + 1] = span
+    for _, line in ipairs(format_entry(entry)) do
+      lines[#lines + 1] = "  " .. line
+    end
+    if entry.diff_session_id then
+      lines[#lines + 1] = "  diff: " .. tostring(entry.diff_session_id)
+    end
+  end
+  return lines
+end
+
+function M.show_at_cursor(opts)
+  opts = opts or {}
   local bufnr = vim.api.nvim_get_current_buf()
   local name = vim.api.nvim_buf_get_name(bufnr)
   if name == "" then
@@ -267,18 +348,20 @@ function M.show_at_cursor()
   local buf_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local matches = M.for_line(rel, lineno, buf_lines)
   if #matches == 0 then
-    vim.notify("nvime attribution: no recorded entry covers this line", vim.log.levels.INFO)
-    return
+    vim.notify("nvime blame: no recorded entry covers this line", vim.log.levels.INFO)
+    return nil
   end
-  local out = { string.format("nvime attribution · %s:%d", rel, lineno) }
-  for _, entry in ipairs(matches) do
-    out[#out + 1] = "  ── lines " .. tostring(entry.match_line1) .. "-" .. tostring(entry.match_line2)
-    for _, line in ipairs(format_entry(entry)) do
-      out[#out + 1] = "    " .. line
-    end
+  local lines = build_blame_lines(rel, lineno, matches)
+  if opts.notify then
+    vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+    return matches
   end
-  vim.notify(table.concat(out, "\n"), vim.log.levels.INFO)
+  open_blame_popup(lines, { title = "nvime blame · " .. rel })
+  return matches
 end
+
+M.close_popup = close_blame_popup
+M._build_blame_lines = build_blame_lines
 
 local function clear_overlay(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, OVERLAY_NS, 0, -1)

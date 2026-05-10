@@ -1536,6 +1536,13 @@ local function detect_test_runner()
   if exists("pyproject.toml") or exists("pytest.ini") or exists("setup.py") then
     return "pytest -q"
   end
+  local python_tests = vim.fn.globpath(root, "test_*.py", false, true)
+  if #python_tests == 0 then
+    python_tests = vim.fn.globpath(root, "tests/test*.py", false, true)
+  end
+  if #python_tests > 0 then
+    return "python -m unittest -q"
+  end
   if exists("package.json") then
     return "npm test --silent"
   end
@@ -2479,6 +2486,7 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "NVIME PLAN AUTHOR MODE.",
   "",
   "You are an architect drafting a structured implementation plan for a code change in this repository.",
+  "Do not narrate tool use, investigation progress, or status updates. Your final stdout must start with NVIME_PLAN.",
   "",
   "You MUST NOT modify any source code under the repository root EXCEPT under `.nvime/plans/<plan-id>/`.",
   "nvime synchronizes ONLY files under `.nvime/plans/` back to the user's repository when you exit; anything else you write is silently dropped.",
@@ -2496,6 +2504,7 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   '     - Targets exactly ONE file and ONE range (existing range, or "new" for a new file).',
   "     - Is small enough to apply through a focused diff review (~5-100 lines).",
   "     - Has CHECKABLE acceptance criteria — prefer shell commands and observable behavior.",
+  "     - For runtime behavior work that needs implementation plus tests, the plan is INVALID with fewer than 3 steps. If only two files are touched, split one file into multiple range-specific test/compatibility steps rather than collapsing the plan.",
   "  4. Write `.nvime/plans/<plan-id>/plan.json` with the schema below.",
   "  5. Write `.nvime/plans/<plan-id>/plan.md` — a human-readable narrative a future engineer can read cold.",
   "  6. Emit ONE machine-readable marker as the FINAL output (no other prose):",
@@ -2535,6 +2544,7 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "  - Read enough of the actual code to ground every line/range you cite.",
   "  - If the work has uncertainty, encode the choice in `notes`. Don't punt.",
   "  - Prefer 4-12 small steps over 1-2 huge steps.",
+  "  - For runtime behavior changes, produce at least 3 steps: focused regression test(s), implementation, and compatibility/edge coverage. Do not collapse tests and implementation into a 1-2 step plan.",
   "  - If the codebase already has a tracked roadmap (e.g. IMPROVEMENTS.md), cite the relevant section in `why`.",
   "",
   "Tests are load-bearing:",
@@ -3843,5 +3853,7 @@ end
 function M.plans_dir()
   return plans_dir()
 end
+
+M._build_author_prompt = build_author_prompt
 
 return M

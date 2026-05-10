@@ -38,6 +38,322 @@ local function selection_body_and_fence(selection)
   return selected_display, code_fence_for(selected_display)
 end
 
+local function edit_config()
+  return (state.config or {}).edit or {}
+end
+
+local function context_enabled()
+  return edit_config().inject_context ~= false
+end
+
+local function root_dir(selection)
+  if selection and selection.bufnr and vim.api.nvim_buf_is_valid(selection.bufnr) then
+    local name = vim.api.nvim_buf_get_name(selection.bufnr)
+    if name and name ~= "" then
+      return git.repo_root(vim.fn.fnamemodify(name, ":p:h"))
+    end
+  end
+  return git.repo_root()
+end
+
+local function rel_join(dir, name)
+  if not dir or dir == "" or dir == "." then
+    return name
+  end
+  return dir .. "/" .. name
+end
+
+local function normalize_rel(rel)
+  if not rel or rel == "" then
+    return nil
+  end
+  rel = rel:gsub("\\", "/"):gsub("^%./", "")
+  if rel:sub(1, 1) == "/" then
+    return nil
+  end
+  for segment in rel:gmatch("[^/]+") do
+    if segment == ".." then
+      return nil
+    end
+  end
+  return rel
+end
+
+local function root_relative(root, path)
+  if not path or path == "" then
+    return nil
+  end
+  path = path:gsub("\\", "/")
+  if path:sub(1, 1) ~= "/" then
+    return normalize_rel(path)
+  end
+  local abs_root = vim.fn.fnamemodify(root, ":p"):gsub("/$", "")
+  local abs_path = vim.fn.fnamemodify(path, ":p"):gsub("/$", "")
+  if vim.fs and vim.fs.relpath then
+    local rel = vim.fs.relpath(abs_root, abs_path)
+    if rel and rel ~= "" then
+      return normalize_rel(rel)
+    end
+  end
+  if abs_path:sub(1, #abs_root + 1) == abs_root .. "/" then
+    return normalize_rel(abs_path:sub(#abs_root + 2))
+  end
+  return nil
+end
+
+local function readable_rel(root, rel)
+  rel = normalize_rel(rel)
+  if not rel then
+    return false
+  end
+  return vim.fn.filereadable(root .. "/" .. rel) == 1
+end
+
+local function add_unique(out, seen, root, rel)
+  rel = normalize_rel(rel)
+  if not rel or seen[rel] or not readable_rel(root, rel) then
+    return
+  end
+  seen[rel] = true
+  out[#out + 1] = rel
+end
+
+local function related_test_files(selection, root)
+  local limit = math.max(0, tonumber(edit_config().related_test_limit) or 4)
+  if limit == 0 or not selection or not selection.path then
+    return {}
+  end
+  local out, seen = {}, {}
+  local path = root_relative(root, selection.path)
+  if not path then
+    return out
+  end
+  local dir = vim.fn.fnamemodify(path, ":h")
+  local base = vim.fn.fnamemodify(path, ":t:r")
+  local ext = vim.fn.fnamemodify(path, ":e")
+  local suffix = ext ~= "" and ("." .. ext) or ""
+  local candidates = {
+    "test_" .. base .. suffix,
+    base .. "_test" .. suffix,
+    base .. "_spec" .. suffix,
+    rel_join(dir, "test_" .. base .. suffix),
+    rel_join(dir, base .. "_test" .. suffix),
+    rel_join(dir, base .. "_spec" .. suffix),
+    "tests/test_" .. base .. suffix,
+    "tests/" .. base .. "_test" .. suffix,
+    "tests/" .. base .. "_spec" .. suffix,
+    "test/test_" .. base .. suffix,
+    "test/" .. base .. "_test" .. suffix,
+    "spec/" .. base .. "_spec" .. suffix,
+  }
+  for _, rel in ipairs(candidates) do
+    add_unique(out, seen, root, rel)
+    if #out >= limit then
+      return out
+    end
+  end
+  local ok_plan, plan = pcall(require, "nvime.plan")
+  if ok_plan and type(plan.detect_test_file) == "function" then
+    add_unique(out, seen, root, plan.detect_test_file())
+  end
+  while #out > limit do
+    out[#out] = nil
+  end
+  return out
+end
+
+local function detected_test_runner(related, root)
+  local cfg = state.config or {}
+  local configured = (cfg.test_loop or {}).runner or (cfg.plan or {}).test_runner
+  if configured and configured ~= "" then
+    return configured
+  end
+  root = root or root_dir()
+  local function exists(rel)
+    return vim.fn.filereadable(root .. "/" .. rel) == 1 or vim.fn.isdirectory(root .. "/" .. rel) == 1
+  end
+  if exists("scripts/test") then
+    return "./scripts/test"
+  end
+  if exists("Cargo.toml") then
+    return "cargo test --quiet"
+  end
+  if exists("build.zig") then
+    return "zig build test"
+  end
+  if exists("go.mod") then
+    return "go test ./..."
+  end
+  if exists("pyproject.toml") or exists("pytest.ini") or exists("setup.py") then
+    return "pytest -q"
+  end
+  local python_tests = vim.fn.globpath(root, "test_*.py", false, true)
+  if #python_tests == 0 then
+    python_tests = vim.fn.globpath(root, "tests/test*.py", false, true)
+  end
+  if #python_tests > 0 then
+    return "python -m unittest -q"
+  end
+  if exists("package.json") then
+    return "npm test --silent"
+  end
+  if exists("pom.xml") then
+    return "mvn -q test"
+  end
+  if exists("build.gradle") or exists("build.gradle.kts") then
+    return "gradle -q test"
+  end
+  if exists("CMakeLists.txt") then
+    return "ctest --output-on-failure"
+  end
+  if exists("Makefile") then
+    return "make test"
+  end
+  for _, rel in ipairs(related or {}) do
+    if rel:match("%.py$") then
+      return "python -m unittest -q"
+    end
+  end
+  return nil
+end
+
+local function append_file_excerpt(lines, root, rel, max_file_lines)
+  if not readable_rel(root, rel) then
+    return
+  end
+  local ok, file_lines = pcall(vim.fn.readfile, root .. "/" .. rel)
+  if not ok or type(file_lines) ~= "table" then
+    return
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Related test file: " .. rel
+  lines[#lines + 1] = "```"
+  local cap = math.min(#file_lines, max_file_lines or 120)
+  for i = 1, cap do
+    lines[#lines + 1] = file_lines[i]
+  end
+  if #file_lines > cap then
+    lines[#lines + 1] = "... [truncated " .. tostring(#file_lines - cap) .. " lines]"
+  end
+  lines[#lines + 1] = "```"
+end
+
+local function append_symbol_context(lines, selection)
+  local limit = math.max(0, tonumber(edit_config().symbol_limit) or 24)
+  if limit == 0 or not selection or not selection.bufnr then
+    return
+  end
+  local ok, symbols = pcall(ts.walk_symbols, selection.bufnr)
+  if not ok or type(symbols) ~= "table" or #symbols == 0 then
+    return
+  end
+  local selected, fallback = {}, {}
+  for _, sym in ipairs(symbols) do
+    local row = string.format(
+      "- %s `%s` lines %s-%s%s",
+      sym.kind or "symbol",
+      sym.name or "?",
+      tostring(sym.line_start or "?"),
+      tostring(sym.line_end or "?"),
+      sym.parent and (" parent " .. sym.parent) or ""
+    )
+    if
+      sym.line_start
+      and sym.line_end
+      and sym.line_end >= (selection.line1 or 1) - 20
+      and sym.line_start <= (selection.line2 or selection.line1 or 1) + 20
+    then
+      selected[#selected + 1] = row
+    elseif #fallback < limit then
+      fallback[#fallback + 1] = row
+    end
+  end
+  local source = #selected > 0 and selected or fallback
+  if #source == 0 then
+    return
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Current file symbol context:"
+  for i = 1, math.min(limit, #source) do
+    lines[#lines + 1] = source[i]
+  end
+end
+
+local function append_recent_diff_context(lines)
+  local limit = math.max(0, tonumber(edit_config().recent_diff_limit) or 5)
+  if limit == 0 then
+    return
+  end
+  local ok_audit, audit = pcall(require, "nvime.audit")
+  if not ok_audit or type(audit.path) ~= "function" then
+    return
+  end
+  local path = audit.path()
+  if vim.fn.filereadable(path) ~= 1 then
+    return
+  end
+  local ok, raw = pcall(vim.fn.readfile, path)
+  if not ok or type(raw) ~= "table" then
+    return
+  end
+  local found = {}
+  for i = #raw, 1, -1 do
+    local decoded_ok, item = pcall(vim.json.decode, raw[i])
+    if decoded_ok and type(item) == "table" and item.event == "diff_resolved" then
+      found[#found + 1] = string.format(
+        "- %s accepted %s/%s%s%s",
+        item.path or "?",
+        tostring(item.accepted or "?"),
+        tostring(item.total or "?"),
+        item.rationale and (" rationale: " .. tostring(item.rationale):sub(1, 160)) or "",
+        item.verdict and (" verdict: " .. tostring(item.verdict)) or ""
+      )
+      if #found >= limit then
+        break
+      end
+    end
+  end
+  if #found == 0 then
+    return
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "Recent accepted nvime diffs:"
+  for i = #found, 1, -1 do
+    lines[#lines + 1] = found[i]
+  end
+end
+
+local function build_project_context(selection)
+  if not context_enabled() then
+    return nil
+  end
+  local root = root_dir(selection)
+  local related = related_test_files(selection, root)
+  local runner = detected_test_runner(related, root)
+  local lines = {
+    "Precomputed nvime project context.",
+    "Use this before broad exploration; if it conflicts with live source, trust live source.",
+    "Repo root: " .. root,
+    "Detected test runner: " .. (runner or "(none detected)"),
+  }
+  if #related > 0 then
+    lines[#lines + 1] = "Related test paths: " .. table.concat(related, ", ")
+  else
+    lines[#lines + 1] = "Related test paths: (none detected)"
+  end
+  append_symbol_context(lines, selection)
+  for _, rel in ipairs(related) do
+    append_file_excerpt(lines, root, rel, 120)
+  end
+  append_recent_diff_context(lines)
+  local text = table.concat(lines, "\n")
+  local max_chars = math.max(1000, tonumber(edit_config().context_max_chars) or 6000)
+  if #text > max_chars then
+    text = text:sub(1, max_chars) .. "\n... [precomputed context truncated]"
+  end
+  return text
+end
+
 local function build_perf_prompt(selection, intent)
   local selected_display, fence = selection_body_and_fence(selection)
   return table.concat({
@@ -101,6 +417,8 @@ end
 
 local function build_prompt(selection, intent)
   local selected_display, selected_fence = selection_body_and_fence(selection)
+  local project_context = build_project_context(selection)
+  local context_fence = project_context and code_fence_for(project_context) or "```"
   local ask = selection_state.last_ask_for(selection)
   local prior_context = {}
   if ask and selection_state.same_range(selection, ask.selection) then
@@ -117,8 +435,12 @@ local function build_prompt(selection, intent)
     "NVIME EDIT MODE.",
     "You are a constrained patch worker, not a reviewer.",
     "Return exactly one machine-readable response block. The ONLY prose allowed before the block is a single `RATIONALE:` line (described below) — no analysis, caveats, or summaries beyond that.",
+    "Do not narrate tool use or investigation steps. No 'I'll read...', no progress updates, no markdown outside the response block.",
     "You may only propose changes for the selected range in the current file.",
     "You may use read/search, web fetch/search, and shell commands such as curl for inspection, external docs, or tests when available.",
+    "If nvime MCP tools are available, prefer their read-only project context helpers (symbols, recent diffs, session search, usage, git metadata) and bounded test runner before broad shell exploration.",
+    "Before patching, you MUST do a verification pass. For each explicit requirement in the user's intent, simulate at least one edge case against the candidate. When tests/examples are available or a fast runner is obvious, inspect or run them before final output.",
+    "For parsers, validators, normalizers, and path helpers: consume/validate the full input, preserve token boundaries, and reject or handle leftovers explicitly. Partial regex matches that ignore invalid text are bugs.",
     "Do not edit files directly. Do not mention patches for other files or ranges.",
     "A 'concrete change' means: a fix for an actual bug, an implementation for a documented-but-missing feature, or a literal textual change the intent asks for. Defensive code, type checks, comments, error-class additions, idiom polish, value-type substitutions (e.g. 0 vs 0.0, '' vs str()), and other speculative improvements are NOT concrete changes.",
     "If, after reading the selected code carefully, you cannot point to a specific incorrect behavior or a specific request the intent makes, return NVIME_NO_CHANGE with one short reason. NVIME_NO_CHANGE is the right answer when the code already meets its documented behavior.",
@@ -126,7 +448,7 @@ local function build_prompt(selection, intent)
     "When the intent describes a bug ('crashes on X', 'hangs on Y', 'returns wrong value for Z') but the selected code already handles that exact case correctly, return NVIME_NO_CHANGE and briefly note that the described case is already handled. Do NOT silently re-implement a guard or fix that is already present.",
     "Before producing NVIME_DIFF, re-read the selected code: do not insert a line that already exists, do not duplicate an existing return/break/continue, and verify your hunk's context lines match the selected text exactly.",
     "Prefer NVIME_DIFF for any change to existing nonblank text. Use NVIME_DIFF with the smallest changed hunks only. NVIME_DIFF is required for Markdown, large selections, and selections containing code fences.",
-    "NVIME_REPLACEMENT is only acceptable for blank or near-blank selected ranges or tiny whole-range rewrites. The replacement is inserted verbatim at the selected range; no indentation is added for you. If the selection is a blank line inside an indented block (e.g. a Python function body), include the exact leading whitespace of the surrounding scope on every non-empty replacement line.",
+    "NVIME_REPLACEMENT is acceptable for blank or near-blank selected ranges, tiny whole-range rewrites, or small selected ranges where several nearby lines must change and a minimal hunk would be brittle. The replacement is inserted verbatim at the selected range; no indentation is added for you. If the selection is a blank line inside an indented block (e.g. a Python function body), include the exact leading whitespace of the surrounding scope on every non-empty replacement line.",
     "NVIME_DIFF must include --- a/"
       .. selection.path
       .. ", +++ b/"
@@ -166,6 +488,13 @@ local function build_prompt(selection, intent)
     "Allowed range: " .. selection.line1 .. "-" .. selection.line2 .. " (" .. selection.source .. ")",
     "Intent: " .. intent,
     table.concat(prior_context, "\n"),
+    project_context and table.concat({
+      "",
+      "Precomputed context:",
+      context_fence,
+      project_context,
+      context_fence,
+    }, "\n") or "",
     "",
     "Selected code:",
     selected_fence,
@@ -619,5 +948,9 @@ function M.continue_remaining()
     end,
   })
 end
+
+M._build_prompt = build_prompt
+M._build_perf_prompt = build_perf_prompt
+M._looks_like_question = looks_like_question
 
 return M

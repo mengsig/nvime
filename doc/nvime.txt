@@ -200,6 +200,35 @@ COMMANDS                                                        *nvime-commands*
         capped at attribution.max entries (default 500) with oldest
         rotated out.
 
+                                                        *:NvimeBlame*
+:NvimeBlame [notify]
+        Show the attribution entry for the line under the cursor in a small
+        popup. `notify` prints the same information through vim.notify. This
+        is a focused alias for the current-line lookup part of
+        |:NvimeAttribute|.
+
+                                                        *:NvimeUsage*
+:NvimeUsage [summary|reset]
+        Open the token and cost dashboard. `summary` prints the same aggregate
+        through vim.notify; `reset` clears the usage ledger. Usage data is
+        stored in .nvime/usage.json by default and is collected from provider
+        result envelopes when available.
+
+                                                        *:NvimeMcp*
+:NvimeMcp [list|config|edit]
+        List configured MCP servers, open the merged generated config, or edit
+        the project-local .nvime/mcp.json. Claude can use this config through
+        --mcp-config. Codex exec discovers the same servers but cancels MCP
+        calls unless mcp.codex_bypass_for_mcp enables Codex's dangerous bypass;
+        this remains off by default.
+
+                                                        *:NvimeTestLoop*
+:NvimeTestLoop [on|off|auto|ask|reset]
+        Configure the after-diff test-feedback loop. When enabled, accepted
+        diff sessions run the configured or detected test runner. Failing tests
+        either prompt before a follow-up edit (`ask`) or launch a bounded
+        auto-fix run (`auto`), capped by test_loop.max_retries.
+
                                                         *:NvimeRecap*
 :NvimeRecap [claude|codex] [--cached] [<rev>..<rev>]
         Reverse-direction "explain my changes" lane. Computes a git diff
@@ -396,6 +425,14 @@ Common options:
             allow_shell = true,
             allow_web = true,
           },
+          edit = {
+            context_lines = 0,
+            inject_context = true,
+            context_max_chars = 6000,
+            related_test_limit = 4,
+            symbol_limit = 24,
+            recent_diff_limit = 5,
+          },
           chat = {
             max_history_messages = 24,
           },
@@ -404,6 +441,28 @@ Common options:
             path = nil,
             chat_path = nil,
             max = 100,
+          },
+          usage = {
+            enabled = true,
+            path = nil,
+            max_days = 90,
+            statusline = true,
+            rates = {},
+          },
+          test_loop = {
+            enabled = true,
+            runner = nil,
+            auto_fix = false,
+            max_retries = 2,
+            capture_lines = 200,
+          },
+          mcp = {
+            enabled = true,
+            config_path = nil,
+            servers = {},
+            expose_self = true,
+            self_command = nil,
+            codex_bypass_for_mcp = false,
           },
           diff = {
             max_visual_block_lines = 12,

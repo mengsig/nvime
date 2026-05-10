@@ -69,6 +69,11 @@ M.defaults = {
   },
   edit = {
     context_lines = 0,
+    inject_context = true,
+    context_max_chars = 6000,
+    related_test_limit = 4,
+    symbol_limit = 24,
+    recent_diff_limit = 5,
   },
   diff = {
     max_visual_block_lines = 12,
@@ -115,6 +120,45 @@ M.defaults = {
     chat_path = nil,
     max = 100,
   },
+  usage = {
+    -- Per-run token+cost ledger. When enabled, every agent_exit records the
+    -- provider's usage envelope (claude `result.usage`, codex
+    -- `turn.completed.usage`) into .nvime/usage.json. Costs are taken from
+    -- claude's `total_cost_usd` when present; otherwise computed from
+    -- per-million-token rates below (override per-model in `rates`).
+    enabled = true,
+    path = nil, -- defaults to .nvime/usage.json in a git repo
+    max_days = 90,
+    statusline = true,
+    rates = {},
+  },
+  test_loop = {
+    -- After every diff session resolves with at least one accepted block,
+    -- run `runner` (or fall back to plan.test_runner). On non-zero exit,
+    -- either auto-launch a follow-up edit prompt (auto_fix=true) or
+    -- prompt the user. Capped at max_retries to prevent loops.
+    enabled = true,
+    runner = nil, -- shell command string; nil means use plan.test_runner / autodetect
+    auto_fix = false,
+    max_retries = 2,
+    capture_lines = 200,
+  },
+  mcp = {
+    -- MCP servers exposed to the agent. nvime synthesizes a config
+    -- combining `servers` (user-defined) with `expose_self` (the built-in
+    -- nvime MCP server when true). See lua/nvime/mcp_server.lua.
+    enabled = true,
+    config_path = nil, -- defaults to .nvime/mcp.json in a git repo
+    servers = {},
+    expose_self = true,
+    self_command = nil, -- defaults to `nvim --headless --cmd "lua require('nvime.mcp_server').run()"`
+    -- Codex's non-interactive `exec` mode auto-cancels every MCP tool
+    -- call unless --dangerously-bypass-approvals-and-sandbox is set,
+    -- which also disables codex's OS-level sandbox. Opt in here only
+    -- when you want codex agents to use MCP tools and trust the
+    -- shellguard layer to police the resulting shell access.
+    codex_bypass_for_mcp = false,
+  },
   keys = {
     enabled = true,
     prefix = "<leader>n",
@@ -130,6 +174,8 @@ M.defaults = {
       last = "n",
       provider = "p",
       plan = "P",
+      blame = "b",
+      usage = "u",
     },
     visual = {
       edit = "e",
@@ -218,6 +264,16 @@ local optional_types = {
   ["plan.dir"] = { "string", "nil" },
   ["plan.test_file"] = { "string", "nil" },
   ["plan.test_runner"] = { "string", "nil" },
+  ["edit.context_max_chars"] = { "number" },
+  ["edit.related_test_limit"] = { "number" },
+  ["edit.symbol_limit"] = { "number" },
+  ["edit.recent_diff_limit"] = { "number" },
+  ["usage.path"] = { "string", "nil" },
+  ["usage.rates"] = { "table" },
+  ["test_loop.runner"] = { "string", "nil" },
+  ["mcp.config_path"] = { "string", "nil" },
+  ["mcp.self_command"] = { "string", "nil" },
+  ["mcp.servers"] = { "table" },
 }
 
 local function type_label(value)
