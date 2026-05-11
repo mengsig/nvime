@@ -36,10 +36,23 @@ local function project_config_path()
   return repo_root() .. "/.nvime/mcp.json"
 end
 
+-- Cache (path, mtime, size) → parsed servers. agents.lua calls servers()
+-- twice per spawn (once for claude, once for codex); without this we'd
+-- readfile + JSON-decode the project config twice per turn.
+local cached_project_key
+local cached_project_servers
+
 local function read_project_servers()
   local path = project_config_path()
-  if vim.fn.filereadable(path) ~= 1 then
+  local stat = uv.fs_stat(path)
+  if not stat then
+    cached_project_key = nil
+    cached_project_servers = nil
     return {}
+  end
+  local key = string.format("%s\0%d\0%d", path, stat.mtime.sec or 0, stat.size or 0)
+  if cached_project_key == key and cached_project_servers then
+    return cached_project_servers
   end
   local ok, raw = pcall(vim.fn.readfile, path)
   if not ok or not raw or #raw == 0 then
@@ -49,7 +62,10 @@ local function read_project_servers()
   if not decoded_ok or type(decoded) ~= "table" then
     return {}
   end
-  return decoded.mcpServers or decoded.servers or {}
+  local servers = decoded.mcpServers or decoded.servers or {}
+  cached_project_key = key
+  cached_project_servers = servers
+  return servers
 end
 
 -- The nvime-self entry. nvim --headless's startup is a few hundred ms

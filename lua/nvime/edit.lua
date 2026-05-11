@@ -165,54 +165,16 @@ end
 local function detected_test_runner(related, root)
   local cfg = state.config or {}
   local configured = (cfg.test_loop or {}).runner or (cfg.plan or {}).test_runner
+  local ok_plan, plan = pcall(require, "nvime.plan")
+  if ok_plan and type(plan.detect_test_runner) == "function" then
+    return plan.detect_test_runner({
+      configured = configured,
+      root = root or root_dir(),
+      related = related,
+    })
+  end
   if configured and configured ~= "" then
     return configured
-  end
-  root = root or root_dir()
-  local function exists(rel)
-    return vim.fn.filereadable(root .. "/" .. rel) == 1 or vim.fn.isdirectory(root .. "/" .. rel) == 1
-  end
-  if exists("scripts/test") then
-    return "./scripts/test"
-  end
-  if exists("Cargo.toml") then
-    return "cargo test --quiet"
-  end
-  if exists("build.zig") then
-    return "zig build test"
-  end
-  if exists("go.mod") then
-    return "go test ./..."
-  end
-  if exists("pyproject.toml") or exists("pytest.ini") or exists("setup.py") then
-    return "pytest -q"
-  end
-  local python_tests = vim.fn.globpath(root, "test_*.py", false, true)
-  if #python_tests == 0 then
-    python_tests = vim.fn.globpath(root, "tests/test*.py", false, true)
-  end
-  if #python_tests > 0 then
-    return "python -m unittest -q"
-  end
-  if exists("package.json") then
-    return "npm test --silent"
-  end
-  if exists("pom.xml") then
-    return "mvn -q test"
-  end
-  if exists("build.gradle") or exists("build.gradle.kts") then
-    return "gradle -q test"
-  end
-  if exists("CMakeLists.txt") then
-    return "ctest --output-on-failure"
-  end
-  if exists("Makefile") then
-    return "make test"
-  end
-  for _, rel in ipairs(related or {}) do
-    if rel:match("%.py$") then
-      return "python -m unittest -q"
-    end
   end
   return nil
 end
@@ -279,6 +241,12 @@ local function append_symbol_context(lines, selection)
   end
 end
 
+-- Tail-scanning audit.jsonl cost grows with the file (already ~800 KB on
+-- this checkout). Cache the most recent N "diff_resolved" formatted rows
+-- keyed by (path, mtime, size); invalidated automatically when audit.write
+-- appends a new line.
+local recent_diff_cache = { key = nil, rows = nil }
+
 local function append_recent_diff_context(lines)
   local limit = math.max(0, tonumber(edit_config().recent_diff_limit) or 5)
   if limit == 0 then
@@ -289,37 +257,51 @@ local function append_recent_diff_context(lines)
     return
   end
   local path = audit.path()
-  if vim.fn.filereadable(path) ~= 1 then
+  local stat = (vim.uv or vim.loop).fs_stat(path)
+  if not stat then
     return
   end
-  local ok, raw = pcall(vim.fn.readfile, path)
-  if not ok or type(raw) ~= "table" then
-    return
-  end
-  local found = {}
-  for i = #raw, 1, -1 do
-    local decoded_ok, item = pcall(vim.json.decode, raw[i])
-    if decoded_ok and type(item) == "table" and item.event == "diff_resolved" then
-      found[#found + 1] = string.format(
-        "- %s accepted %s/%s%s%s",
-        item.path or "?",
-        tostring(item.accepted or "?"),
-        tostring(item.total or "?"),
-        item.rationale and (" rationale: " .. tostring(item.rationale):sub(1, 160)) or "",
-        item.verdict and (" verdict: " .. tostring(item.verdict)) or ""
-      )
-      if #found >= limit then
-        break
+  local cache_key = string.format("%s\0%d\0%d", path, stat.mtime.sec or 0, stat.size or 0)
+  local rows
+  if recent_diff_cache.key == cache_key and recent_diff_cache.rows then
+    rows = recent_diff_cache.rows
+  else
+    local ok, raw = pcall(vim.fn.readfile, path)
+    if not ok or type(raw) ~= "table" then
+      return
+    end
+    local found = {}
+    -- Walk back, keep up to a generous cap so per-prompt limit changes
+    -- don't force a re-scan.
+    local cap = math.max(limit, 16)
+    for i = #raw, 1, -1 do
+      local decoded_ok, item = pcall(vim.json.decode, raw[i])
+      if decoded_ok and type(item) == "table" and item.event == "diff_resolved" then
+        found[#found + 1] = string.format(
+          "- %s accepted %s/%s%s%s",
+          item.path or "?",
+          tostring(item.accepted or "?"),
+          tostring(item.total or "?"),
+          item.rationale and (" rationale: " .. tostring(item.rationale):sub(1, 160)) or "",
+          item.verdict and (" verdict: " .. tostring(item.verdict)) or ""
+        )
+        if #found >= cap then
+          break
+        end
       end
     end
+    recent_diff_cache.key = cache_key
+    recent_diff_cache.rows = found
+    rows = found
   end
-  if #found == 0 then
+  if #rows == 0 then
     return
   end
+  local n = math.min(limit, #rows)
   lines[#lines + 1] = ""
   lines[#lines + 1] = "Recent accepted nvime diffs:"
-  for i = #found, 1, -1 do
-    lines[#lines + 1] = found[i]
+  for i = n, 1, -1 do
+    lines[#lines + 1] = rows[i]
   end
 end
 

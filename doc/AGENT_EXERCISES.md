@@ -35,14 +35,18 @@ scripts/agent-exercises --provider codex --mode plan-execute --exercise all --li
 | `extremely_difficult_safe_join` | extremely_difficult | Close symlink path escape in a repo path helper. | Reject absolute, parent traversal, and symlink escapes while preserving valid paths. |
 | `extremely_difficult_json_patch` | extremely_difficult | Implement an RFC 6902 subset over JSON Pointer paths. | Escaped keys, list append/indexing, atomic failure, invalid operation rejection. |
 | `extremely_difficult_topological_batches` | extremely_difficult | Implement stable dependency batches. | Stable topological batches, duplicate/missing dependency/cycle rejection, no input mutation. |
+| `extremely_difficult_csv_parser` | extremely_difficult | Implement strict RFC 4180 CSV row parser. | Quoted-field embedded newlines, doubled-quote escape, CRLF, empty-field preservation, rejection of unterminated/bare/stray quotes. |
 
 ## Workflow Exercise Matrix
 
 | mode | id | difficulty | task | checks |
 |---|---|---|---|---|
 | general | `general_diagnose_duration_parser` | hard | Diagnose a failing parser without editing. | Read-only source scope, mentions exact file/function/root-cause categories. |
+| general | `general_diagnose_shared_state_race` | extremely_difficult | Diagnose a hidden mutable-default-argument bug masquerading as test flakiness. | Read-only source scope, mentions `events.py`, `_coalesce`, the mutable-default-argument anti-pattern. |
 | plan | `plan_rate_limited_service` | extremely_difficult | Draft a multi-file rate-limiter implementation plan. | Plan files only, schema v1, ordered small steps, anchors, tests/acceptance. |
+| plan | `plan_resilient_outbox` | extremely_difficult | Plan a multi-file resilient outbox with idempotency keys + dead-letter queue. | Plan files only, schema v1, ordered small steps, anchored ranges, tests/acceptance, step-coherence rule visible. |
 | plan-execute | `plan_rate_limited_service` | extremely_difficult | Author the plan, execute each step through nvime edit prompts, then validate. | Plan validity, step patches, visible tests, hidden tests, changed-file scope. |
+| plan-execute | `plan_resilient_outbox` | extremely_difficult | Author + execute the resilient-outbox plan end-to-end across `outbox.py`, `storage.py`, and tests. | Plan validity, step coherence (test asserts the contract impl pinned), visible + hidden tests, scoped files. |
 
 Edit exercises create a temporary Python repository, confirm its tests fail,
 generate the actual nvime edit prompt through headless Neovim, verify the
@@ -84,18 +88,35 @@ Validated on this checkout with local CLIs:
 | Claude Sonnet | plan | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=sonnet NVIME_AGENT_EXERCISE_CLAUDE_BUDGET=0.35 scripts/agent-exercises --provider claude --mode plan --exercise all --live` | 1/1 passed after strengthening minimum runtime-plan granularity. |
 | Codex | plan-execute | `scripts/agent-exercises --provider codex --mode plan-execute --exercise all --live --fix-attempts 1` | 1/1 passed: 4-step plan, step patches, visible tests, hidden tests, scoped files. |
 | Claude Sonnet | plan-execute | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=sonnet NVIME_AGENT_EXERCISE_CLAUDE_BUDGET=0.80 scripts/agent-exercises --provider claude --mode plan-execute --exercise all --live --fix-attempts 1` | 1/1 passed: 3-step plan, step patches, visible tests, hidden tests, scoped files. |
+| Codex | edit (CSV) | `scripts/agent-exercises --provider codex --mode nvime --exercise extremely_difficult_csv_parser --live --fix-attempts 1` | Passed first try: visible 10/10, hidden 6/6 (RFC 4180 incl. CRLF inside quoted fields, doubled-quote escape, doubled trailing newline → blank row). |
+| Claude Sonnet | edit (CSV) | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=sonnet ... --provider claude --mode nvime --exercise extremely_difficult_csv_parser --live --fix-attempts 1` | Passed first try: visible 10/10, hidden 6/6. |
+| Claude Opus | edit (CSV) | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=opus ... --provider claude --mode nvime --exercise extremely_difficult_csv_parser --live --fix-attempts 1` | Passed first try: visible 10/10, hidden 6/6. |
+| Codex | general (shared state) | `scripts/agent-exercises --provider codex --mode general --exercise general_diagnose_shared_state_race --live` | Passed first try: pinpointed `events.py::_coalesce`, named the mutable-default-argument anti-pattern, traced why the second test sees `[]`. |
+| Claude Sonnet | general (shared state) | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=sonnet ... --provider claude --mode general --exercise general_diagnose_shared_state_race --live` | Passed first try: same diagnosis with cross-test pollution explanation. |
+| Codex | plan (outbox) | `scripts/agent-exercises --provider codex --mode plan --exercise plan_resilient_outbox --live` | Passed first try: 6 steps, schema v1, anchors, dead-letter + idempotency contract pinned per step. |
+| Claude Sonnet | plan (outbox) | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=sonnet ... --provider claude --mode plan --exercise plan_resilient_outbox --live` | Passed first try: 5 steps, all checks. |
+| Codex | plan-execute (outbox) | `scripts/agent-exercises --provider codex --mode plan-execute --exercise plan_resilient_outbox --live --fix-attempts 1` | Passed after step-coherence + dependency-context tuning: 6 steps, visible 3/3, hidden 5/5, no fix-attempts needed. |
+| Claude Sonnet | plan-execute (outbox) | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=sonnet NVIME_AGENT_EXERCISE_CLAUDE_BUDGET=1.50 ... --provider claude --mode plan-execute --exercise plan_resilient_outbox --live --fix-attempts 1` | Passed first try: 6 steps, visible 10/10, hidden 5/5. |
+| Claude Opus | plan-execute (outbox) | `NVIME_AGENT_EXERCISE_CLAUDE_MODEL=opus NVIME_AGENT_EXERCISE_CLAUDE_BUDGET=4.00 ... --provider claude --mode plan-execute --exercise plan_resilient_outbox --live --fix-attempts 1` | Passed first try: 7 steps, visible 9/9, hidden 5/5. |
 
-Earlier live runs exposed four weaknesses that are now guarded by prompts and
+Earlier live runs exposed five weaknesses that are now guarded by prompts and
 the harness: incomplete parser/normalizer validation, brittle diffs whose
 context did not match selected text, chat/progress narration in final answers,
-and under-granular two-step runtime plans. The edit prompt now injects bounded
-repo/test/symbol context, requires requirement-by-requirement verification, and
-allows `NVIME_REPLACEMENT` for small multi-line selected ranges when a hunk
-would be brittle. The chat prompt forbids progress narration, and the plan
-prompt requires marker-first output plus at least three reviewable steps for
-runtime behavior changes. The harness now also has hidden tests for the hardest
-edit and plan-execution cases, and the plan-execution path can feed validation
-or patch failures back into a bounded repair attempt with `--fix-attempts`.
+under-granular two-step runtime plans, and plan-execute step incoherence where
+a separate test step asserted a contract the implementation step did not
+promise. The edit prompt now injects bounded repo/test/symbol context, requires
+requirement-by-requirement verification, and allows `NVIME_REPLACEMENT` for
+small multi-line selected ranges when a hunk would be brittle. The chat prompt
+forbids progress narration, the plan author prompt requires marker-first output
+plus at least three reviewable steps for runtime behavior changes plus a step-
+coherence rule that pins API contracts in BOTH the implementation and test
+steps' intents (with worked examples for backoff/jitter formulae), and the plan
+executor lane now injects every dependency step's intent + notes into the
+patch-worker context so a test step can never silently drift from the
+implementation step it asserts against. The harness now also has hidden tests
+for the hardest edit and plan-execution cases, and the plan-execution path can
+feed validation or patch failures back into a bounded repair attempt with
+`--fix-attempts`.
 
 ## Permission Notes
 

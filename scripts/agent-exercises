@@ -452,6 +452,114 @@ EXERCISES: dict[str, dict[str, Any]] = {
             """,
         },
     },
+    "extremely_difficult_csv_parser": {
+        "difficulty": "extremely_difficult",
+        "title": "Implement strict RFC 4180 CSV row parser",
+        "target": "csv_parser.py",
+        "intent": (
+            "Implement parse_csv(text) returning a list of rows; each row is a "
+            "list of string fields. Follow RFC 4180 strictly: comma separator, "
+            "double-quote escaping for embedded quotes inside quoted fields, "
+            "quoted fields may contain commas and newlines (LF or CRLF), "
+            "unquoted fields may not contain quotes or separators, the input is "
+            "treated as the body of a file (a trailing single newline does not "
+            "produce an extra empty row, but a doubled trailing newline does), "
+            "empty fields stay empty (so 'a,,b' is three fields), and "
+            "malformed input (unterminated quoted field, bare quote inside an "
+            "unquoted field, stray quote after a quoted field's closing quote) "
+            "must raise ValueError."
+        ),
+        "files": {
+            "csv_parser.py": """
+                def parse_csv(text):
+                    # NVIME_SELECT_START
+                    rows = []
+                    for line in text.split(\"\\n\"):
+                        rows.append(line.split(\",\"))
+                    return rows
+                    # NVIME_SELECT_END
+            """,
+            "test_csv_parser.py": """
+                import unittest
+
+                from csv_parser import parse_csv
+
+
+                class CsvParserTests(unittest.TestCase):
+                    def test_simple_row(self):
+                        self.assertEqual(parse_csv(\"a,b,c\"), [[\"a\", \"b\", \"c\"]])
+
+                    def test_empty_fields_preserved(self):
+                        self.assertEqual(parse_csv(\"a,,b\"), [[\"a\", \"\", \"b\"]])
+
+                    def test_quoted_field_with_comma_and_newline(self):
+                        text = 'name,note\\n\"Doe, J.\",\"line1\\nline2\"\\n'
+                        self.assertEqual(
+                            parse_csv(text),
+                            [[\"name\", \"note\"], [\"Doe, J.\", \"line1\\nline2\"]],
+                        )
+
+                    def test_escaped_double_quote(self):
+                        self.assertEqual(parse_csv('\"he said \"\"hi\"\"\"'), [['he said \"hi\"']])
+
+                    def test_crlf_line_endings(self):
+                        self.assertEqual(parse_csv(\"a,b\\r\\nc,d\\r\\n\"), [[\"a\", \"b\"], [\"c\", \"d\"]])
+
+                    def test_trailing_newline_is_not_extra_row(self):
+                        self.assertEqual(parse_csv(\"a,b\\n\"), [[\"a\", \"b\"]])
+
+                    def test_doubled_trailing_newline_is_blank_row(self):
+                        self.assertEqual(parse_csv(\"a,b\\n\\n\"), [[\"a\", \"b\"], [\"\"]])
+
+                    def test_rejects_unterminated_quote(self):
+                        with self.assertRaises(ValueError):
+                            parse_csv('\"abc')
+
+                    def test_rejects_bare_quote_in_unquoted_field(self):
+                        with self.assertRaises(ValueError):
+                            parse_csv('ab\"c')
+
+                    def test_rejects_stray_text_after_closing_quote(self):
+                        with self.assertRaises(ValueError):
+                            parse_csv('\"abc\"def')
+
+
+                if __name__ == \"__main__\":
+                    unittest.main()
+            """,
+        },
+        "hidden_files": {
+            "test_hidden_csv_parser.py": """
+                import unittest
+
+                from csv_parser import parse_csv
+
+
+                class HiddenCsvParserTests(unittest.TestCase):
+                    def test_empty_input_is_empty_list(self):
+                        self.assertEqual(parse_csv(\"\"), [])
+
+                    def test_only_newline_is_one_blank_row(self):
+                        self.assertEqual(parse_csv(\"\\n\"), [[\"\"]])
+
+                    def test_quoted_empty_field(self):
+                        self.assertEqual(parse_csv('a,\"\",b'), [[\"a\", \"\", \"b\"]])
+
+                    def test_three_consecutive_double_quotes_is_one_quote(self):
+                        self.assertEqual(parse_csv('\"\"\"\"'), [['\"']])
+
+                    def test_quoted_field_with_crlf_inside(self):
+                        self.assertEqual(parse_csv('\"a\\r\\nb\",c'), [[\"a\\r\\nb\", \"c\"]])
+
+                    def test_trailing_separator_creates_empty_field(self):
+                        self.assertEqual(parse_csv(\"a,b,\"), [[\"a\", \"b\", \"\"]])
+
+
+                if __name__ == \"__main__\":
+                    unittest.main()
+            """,
+        },
+    },
 }
 
 
@@ -466,7 +574,81 @@ GENERAL_EXERCISES: dict[str, dict[str, Any]] = {
         ),
         "files": EXERCISES["medium_duration_parser"]["files"],
         "must_contain": ["durations.py", "parse_duration", "compact", "ValueError"],
-    }
+    },
+    "general_diagnose_shared_state_race": {
+        "difficulty": "extremely_difficult",
+        "title": "Diagnose hidden shared-state mutation in a 'pure' helper",
+        "intent": (
+            "Run `python -m unittest -q`. One test fails non-deterministically — "
+            "actually it fails reproducibly here, but it LOOKS like flakiness. "
+            "Do not edit any file. Identify the exact file and function whose "
+            "hidden shared state is the root cause, name the specific Python "
+            "anti-pattern responsible, and explain why the failing assertion "
+            "produces its observed value. Cite the file paths in your answer."
+        ),
+        "files": {
+            "events.py": """
+                # Process incoming sensor events into ordered batches.
+
+                def _coalesce(batch, event, _seen=set()):
+                    key = (event[\"sensor\"], event[\"window\"])
+                    if key in _seen:
+                        return batch
+                    _seen.add(key)
+                    batch.append(event)
+                    return batch
+
+
+                def coalesce_window(events):
+                    \"\"\"Return a deduplicated batch of events for one analysis window.\"\"\"
+                    batch = []
+                    for event in events:
+                        _coalesce(batch, event)
+                    return batch
+            """,
+            "test_events.py": """
+                import unittest
+
+                from events import coalesce_window
+
+
+                class CoalesceTests(unittest.TestCase):
+                    def test_first_call_dedups_within_input(self):
+                        events = [
+                            {\"sensor\": \"a\", \"window\": 0, \"value\": 1},
+                            {\"sensor\": \"a\", \"window\": 0, \"value\": 2},
+                            {\"sensor\": \"b\", \"window\": 0, \"value\": 3},
+                        ]
+                        self.assertEqual(
+                            coalesce_window(events),
+                            [
+                                {\"sensor\": \"a\", \"window\": 0, \"value\": 1},
+                                {\"sensor\": \"b\", \"window\": 0, \"value\": 3},
+                            ],
+                        )
+
+                    def test_second_call_with_same_keys_should_still_yield_them(self):
+                        events = [
+                            {\"sensor\": \"a\", \"window\": 0, \"value\": 1},
+                            {\"sensor\": \"b\", \"window\": 0, \"value\": 3},
+                        ]
+                        # First call should populate, second call should still
+                        # return the same batch — coalesce_window is documented
+                        # as window-scoped, not process-global.
+                        coalesce_window(events)
+                        self.assertEqual(coalesce_window(events), events)
+
+
+                if __name__ == \"__main__\":
+                    unittest.main()
+            """,
+        },
+        "must_contain": [
+            "events.py",
+            "_coalesce",
+            "mutable default",
+        ],
+    },
 }
 
 
@@ -548,7 +730,164 @@ PLAN_EXERCISES: dict[str, dict[str, Any]] = {
                     unittest.main()
             """,
         },
-    }
+    },
+    "plan_resilient_outbox": {
+        "difficulty": "extremely_difficult",
+        "title": "Plan a resilient outbox with idempotency keys + dead-letter queue",
+        "intent": (
+            "Plan the implementation of a resilient outbox spread across `outbox.py` "
+            "(public API + retry policy), `storage.py` (in-memory store with "
+            "deterministic iteration), and a regression test file.\n"
+            "\n"
+            "API contract (DO NOT change these names or signatures):\n"
+            "  - `InMemoryStore` keeps its current public methods `add(message)` "
+            "    and `all()`. `add` appends; `all` returns the messages. New helpers "
+            "    may be added but `add` and `all` MUST remain.\n"
+            "  - `Outbox(store, *, max_attempts=3, base_delay=1.0, rng=None)`. "
+            "    `rng` is a no-arg callable returning a float in [0.0, 1.0]; default "
+            "    to `random.random` when None.\n"
+            "  - `Outbox.enqueue(message)` takes a single dict argument. The dict "
+            "    carries `payload` and `idempotency_key` as keys (NOT a separate "
+            "    keyword argument). Returns the idempotency key actually stored. "
+            "    Enqueueing a message whose `idempotency_key` already exists is a "
+            "    no-op and returns the existing key.\n"
+            "  - `Outbox.process_once(now, send_fn)` calls `send_fn(message)` for "
+            "    every pending message whose `not_before <= now`, in FIFO order; on "
+            "    success the message is removed from the store; on raised exception "
+            "    the message is rescheduled with exponential backoff "
+            "    `delay = base_delay * (2 ** attempt)` plus jitter strictly bounded "
+            "    by `0 <= jitter <= 0.25 * delay` (computed from the injected `rng`); "
+            "    after `max_attempts` failures the message moves to a dead-letter "
+            "    list accessible via `Outbox.dead_letters()` returning a list of "
+            "    the original message dicts.\n"
+            "  - `store.all()` must NOT alias internal storage: callers that take "
+            "    `list(store.all())` and then enqueue more messages must NOT see "
+            "    the new messages in their captured snapshot.\n"
+            "Plan must touch at least the three files above plus add focused tests."
+        ),
+        "files": {
+            "outbox.py": """
+                # Skeleton — production implementation will be added by the plan steps.
+
+                class Outbox:
+                    def __init__(self, store, *, max_attempts=3, base_delay=1.0, rng=None):
+                        self._store = store
+                        self._max_attempts = max_attempts
+                        self._base_delay = base_delay
+                        self._rng = rng
+
+                    def enqueue(self, message):
+                        raise NotImplementedError
+
+                    def process_once(self, now, send_fn):
+                        raise NotImplementedError
+
+                    def dead_letters(self):
+                        raise NotImplementedError
+            """,
+            "storage.py": """
+                # In-memory store skeleton.
+
+                class InMemoryStore:
+                    def __init__(self):
+                        self._messages = []
+
+                    def add(self, message):
+                        self._messages.append(message)
+
+                    def all(self):
+                        return self._messages
+            """,
+            "test_outbox.py": """
+                import unittest
+
+                from outbox import Outbox
+                from storage import InMemoryStore
+
+
+                class OutboxBaselineTests(unittest.TestCase):
+                    def test_skeleton_is_unimplemented(self):
+                        outbox = Outbox(InMemoryStore())
+                        with self.assertRaises(NotImplementedError):
+                            outbox.enqueue({"id": 1})
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+            "README.md": """
+                # Outbox
+
+                Buffer outgoing messages with retry semantics. The current skeleton
+                only declares the API surface; the implementation lands through the
+                accepted plan.
+            """,
+        },
+        "hidden_files": {
+            "test_hidden_outbox.py": """
+                import unittest
+
+                from outbox import Outbox
+                from storage import InMemoryStore
+
+
+                class HiddenOutboxTests(unittest.TestCase):
+                    def test_idempotent_enqueue_returns_same_key(self):
+                        outbox = Outbox(InMemoryStore(), rng=lambda: 0.0)
+                        key1 = outbox.enqueue({"payload": "x", "idempotency_key": "k1"})
+                        key2 = outbox.enqueue({"payload": "x", "idempotency_key": "k1"})
+                        self.assertEqual(key1, key2)
+
+                    def test_successful_send_is_removed(self):
+                        outbox = Outbox(InMemoryStore(), rng=lambda: 0.0)
+                        outbox.enqueue({"payload": "x", "idempotency_key": "k1"})
+                        sent = []
+                        outbox.process_once(now=0.0, send_fn=lambda m: sent.append(m["payload"]))
+                        self.assertEqual(sent, ["x"])
+                        outbox.process_once(now=10.0, send_fn=lambda m: sent.append(m["payload"]))
+                        self.assertEqual(sent, ["x"])
+
+                    def test_failure_reschedules_with_backoff(self):
+                        outbox = Outbox(InMemoryStore(), max_attempts=4, base_delay=2.0, rng=lambda: 0.5)
+                        outbox.enqueue({"payload": "x", "idempotency_key": "k1"})
+
+                        def boom(_):
+                            raise RuntimeError("send broke")
+
+                        outbox.process_once(now=0.0, send_fn=boom)
+                        # base_delay 2.0 * 2**0 = 2.0; jitter <= 25% of 2.0 = 0.5; rng=0.5 -> +0.25
+                        # so not_before is in [2.0, 2.5]; trying at 1.0 should be a no-op.
+                        attempts = []
+                        outbox.process_once(now=1.0, send_fn=lambda m: attempts.append(m))
+                        self.assertEqual(attempts, [])
+
+                    def test_dead_letter_after_max_attempts(self):
+                        outbox = Outbox(InMemoryStore(), max_attempts=2, base_delay=0.0, rng=lambda: 0.0)
+                        outbox.enqueue({"payload": "x", "idempotency_key": "k1"})
+
+                        def boom(_):
+                            raise RuntimeError("nope")
+
+                        outbox.process_once(now=0.0, send_fn=boom)
+                        outbox.process_once(now=1.0, send_fn=boom)
+                        dead = outbox.dead_letters()
+                        self.assertEqual(len(dead), 1)
+                        self.assertEqual(dead[0]["payload"], "x")
+
+                    def test_pending_iteration_does_not_alias_internal_state(self):
+                        store = InMemoryStore()
+                        outbox = Outbox(store, rng=lambda: 0.0)
+                        outbox.enqueue({"payload": "a", "idempotency_key": "ka"})
+                        snapshot = list(store.all())
+                        outbox.enqueue({"payload": "b", "idempotency_key": "kb"})
+                        self.assertEqual(len(snapshot), 1)
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+    },
 }
 
 
@@ -792,6 +1131,7 @@ def prompt_checks(prompt: str, mode: str, baseline_exit: int) -> dict[str, bool]
                 "range_anchor": "range_anchor" in prompt,
                 "test_requirements": "Every step that changes runtime behavior MUST have" in prompt,
                 "minimum_runtime_steps": "For runtime behavior changes, produce at least 3 steps" in prompt,
+                "step_coherence_rule": "Step coherence (tests vs implementation)" in prompt,
             }
         )
     return checks
@@ -1100,6 +1440,42 @@ def step_execution_intent(plan: dict[str, Any], step: dict[str, Any]) -> str:
         lines.extend(["", "Step notes:", str(step["notes"])])
     if step.get("tests"):
         lines.extend(["", "Step tests:", *[f"- {cmd}" for cmd in step.get("tests") or []]])
+
+    deps = step.get("depends_on") or []
+    if deps:
+        steps_by_id = {
+            str(item.get("id")): item
+            for item in (plan.get("steps") or [])
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+        seen: set[str] = set()
+        ordered: list[dict[str, Any]] = []
+
+        def collect(dep_id: Any) -> None:
+            key = str(dep_id)
+            if key in seen:
+                return
+            seen.add(key)
+            dep = steps_by_id.get(key)
+            if not dep:
+                return
+            for nested in dep.get("depends_on") or []:
+                collect(nested)
+            ordered.append(dep)
+
+        for dep_id in deps:
+            collect(dep_id)
+        if ordered:
+            lines.extend(
+                [
+                    "",
+                    "Dependency-step intents (the contract this step must agree with — do not invent new signatures or bounds):",
+                ]
+            )
+            for dep in ordered:
+                lines.append(f"  [step {dep.get('id')}] {dep.get('intent') or '(no intent)'}")
+                if dep.get("notes"):
+                    lines.append(f"    notes: {dep.get('notes')}")
     return "\n".join(lines)
 
 

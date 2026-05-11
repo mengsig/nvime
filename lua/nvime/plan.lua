@@ -1436,6 +1436,49 @@ local function plan_context_block(plan, step, _char_budget)
       lines[#lines + 1] = "    " .. paragraph
     end
   end
+  -- Include the intents of every step in the current step's transitive
+  -- depends_on chain. Plan-execute runs each step as an independent
+  -- edit-lane call, so without this a test step cannot see what API its
+  -- implementation step pinned and the two can drift (e.g. the test
+  -- asserts a different jitter formula than the implementation uses).
+  if type(step.depends_on) == "table" and #step.depends_on > 0 then
+    local by_id = {}
+    for _, candidate in ipairs(steps) do
+      if type(candidate) == "table" and candidate.id ~= nil then
+        by_id[tostring(candidate.id)] = candidate
+      end
+    end
+    local visited, ordered = {}, {}
+    local function collect(dep_id)
+      local key = tostring(dep_id)
+      if visited[key] then
+        return
+      end
+      visited[key] = true
+      local dep = by_id[key]
+      if not dep then
+        return
+      end
+      for _, nested in ipairs(dep.depends_on or {}) do
+        collect(nested)
+      end
+      ordered[#ordered + 1] = dep
+    end
+    for _, dep_id in ipairs(step.depends_on) do
+      collect(dep_id)
+    end
+    if #ordered > 0 then
+      lines[#lines + 1] = "- Dependency-step intents (the contract this step must agree with):"
+      for _, dep in ipairs(ordered) do
+        lines[#lines + 1] = string.format("    [step %s] %s", tostring(dep.id or "?"), dep.intent or "(no intent)")
+        if dep.notes and dep.notes ~= "" then
+          for _, paragraph in ipairs(vim.split(dep.notes, "\n", { plain = true })) do
+            lines[#lines + 1] = "      notes: " .. paragraph
+          end
+        end
+      end
+    end
+  end
   -- Include the actual acceptance texts (not just a count) so the patch
   -- worker knows what success looks like at the plan level.
   local acceptance_lines = {}
@@ -1511,16 +1554,25 @@ end
 
 -- Detect the project's preferred test runner from common project markers.
 -- Returned as a single shell command suitable to be put into step.tests.
-local function detect_test_runner()
-  local cfg = plan_config()
-  if cfg.test_runner and cfg.test_runner ~= "" then
-    return cfg.test_runner
+-- opts.configured — explicit override; returned verbatim when non-empty.
+-- opts.root       — search root; defaults to git root or cwd.
+-- opts.related    — related test paths; used for the .py extension fallback.
+local function detect_test_runner(opts)
+  opts = opts or {}
+  local configured = opts.configured
+  if not configured then
+    local cfg = plan_config()
+    if cfg.test_runner and cfg.test_runner ~= "" then
+      configured = cfg.test_runner
+    end
   end
-  local root = git.root() or vim.fn.getcwd()
+  if configured and configured ~= "" then
+    return configured
+  end
+  local root = opts.root or git.root() or vim.fn.getcwd()
   local function exists(rel)
     return vim.fn.filereadable(root .. "/" .. rel) == 1 or vim.fn.isdirectory(root .. "/" .. rel) == 1
   end
-  -- Project-local runner script wins
   if exists("scripts/test") then
     return "./scripts/test"
   end
@@ -1557,6 +1609,13 @@ local function detect_test_runner()
   end
   if exists("Makefile") then
     return "make test"
+  end
+  if opts.related then
+    for _, rel in ipairs(opts.related) do
+      if rel:match("%.py$") then
+        return "python -m unittest -q"
+      end
+    end
   end
   return nil
 end
@@ -2553,6 +2612,15 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "    (b) an explicit follow-up step in the plan that adds a regression test, with `depends_on` pointing back at the behavior step.",
   '  Pure cosmetic / formatting / dead-code-removal steps are exempt: mark them with `notes: "no behavior change; lint-only"`.',
   "  When in doubt, pick (b) — a separate test step is small, reviewable, and catches the case where the implementation drifts.",
+  "",
+  "Step coherence (tests vs implementation):",
+  "  When a plan splits a single behavior into separate implementation step(s) and test step(s):",
+  "    - Pin the API contract in BOTH steps. The implementation step's `intent` AND the test step's `intent` must literally restate: exact public function names, parameter signatures (including which arguments are positional vs keyword vs nested-in-a-dict), attribute/method names, return shapes, and numeric bounds (timeouts, jitter percentages, retry counts, window sizes, exponent bases).",
+  "    - The test step MUST assert against THAT exact contract — same function names, same call shape, same numeric bounds. Do not invent new keyword arguments. Do not assume tighter bounds than the implementation guarantees. Do not assert against helper attributes that aren't part of the contract.",
+  "    - If the user's intent already pins a contract (e.g. 'enqueue takes a single dict argument'), copy that wording verbatim into BOTH the implementation step's intent AND the test step's intent. Do not paraphrase signatures.",
+  "    - When asserting on numeric backoff/jitter bounds, write the bound formula in the test step's intent — e.g. 'assert next_attempt_at - now is in [delay, delay * 1.25] where delay = base_delay * (2 ** attempt)'. The test code must compute the same `delay` formula the implementation uses.",
+  "    - If the test step needs a different bound than the implementation provides, that is a SPEC change: update the implementation step's intent first so reviewers see them in the same plan, then write the test against the updated contract.",
+  "  This rule exists because plan-execute runs each step as an independent edit-lane call — a test step that asserts a contract the implementation step did not promise will pass the patch-worker's local check but fail at the project test runner.",
   "",
   "  Use the project's NATIVE test runner. Detect it from markers in the repo root:",
   "    Cargo.toml      → `cargo test --quiet`",
