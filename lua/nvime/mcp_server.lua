@@ -18,6 +18,8 @@
 --     nvime.git_blame(path, line)            — blame metadata for a specific line
 --   Verification + memory:
 --     nvime.test_run(runner?, timeout?)      — run the configured/auto-detected test runner
+--     nvime.verify_file(file, content?,      — pre-accept verify lane (parse+lint+type)
+--                       wait_ms?)               match the protocol VERIFY: line to status
 --     nvime.session_search(query, limit?)    — full-text search across past chat transcripts
 --     nvime.session_recent(limit?)           — most recently updated chat sessions (titles)
 --
@@ -45,12 +47,12 @@ local SUPPORTED_PROTOCOL_VERSIONS = {
 
 -- Resource bounds. Keeping them as named constants makes the contract
 -- with callers explicit and avoids "magic 5000" sprinkled across tools.
-local AUDIT_READ_LINES = 5000        -- how far back into audit.jsonl we scan
-local TAIL_LINES_DEFAULT = 200       -- default cap for stdout/stderr tails
+local AUDIT_READ_LINES = 5000 -- how far back into audit.jsonl we scan
+local TAIL_LINES_DEFAULT = 200 -- default cap for stdout/stderr tails
 local TIMEOUT_DEFAULT_MS = 60000
 local TIMEOUT_MAX_MS = 300000
-local MAX_PARSE_BYTES = 4 * 1024 * 1024  -- tree-sitter walk size limit
-local MAX_CAPTURE_BYTES = 2 * 1024 * 1024  -- per-stream cap for test_run
+local MAX_PARSE_BYTES = 4 * 1024 * 1024 -- tree-sitter walk size limit
+local MAX_CAPTURE_BYTES = 2 * 1024 * 1024 -- per-stream cap for test_run
 
 -- The diff.lua → audit.write event name that recent_diffs filters on.
 -- Both producer and consumer should resolve to this constant.
@@ -147,7 +149,10 @@ local TOOLS = {
     inputSchema = {
       type = "object",
       properties = {
-        runner = { type = "string", description = "Optional explicit shell command to run instead of the configured/detected one." },
+        runner = {
+          type = "string",
+          description = "Optional explicit shell command to run instead of the configured/detected one.",
+        },
         timeout = { type = "integer", description = "Wall-clock cap in milliseconds (default 60000, max 300000)." },
       },
     },
@@ -182,6 +187,19 @@ local TOOLS = {
       properties = {
         limit = { type = "integer", description = "Max entries to return (default 20, max 200)." },
       },
+    },
+  },
+  {
+    name = "nvime.verify_file",
+    description = "Run nvime's pre-accept verify lane against an arbitrary path + content: tree-sitter parse plus configured lint/type checks (ruff, shellcheck, luacheck/selene, gofmt, zig ast-check, mypy, plus user-configured commands). Returns { status, parse_error, findings, by_check }. Intended for self-check BEFORE emitting NVIME_DIFF — match the protocol `VERIFY:` line to the returned status.",
+    inputSchema = {
+      type = "object",
+      properties = {
+        file = { type = "string", description = "Repo-relative path. Used for glob matching and project-config resolution. The file does not have to exist on disk when `content` is supplied." },
+        content = { type = "string", description = "Proposed full-file content to verify. If omitted, the on-disk file is read." },
+        wait_ms = { type = "integer", description = "How long to wait for external checks before returning (default 0 — parse-only). Max 60000." },
+      },
+      required = { "file" },
     },
   },
 }
@@ -384,18 +402,13 @@ end
 local function tool_recent_audits(args)
   local limit = math.min(tonumber(args.limit) or 50, 500)
   local kind = args.kind
-  local ordered = audit_tail(
-    function(decoded)
-      return type(decoded) == "table" and (not kind or decoded.event == kind)
-    end,
-    function(decoded)
-      return decoded
-    end,
-    limit
-  )
+  local ordered = audit_tail(function(decoded)
+    return type(decoded) == "table" and (not kind or decoded.event == kind)
+  end, function(decoded)
+    return decoded
+  end, limit)
   return ok_json({ audits = ordered, count = #ordered, filter = kind })
 end
-
 
 local function tool_usage_summary(_)
   local ok, usage = pcall(require, "nvime.usage")
@@ -419,9 +432,7 @@ local function tool_tree_sitter_symbols(args)
   end
   local size = vim.fn.getfsize(target)
   if size and size > MAX_PARSE_BYTES then
-    return err_result(
-      string.format("file too large to parse (%d bytes > %d cap)", size, MAX_PARSE_BYTES)
-    )
+    return err_result(string.format("file too large to parse (%d bytes > %d cap)", size, MAX_PARSE_BYTES))
   end
   local ok_ts, ts = pcall(require, "nvime.treesitter")
   if not ok_ts then
@@ -493,10 +504,8 @@ local function tool_git_log(args)
   end
   local commits = {}
   for record in out:gmatch("([^" .. RS .. "]+)") do
-    local sha, author, date, subject = record:match("^([^" .. US .. "]+)" .. US ..
-      "([^" .. US .. "]+)" .. US ..
-      "([^" .. US .. "]+)" .. US ..
-      "(.*)$")
+    local sha, author, date, subject =
+      record:match("^([^" .. US .. "]+)" .. US .. "([^" .. US .. "]+)" .. US .. "([^" .. US .. "]+)" .. US .. "(.*)$")
     if sha then
       commits[#commits + 1] = { sha = sha, author = author, date = date, subject = subject or "" }
     end
@@ -518,9 +527,12 @@ local function tool_git_blame(args)
     return err_result("no such file: " .. path)
   end
   local out, err = git_run({
-    "blame", "--line-porcelain",
-    "-L", string.format("%d,%d", line, line),
-    "--", path,
+    "blame",
+    "--line-porcelain",
+    "-L",
+    string.format("%d,%d", line, line),
+    "--",
+    path,
   })
   if not out then
     return err_result("git blame failed: " .. (err or ""))
@@ -640,13 +652,16 @@ local function tool_test_run(args)
   -- child after the deadline and reports code=124, so we don't need to
   -- hand-roll the watchdog.
   local started = uv.hrtime()
-  local result = vim.system({ "sh", "-c", runner }, {
-    text = true,
-    cwd = repo_root(),
-    timeout = timeout,
-    stdout = on_stdout,
-    stderr = on_stderr,
-  }):wait()
+  local result = vim
+    .system({ "sh", "-c", runner }, {
+      text = true,
+      cwd = repo_root(),
+      env = require("nvime.shellguard").build_env(),
+      timeout = timeout,
+      stdout = on_stdout,
+      stderr = on_stderr,
+    })
+    :wait()
   local elapsed_ms = math.floor((uv.hrtime() - started) / 1e6)
   return ok_json({
     runner = runner,
@@ -740,26 +755,47 @@ end
 
 local function tool_recent_diffs(args)
   local limit = math.min(math.max(tonumber(args.limit) or 20, 1), 200)
-  local ordered = audit_tail(
-    function(decoded)
-      return type(decoded) == "table" and decoded.event == DIFF_RESOLVED_EVENT
-    end,
-    function(decoded)
-      return {
-        path = decoded.path,
-        accepted = decoded.accepted,
-        total = decoded.total,
-        rationale = decoded.rationale,
-        verdict = decoded.verdict,
-        plan_id = decoded.plan_id,
-        plan_step_id = decoded.plan_step_id,
-        ts = decoded.ts,
-        provider = decoded.provider,
-      }
-    end,
-    limit
-  )
+  local ordered = audit_tail(function(decoded)
+    return type(decoded) == "table" and decoded.event == DIFF_RESOLVED_EVENT
+  end, function(decoded)
+    return {
+      path = decoded.path,
+      accepted = decoded.accepted,
+      total = decoded.total,
+      rationale = decoded.rationale,
+      verdict = decoded.verdict,
+      plan_id = decoded.plan_id,
+      plan_step_id = decoded.plan_step_id,
+      ts = decoded.ts,
+      provider = decoded.provider,
+    }
+  end, limit)
   return ok_json({ count = #ordered, diffs = ordered })
+end
+
+local function tool_verify_file(args)
+  local file = args.file
+  if not file or file == "" then
+    return err_result("file is required")
+  end
+  local target, perr = safe_join(repo_root(), file)
+  if not target then
+    return err_result("invalid file: " .. perr)
+  end
+  local wait_ms = tonumber(args.wait_ms) or 0
+  if wait_ms < 0 then
+    wait_ms = 0
+  end
+  if wait_ms > 60000 then
+    wait_ms = 60000
+  end
+  local ok_verify, verify = pcall(require, "nvime.verify")
+  if not ok_verify or not verify or type(verify.verify_path) ~= "function" then
+    return err_result("verify module unavailable")
+  end
+  local result = verify.verify_path(target, args.content, { wait_ms = wait_ms })
+  result.file = file
+  return ok_json(result)
 end
 
 local TOOL_HANDLERS = {
@@ -775,6 +811,7 @@ local TOOL_HANDLERS = {
   ["nvime.session_search"] = tool_session_search,
   ["nvime.session_recent"] = tool_session_recent,
   ["nvime.recent_diffs"] = tool_recent_diffs,
+  ["nvime.verify_file"] = tool_verify_file,
 }
 
 local function jsonrpc_response(id, result)
@@ -881,7 +918,7 @@ local function read_loop()
         send(response)
       end
     end
-    if line and line:match("\"method\"%s*:%s*\"shutdown\"") then
+    if line and line:match('"method"%s*:%s*"shutdown"') then
       break
     end
   end

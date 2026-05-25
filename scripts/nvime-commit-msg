@@ -1,0 +1,88 @@
+#!/usr/bin/env sh
+# nvime prepare-commit-msg hook.
+#
+# Appends `Co-authored-by:` trailers to the commit message based on the
+# attribution ledger at .nvime/attribution.json. The hook is idempotent
+# (existing matching lines are not duplicated) and skips merge/squash/
+# revert commit messages where the trailer would land in the wrong place.
+#
+# This is best-effort, not authoritative: it credits any model/provider
+# that has at least one attribution entry whose timestamp falls inside
+# the staged-change window. The PR sidecar (`:NvimePr`) does the more
+# rigorous hunk-by-hunk attribution.
+
+set -eu
+
+MSG_FILE="${1-}"
+MSG_SOURCE="${2-}"
+
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ]; then
+  exit 0
+fi
+
+case "$MSG_SOURCE" in
+  merge|squash|commit)
+    # `commit` source means -c / -C / --amend: existing trailers are
+    # already present and we don't want to double them.
+    exit 0
+    ;;
+esac
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo '')"
+if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/.nvime/attribution.json" ]; then
+  exit 0
+fi
+
+ATTRIBUTION="$REPO_ROOT/.nvime/attribution.json"
+HEAD_TS=$(git log -1 --format=%ct 2>/dev/null || echo '0')
+
+# Walk the JSON ledger and emit one `Co-authored-by:` line per unique
+# (model || provider) whose entry timestamp is newer than HEAD. Falls
+# back gracefully if jq isn't installed: we leave the message untouched
+# rather than approximate.
+if ! command -v jq >/dev/null 2>&1; then
+  exit 0
+fi
+
+CREDITS=$(
+  jq -r --argjson head_ts "$HEAD_TS" '
+    .entries // []
+    | map(select((.ts // 0) > $head_ts))
+    | map(.model // .provider // "unknown")
+    | unique
+    | .[]
+  ' "$ATTRIBUTION"
+)
+
+if [ -z "$CREDITS" ]; then
+  exit 0
+fi
+
+# Strip any trailing blank lines so the trailer block lands flush.
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+awk '
+  /./ { keep = 1 }
+  keep { print }
+' "$MSG_FILE" > "$TMP"
+
+# Append trailers, skipping ones already present (case-insensitive on
+# the email-shape suffix the trailer block is identified by).
+existing=$(grep -i '^Co-authored-by:' "$TMP" || true)
+{
+  cat "$TMP"
+  # Trailer block must be separated by a blank line if there isn't one
+  # already.
+  tail -c1 "$TMP" | grep -q . && printf '\n'
+  if [ -z "$existing" ]; then
+    printf '\n'
+  fi
+  printf '%s\n' "$CREDITS" | while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    line="Co-authored-by: $name <noreply@nvime>"
+    if printf '%s\n' "$existing" | grep -i -q -F "$name"; then
+      continue
+    fi
+    printf '%s\n' "$line"
+  done
+} > "$MSG_FILE"

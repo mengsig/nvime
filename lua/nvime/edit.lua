@@ -446,6 +446,13 @@ local function build_prompt(selection, intent)
     "  RATIONALE: <one sentence: bug → patch → why it's correct>",
     "directly above the NVIME_* marker. The user sees this verbatim in the diff review header before they accept any block, so be honest. No multi-line essays; one line. nvime drops the rationale if you over-explain.",
     "",
+    "VERIFY: (optional but encouraged when MCP is available).",
+    "If the nvime MCP tools are available, call `nvime.verify_file` on the proposed full-file content BEFORE emitting NVIME_DIFF / NVIME_REPLACEMENT. Pass {file: <selected file>, content: <the file after applying your patch>} and report the result:",
+    "  VERIFY: ok                     — parse clean, no checks reported issues",
+    "  VERIFY: <N> findings           — checks reported issues; emit only if you have read them and still believe the patch is correct",
+    "  VERIFY: skipped (<reason>)     — verify_file unavailable or no checks shipped for this language",
+    "Place the VERIFY: line on its own row, next to RATIONALE: and above the NVIME_* marker. If verify reports a parse error, do not emit a patch — fix the proposal until it parses or return NVIME_NO_CHANGE.",
+    "",
     "Use one response form:",
     "",
     "NVIME_NO_CHANGE",
@@ -730,6 +737,17 @@ function M.start(opts)
     return
   end
 
+  -- Per-path policy gate. Migrations, lockfiles, and secrets default to
+  -- `require_human`; the lane refuses with a policy_block audit event
+  -- before any prompt is built.
+  local ok_policy, policy_rules = pcall(require, "nvime.policy_rules")
+  if ok_policy and policy_rules and type(policy_rules.guard) == "function" then
+    local proceed_lane = opts.lane or "edit"
+    if not policy_rules.guard(selection.path, proceed_lane) then
+      return
+    end
+  end
+
   local provider = opts.provider or require("nvime.state").config.provider
   local intent = opts.intent
   -- `force_edit = true` skips the question-shaped reroute. Used by the plan
@@ -763,6 +781,19 @@ function M.start(opts)
         new_session = session_opts.new_session,
       })
       return
+    end
+
+    -- Intent linter. Vague prompts get a confirmation; questionable
+    -- prompts get a notice and proceed. The plan executor (force_edit)
+    -- prefixes a structured plan-context header that may itself look
+    -- vague to the heuristic, so we skip the gate for plan steps.
+    if not force_edit then
+      local ok_intent, intent_mod = pcall(require, "nvime.intent")
+      if ok_intent and intent_mod and type(intent_mod.guard) == "function" then
+        if not intent_mod.guard(intent, { lane = "edit", assume_yes = opts.assume_yes }) then
+          return
+        end
+      end
     end
 
     run_edit(selection, intent, proceed_provider, session_opts)
@@ -819,7 +850,11 @@ function M.continue_remaining()
     vim.notify("No remaining nvime diff to discuss", vim.log.levels.WARN)
     return
   end
-  local session = require("nvime.state").current_diff
+  local session = diff.current_session()
+  if not session then
+    vim.notify("No active nvime diff for the current buffer", vim.log.levels.WARN)
+    return
+  end
   selection_state.prompt({
     provider = session.provider,
     mode = "discuss",

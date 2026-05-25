@@ -173,11 +173,25 @@ local cached_disallow_patterns
 local scripts_written = false
 
 local function script_dir()
-  if cached_dir and vim.fn.isdirectory(cached_dir) == 1 then
+  if cached_dir and vim.fn.isdirectory(cached_dir) == 1 and vim.fn.filewritable(cached_dir) == 2 then
     return cached_dir
   end
-  cached_dir = vim.fn.stdpath("cache") .. "/nvime/shellguard/bin"
-  vim.fn.mkdir(cached_dir, "p")
+
+  local function writable_dir(root)
+    local dir = root .. "/nvime/shellguard/bin"
+    local ok = pcall(vim.fn.mkdir, dir, "p")
+    if ok and vim.fn.isdirectory(dir) == 1 and vim.fn.filewritable(dir) == 2 then
+      return dir
+    end
+    return nil
+  end
+
+  local dir = writable_dir(vim.fn.stdpath("cache")) or writable_dir(vim.fn.tempname())
+  if not dir then
+    error("nvime shellguard could not create a writable wrapper directory")
+  end
+
+  cached_dir = dir
   scripts_written = false
   return cached_dir
 end

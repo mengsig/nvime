@@ -10,6 +10,11 @@ local M = {
   running = {},
   raw = {},
   keymaps = {},
+  diffs = {
+    active_by_bufnr = {},
+    active_by_path = {},
+    queue_by_path = {},
+  },
   chat = {
     active_session_id = nil,
     next_session_id = 1,

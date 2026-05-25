@@ -5,15 +5,19 @@ provider. The parser lives in `lua/nvime/diff.lua`; the prompt rules live in
 `lua/nvime/edit.lua`.
 
 Agents must return exactly one machine-readable response block. The ONLY prose
-allowed before that block is one optional sentence-shaped line:
+allowed before that block is one or two optional sentence-shaped lines:
 
 - Normal edit mode: a `RATIONALE:` line that states the agent's self-check
   (bug → patch → why correct), surfaced verbatim to the user in the diff
   review header.
+- Normal edit mode (optional): a `VERIFY:` line attesting that the agent ran
+  the `nvime.verify_file` MCP tool on the proposed content and obtained a
+  clean result. Format: `VERIFY: ok` or `VERIFY: <N> findings`. Surfaced
+  verbatim alongside `RATIONALE:` in the banner.
 - Perf mode: a single `BENCH: orig=<t1>s cand=<t2>s speedup=<x>x n=<size>`
   line.
 
-Anything beyond that single line is ignored by the parser.
+Anything beyond those lines is ignored by the parser.
 
 ## RATIONALE: line
 
@@ -32,6 +36,27 @@ Multi-line continuations are tolerated only when subsequent lines start with
 A rationale is intentionally cheap insurance against speculative edits: the
 prompt instructs the agent to emit `NVIME_NO_CHANGE` if it cannot justify the
 change in one sentence.
+
+## VERIFY: line
+
+A single optional line of the form
+
+```text
+VERIFY: ok
+VERIFY: 3 findings (1 error)
+VERIFY: skipped (no checks available)
+```
+
+placed before any `NVIME_DIFF` or `NVIME_REPLACEMENT` marker (next to the
+`RATIONALE:` line). The parser captures the text and surfaces it in the diff
+banner under `verify`.
+
+The intent is mechanical, not semantic: the agent is expected to call the
+`nvime.verify_file` MCP tool against the proposed full-file content and
+report the resulting `status` here. nvime then re-runs the same checks on
+the user's side and treats the two as belt-and-suspenders. A `parse error`
+result blocks silent `ga` / `gA` accept; `gA!` overrides and writes a
+`verify_force` audit event.
 
 ## Response Forms
 

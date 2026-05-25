@@ -1,4 +1,5 @@
 local audit = require("nvime.audit")
+local git = require("nvime.git")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
 
@@ -12,6 +13,16 @@ end
 
 local function max_visual_block_lines()
   return math.max(4, tonumber(diff_config().max_visual_block_lines) or 12)
+end
+
+local function normalize_file_key(path)
+  if not path or path == "" then
+    return nil
+  end
+  path = tostring(path):gsub("\\", "/")
+  path = path:gsub('^"', ""):gsub('"$', "")
+  path = path:gsub("^a/", ""):gsub("^b/", ""):gsub("^%./", "")
+  return path
 end
 
 local function split_lines(text)
@@ -248,6 +259,35 @@ local function copy_lines(lines)
   return out
 end
 
+local function sorted_session_blocks(session)
+  local blocks = {}
+  for _, block in ipairs((session and session.blocks) or {}) do
+    blocks[#blocks + 1] = block
+  end
+  table.sort(blocks, function(a, b)
+    if a.old_start == b.old_start then
+      return a.id < b.id
+    end
+    return a.old_start < b.old_start
+  end)
+  return blocks
+end
+
+local function lines_match_at(lines, start_index, expected)
+  if #expected == 0 then
+    return true
+  end
+  if start_index < 0 or start_index + #expected > #lines then
+    return false
+  end
+  for index = 1, #expected do
+    if lines[start_index + index] ~= expected[index] then
+      return false
+    end
+  end
+  return true
+end
+
 local function is_unresolved(block)
   return block and (block.status == "pending" or block.status == "conflict")
 end
@@ -477,12 +517,7 @@ local function dedupe_hunks(hunks)
 end
 
 local function clean_diff_path(path)
-  if not path then
-    return nil
-  end
-  path = path:gsub('^"', ""):gsub('"$', "")
-  path = path:gsub("^a/", ""):gsub("^b/", "")
-  return path
+  return normalize_file_key(path)
 end
 
 local function validate_current_file(lines, expected)
@@ -704,6 +739,169 @@ local function target_line_count(session)
   return vim.api.nvim_buf_line_count(session.target_bufnr)
 end
 
+local function current_changedtick(session)
+  if session and session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
+    return vim.api.nvim_buf_get_changedtick(session.target_bufnr)
+  end
+  return nil
+end
+
+local function mark_model_synced(session)
+  session.model_changedtick = current_changedtick(session)
+end
+
+local function accepted_delta(block)
+  return #(block.new_lines or {}) - (block.old_count or 0)
+end
+
+local function deletion_context_matches(session, block, live_lines, start_index)
+  local original = (session and session.original_lines) or {}
+  if #original == 0 and session and session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
+    original = vim.api.nvim_buf_get_lines(session.target_bufnr, 0, -1, false)
+  end
+  local context = {}
+  local first_context_line = (block.old_start or 1) + math.max(block.old_count or 0, 1)
+  for index = first_context_line, math.min(#original, first_context_line + 2) do
+    context[#context + 1] = original[index]
+  end
+  if #context == 0 then
+    return start_index >= #live_lines
+  end
+  return lines_match_at(live_lines, start_index, context)
+end
+
+local function live_block_status(session, block, live_lines, offset)
+  if block.status == "rejected" then
+    return "rejected"
+  end
+
+  local old_lines = block.old_lines or {}
+  local new_lines = block.new_lines or {}
+  local start_index = math.max(0, math.min((block.old_start or 1) - 1 + offset, #live_lines))
+
+  if #old_lines == 0 then
+    if #new_lines > 0 and lines_match_at(live_lines, start_index, new_lines) then
+      return "accepted"
+    end
+    return "pending"
+  end
+
+  if #new_lines > 0 and lines_match_at(live_lines, start_index, new_lines) then
+    return "accepted"
+  end
+  if lines_match_at(live_lines, start_index, old_lines) then
+    return "pending"
+  end
+  if #new_lines == 0 and deletion_context_matches(session, block, live_lines, start_index) then
+    return "accepted"
+  end
+
+  return nil
+end
+
+local function rebuild_applied_tracking(session)
+  local applied = {}
+  local accepted = {}
+  local accepted_start_indexes = {}
+  local offset = 0
+
+  for _, block in ipairs(sorted_session_blocks(session)) do
+    local start_index = math.max(0, (block.old_start or 1) - 1 + offset)
+    if block.status == "accepted" then
+      accepted[block.id] = block
+      accepted_start_indexes[block.id] = start_index
+      applied[#applied + 1] = {
+        block_id = block.id,
+        old_start = block.old_start,
+        delta = accepted_delta(block),
+      }
+      offset = offset + accepted_delta(block)
+    end
+  end
+
+  session.applied = applied
+
+  local history = {}
+  local seen = {}
+  for _, entry in ipairs(session.applied_history or {}) do
+    if entry.block_id and accepted[entry.block_id] and not seen[entry.block_id] then
+      history[#history + 1] = entry
+      seen[entry.block_id] = true
+    end
+  end
+
+  for _, block in ipairs(sorted_session_blocks(session)) do
+    if accepted[block.id] and not seen[block.id] then
+      history[#history + 1] = {
+        block = block,
+        block_id = block.id,
+        start_index = accepted_start_indexes[block.id] or 0,
+        old_lines = copy_lines(block.old_lines),
+        new_lines = copy_lines(block.new_lines),
+        synthetic = true,
+      }
+      seen[block.id] = true
+    end
+  end
+
+  session.applied_history = history
+end
+
+local function reconcile_live_state(session)
+  if not (session and session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr)) then
+    return
+  end
+  local changedtick = current_changedtick(session)
+  if session.model_changedtick and session.model_changedtick == changedtick then
+    return
+  end
+  if not session.blocks then
+    build_blocks(session)
+  end
+
+  local live_lines = vim.api.nvim_buf_get_lines(session.target_bufnr, 0, -1, false)
+  local offset = 0
+  local changed = false
+  local reopened = false
+
+  for _, block in ipairs(sorted_session_blocks(session)) do
+    local status = live_block_status(session, block, live_lines, offset)
+    if status and status ~= block.status then
+      local previous = block.status
+      block.status = status
+      if status ~= "conflict" then
+        block.conflict = nil
+      end
+      if previous == "accepted" and is_unresolved(block) then
+        reopened = true
+      end
+      block.mark_id = nil
+      changed = true
+    end
+    if (status or block.status) == "accepted" then
+      offset = offset + accepted_delta(block)
+    end
+  end
+
+  for _, hunk in ipairs(session.hunks or {}) do
+    update_hunk_status(hunk)
+  end
+  rebuild_applied_tracking(session)
+  session.model_changedtick = changedtick
+
+  if changed then
+    if reopened then
+      session.on_resolved_fired = false
+    end
+    session.visual_groups = nil
+    audit.write({
+      event = "diff_live_state_reconciled",
+      path = session.file,
+      changedtick = changedtick,
+    })
+  end
+end
+
 local function block_start_line(session, block)
   if block.mark_id then
     local mark = vim.api.nvim_buf_get_extmark_by_id(session.target_bufnr, ns, block.mark_id, {})
@@ -725,6 +923,8 @@ local function block_range(session, block)
   local old_count = math.max(block.old_count, 1)
   return start_line, start_line + old_count - 1
 end
+
+local render_session
 
 local function current_file_window(bufnr)
   local fallback = nil
@@ -751,6 +951,278 @@ local function focus_target(session)
   else
     vim.api.nvim_set_current_buf(session.target_bufnr)
   end
+end
+
+local function diff_registry()
+  state.diffs = state.diffs or {}
+  state.diffs.active_by_bufnr = state.diffs.active_by_bufnr or {}
+  state.diffs.active_by_path = state.diffs.active_by_path or {}
+  state.diffs.queue_by_path = state.diffs.queue_by_path or {}
+  return state.diffs
+end
+
+local function session_path_key(session)
+  if not session then
+    return nil
+  end
+  session.path_key = session.path_key or normalize_file_key(session.file)
+  return session.path_key
+end
+
+local function buffer_file_key(bufnr)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return nil
+  end
+  local name = vim.api.nvim_buf_get_name(bufnr)
+  if not name or name == "" or name:match("^nvime://") then
+    return nil
+  end
+  return normalize_file_key(git.repo_relative_path(name) or name)
+end
+
+local function session_pending_count(session)
+  if not session then
+    return 0
+  end
+  if not session.blocks then
+    build_blocks(session)
+  end
+  local pending = 0
+  for _, block in ipairs(session.blocks or {}) do
+    if is_unresolved(block) then
+      pending = pending + 1
+    end
+  end
+  return pending
+end
+
+local function session_is_active(session)
+  if not session then
+    return false
+  end
+  local registry = diff_registry()
+  local key = session_path_key(session)
+  return (key and registry.active_by_path[key] == session)
+    or (session.target_bufnr and registry.active_by_bufnr[session.target_bufnr] == session)
+end
+
+local function unregister_session(session, opts)
+  opts = opts or {}
+  if not session then
+    return
+  end
+  local registry = diff_registry()
+  local key = session_path_key(session)
+  if key and registry.active_by_path[key] == session then
+    registry.active_by_path[key] = nil
+  end
+  if session.target_bufnr and registry.active_by_bufnr[session.target_bufnr] == session then
+    registry.active_by_bufnr[session.target_bufnr] = nil
+  end
+  session.active = false
+  if state.current_diff == session and not opts.keep_current then
+    state.current_diff = nil
+  end
+end
+
+local function set_active_session(session, opts)
+  opts = opts or {}
+  local key = session_path_key(session)
+  local registry = diff_registry()
+  if key then
+    registry.active_by_path[key] = session
+  end
+  if session.target_bufnr then
+    registry.active_by_bufnr[session.target_bufnr] = session
+  end
+  session.active = true
+  session.queued = false
+  if opts.make_current ~= false then
+    state.current_diff = session
+  end
+end
+
+local function queued_count(key)
+  local queue = key and diff_registry().queue_by_path[key] or nil
+  return queue and #queue or 0
+end
+
+local function reset_session_render_model(session)
+  session.blocks = nil
+  session.visual_groups = nil
+  session.applied = {}
+  for _, hunk in ipairs(session.hunks or {}) do
+    hunk.blocks = nil
+    hunk.status = "pending"
+  end
+end
+
+local function activate_session(session, opts)
+  opts = opts or {}
+  if opts.reanchor then
+    reanchor_hunks(session.selection, session.hunks)
+    reset_session_render_model(session)
+  end
+  set_active_session(session, opts)
+  -- Kick off the pre-accept verify lane on first activation. Queued sessions
+  -- skip verify at start_session time (their blocks aren't built yet, and
+  -- building them early would touch the shared buffer's extmark state used
+  -- by the currently active diff); we run it here when they promote.
+  if not session.verify_started then
+    local ok_verify, verify = pcall(require, "nvime.verify")
+    if ok_verify and verify and type(verify.start) == "function" then
+      session.verify_started = true
+      pcall(verify.start, session)
+    end
+  end
+  render_session(session, {
+    focus = opts.focus,
+    silent = opts.silent,
+  })
+end
+
+local function promote_queued_session(key)
+  local registry = diff_registry()
+  local queue = key and registry.queue_by_path[key] or nil
+  while queue and #queue > 0 do
+    local next_session = table.remove(queue, 1)
+    if next_session and next_session.target_bufnr and vim.api.nvim_buf_is_valid(next_session.target_bufnr) then
+      local current_bufnr = vim.api.nvim_get_current_buf()
+      local make_current = current_bufnr == next_session.target_bufnr or state.current_diff == nil
+      activate_session(next_session, {
+        reanchor = true,
+        focus = current_bufnr == next_session.target_bufnr,
+        make_current = make_current,
+      })
+      vim.notify("nvime diff: next queued diff active for " .. tostring(next_session.file), vim.log.levels.INFO)
+      return next_session
+    end
+  end
+  if key then
+    registry.queue_by_path[key] = nil
+  end
+  return nil
+end
+
+local function complete_resolved_session(session)
+  local key = session_path_key(session)
+  unregister_session(session, { keep_current = true })
+  if key then
+    promote_queued_session(key)
+  end
+end
+
+local function active_session_for_bufnr(bufnr)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return nil
+  end
+  local registry = diff_registry()
+  local session = registry.active_by_bufnr[bufnr]
+  if session and session_pending_count(session) > 0 then
+    return session
+  elseif session then
+    unregister_session(session)
+  end
+
+  local key = buffer_file_key(bufnr)
+  session = key and registry.active_by_path[key] or nil
+  if session and session_pending_count(session) > 0 then
+    return session
+  elseif session then
+    unregister_session(session)
+  end
+  return nil
+end
+
+local function session_for_context(opts)
+  opts = opts or {}
+  local current_bufnr = vim.api.nvim_get_current_buf()
+  local session = active_session_for_bufnr(current_bufnr)
+  if session then
+    state.current_diff = session
+    return session
+  end
+
+  local current_winid = vim.api.nvim_get_current_win()
+  for _, active in pairs(diff_registry().active_by_path) do
+    local review = active and active.review
+    if
+      review
+      and (
+        review.proposed_bufnr == current_bufnr
+        or review.proposed_winid == current_winid
+        or review.target_winid == current_winid
+      )
+      and session_pending_count(active) > 0
+    then
+      state.current_diff = active
+      return active
+    end
+  end
+
+  if not buffer_file_key(current_bufnr) and state.current_diff and session_is_active(state.current_diff) then
+    return state.current_diff
+  end
+  if
+    opts.include_resolved
+    and state.current_diff
+    and (
+      state.current_diff.target_bufnr == current_bufnr
+      or not buffer_file_key(current_bufnr)
+      or (
+        state.current_diff.review
+        and (
+          state.current_diff.review.proposed_bufnr == current_bufnr
+          or state.current_diff.review.proposed_winid == current_winid
+          or state.current_diff.review.target_winid == current_winid
+        )
+      )
+    )
+  then
+    return state.current_diff
+  end
+  return nil
+end
+
+function M.current_session()
+  return session_for_context()
+end
+
+local function session_for_action()
+  return session_for_context({ include_resolved = true })
+end
+
+local function register_session(session)
+  local key = session_path_key(session)
+  local registry = diff_registry()
+  local existing = key and registry.active_by_path[key] or nil
+  if existing and existing ~= session and session_pending_count(existing) == 0 then
+    unregister_session(existing)
+    existing = nil
+  end
+
+  if existing and existing ~= session then
+    local queue = registry.queue_by_path[key] or {}
+    registry.queue_by_path[key] = queue
+    session.queued = true
+    table.insert(queue, session)
+    vim.notify(
+      string.format("nvime diff: queued for %s (%d waiting)", tostring(session.file), queued_count(key)),
+      vim.log.levels.INFO
+    )
+    return "queued"
+  end
+
+  local current_bufnr = vim.api.nvim_get_current_buf()
+  local focus = current_bufnr == session.target_bufnr or active_session_for_bufnr(current_bufnr) == nil
+  activate_session(session, {
+    focus = focus,
+    make_current = focus or state.current_diff == nil,
+  })
+  if not focus then
+    vim.notify("nvime diff: active for " .. tostring(session.file) .. "; switch to that buffer to review", vim.log.levels.INFO)
+  end
+  return "active"
 end
 
 local function install_buffer_maps(session)
@@ -1199,6 +1671,40 @@ local function render_visual_group(session, group)
       { clip_review_text(session, rationale_text), "NvimeQuote" },
     }
   end
+  if (group.index or 1) == 1 and session.verify then
+    -- Pre-accept verify lane: tree-sitter parse + configured lint/type
+    -- checks against the proposed full-file content. A parse error in
+    -- the proposed content blocks silent ga/gA (force via gA!).
+    local ok_verify, verify = pcall(require, "nvime.verify")
+    if ok_verify and verify and type(verify.banner_rows) == "function" then
+      for _, row in ipairs(verify.banner_rows(session, ui.icon) or {}) do
+        virt_lines[#virt_lines + 1] = {
+          { clip_review_text(session, row[1]), row[2] },
+        }
+      end
+    end
+  end
+  if (group.index or 1) == 1 and session.verify_attestation and session.verify_attestation ~= "" then
+    virt_lines[#virt_lines + 1] = {
+      {
+        clip_review_text(session, "  agent VERIFY: " .. session.verify_attestation),
+        "NvimeMuted",
+      },
+    }
+  end
+  if (group.index or 1) == 1 then
+    -- Blast-radius badge: lines, bracket drift, ai-share, sensitive tags.
+    -- Advisory only; the `gA!` confirmation lives in accept_blocks.
+    local ok_risk, risk = pcall(require, "nvime.risk")
+    if ok_risk and risk and type(risk.banner_row) == "function" then
+      local row = risk.banner_row(session, ui.icon)
+      if row then
+        virt_lines[#virt_lines + 1] = {
+          { clip_review_text(session, row[1]), row[2] },
+        }
+      end
+    end
+  end
   if (group.index or 1) == 1 and session.verdict_pending then
     virt_lines[#virt_lines + 1] = {
       { clip_review_text(session, "  " .. ui.icon("pending") .. " critic reviewing patch…"), "NvimeMuted" },
@@ -1296,14 +1802,19 @@ local function render_visual_group(session, group)
   })
 end
 
-local function render_session(session, opts)
+render_session = function(session, opts)
   opts = opts or {}
   if not session.blocks then
     build_blocks(session)
   end
+  if opts.reconcile ~= false then
+    reconcile_live_state(session)
+  end
   vim.api.nvim_buf_clear_namespace(session.target_bufnr, ns, 0, -1)
   install_buffer_maps(session)
-  focus_target(session)
+  if opts.focus ~= false then
+    focus_target(session)
+  end
 
   for _, hunk in ipairs(session.hunks) do
     update_hunk_status(hunk)
@@ -1325,7 +1836,9 @@ local function render_session(session, opts)
   -- the hook the plan executor uses to auto-run the step's tests and offer
   -- to mark it done. Pass the pre-patch snapshot so the caller can offer a
   -- rollback if the post-acceptance tests fail.
+  local resolved_now = false
   if pending == 0 and not session.on_resolved_fired then
+    resolved_now = true
     session.on_resolved_fired = true
     local payload = {
       accepted = accepted,
@@ -1384,6 +1897,9 @@ local function render_session(session, opts)
     end
   end
   refresh_review_view(session)
+  if resolved_now then
+    complete_resolved_session(session)
+  end
 end
 
 local function build_single_hunk(selection, replacement_text)
@@ -1472,8 +1988,28 @@ local function extract_rationale(response)
   return table.concat(out, " ")
 end
 
+-- Capture an optional single-line `VERIFY:` attestation emitted before the
+-- first NVIME_* marker. Surfaced verbatim in the banner so the user can see
+-- the agent's self-check before nvime re-runs the same checks on this end.
+local function extract_verify_line(response)
+  if type(response) ~= "string" or response == "" then
+    return nil
+  end
+  for _, line in ipairs(split_lines(response)) do
+    if line:match("^%s*NVIME_[A-Z_]+%s*$") or line:match("^%s*```") then
+      return nil
+    end
+    local body = line:match("^%s*VERIFY:%s*(.*)$")
+    if body and body ~= "" then
+      return vim.trim(body)
+    end
+  end
+  return nil
+end
+
 function M.start_session(selection, response, provider, prompt)
   local rationale = extract_rationale(response)
+  local verify_attestation = extract_verify_line(response)
   local mode, body = response_mode(response)
   body = body or response
 
@@ -1550,6 +2086,7 @@ function M.start_session(selection, response, provider, prompt)
 
   local session = {
     file = selection.path,
+    path_key = normalize_file_key(selection.path),
     bufnr = nil,
     target_bufnr = selection.bufnr,
     selection = selection,
@@ -1560,6 +2097,7 @@ function M.start_session(selection, response, provider, prompt)
     provider = provider,
     prompt = prompt,
     rationale = rationale,
+    verify_attestation = verify_attestation,
     applied = {},
     applied_history = {},
   }
@@ -1582,11 +2120,11 @@ function M.start_session(selection, response, provider, prompt)
   end
   session.warnings = warnings
 
-  state.current_diff = session
-  render_session(session)
+  local registry_status = register_session(session)
   return {
     status = "diff",
     session = session,
+    queued = registry_status == "queued",
   }
 end
 
@@ -1618,9 +2156,9 @@ local function uninstall_target_close_map(session)
 end
 
 function M.open_view()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
-    vim.notify("No active nvime diff session", vim.log.levels.WARN)
+    vim.notify("No active nvime diff for the current buffer", vim.log.levels.WARN)
     return
   end
   if not (session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr)) then
@@ -1630,6 +2168,7 @@ function M.open_view()
   if not session.blocks then
     build_blocks(session)
   end
+  reconcile_live_state(session)
 
   local proposed_bufnr = ensure_review_buffer(session, "proposed", proposed_lines(session))
   install_review_maps(proposed_bufnr)
@@ -1673,7 +2212,7 @@ function M.open_view()
 end
 
 function M.focus_editable()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
@@ -1686,7 +2225,7 @@ function M.focus_editable()
 end
 
 function M.refresh_view()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
@@ -1694,7 +2233,7 @@ function M.refresh_view()
 end
 
 function M.close_view()
-  local session = state.current_diff
+  local session = session_for_action()
   local review = session and session.review
   if not review then
     return
@@ -1848,6 +2387,14 @@ local function apply_block(session, block, start_line_override, opts)
   local start_line = start_line_override or block_start_line(session, block)
   local start_index = math.max(0, math.min(start_line - 1, target_line_count(session)))
   local end_index = math.max(start_index, math.min(start_index + block.old_count, target_line_count(session)))
+  local live_lines = vim.api.nvim_buf_get_lines(session.target_bufnr, 0, -1, false)
+  if #replacement > 0 and lines_match_at(live_lines, start_index, replacement) then
+    block.status = "accepted"
+    block.was_forced = block.was_forced or opts.force == true
+    block.conflict = nil
+    update_hunk_status(block.hunk)
+    return 0
+  end
   if not opts.force then
     local matches, live_lines = live_block_matches(session, block, start_index, end_index)
     if not matches then
@@ -1893,6 +2440,7 @@ local function apply_block(session, block, start_line_override, opts)
       line2 = start_index + #replacement,
       lines = replacement,
       rationale = session.rationale,
+      user_rationale = session.user_rationale,
       verdict = session.verdict,
       provider = session.provider,
       plan_id = session.plan_id,
@@ -1927,9 +2475,9 @@ local function remove_last_applied_delta(session, entry)
 end
 
 function M.undo_last_accept()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
-    vim.notify("No active nvime diff session", vim.log.levels.WARN)
+    vim.notify("No active nvime diff for the current buffer", vim.log.levels.WARN)
     return
   end
   local history = session.applied_history or {}
@@ -1942,6 +2490,15 @@ function M.undo_last_accept()
     vim.notify("The nvime diff target buffer is no longer valid", vim.log.levels.WARN)
     history[#history + 1] = entry
     return
+  end
+  reconcile_live_state(session)
+  history = session.applied_history or {}
+  if not entry.block or entry.block.status ~= "accepted" then
+    entry = table.remove(history)
+    if not entry then
+      vim.notify("No accepted nvime block to undo", vim.log.levels.INFO)
+      return
+    end
   end
 
   local start_index = math.max(0, math.min(entry.start_index or 0, target_line_count(session)))
@@ -1960,6 +2517,9 @@ function M.undo_last_accept()
     block.conflict = nil
     update_hunk_status(block.hunk)
   end
+  if not session_is_active(session) then
+    set_active_session(session)
+  end
   remove_last_applied_delta(session, entry)
   audit.write({
     event = "block_undo_applied",
@@ -1967,19 +2527,117 @@ function M.undo_last_accept()
     block_id = entry.block_id,
     start_line = start_index + 1,
   })
+  mark_model_synced(session)
   render_session(session)
 end
 
 function M.accept_blocks(blocks, opts)
   opts = opts or {}
-  local session = state.current_diff
+  local session = (blocks and blocks[1] and blocks[1].session) or session_for_action()
   if not session then
-    vim.notify("No active nvime diff session", vim.log.levels.WARN)
+    vim.notify("No active nvime diff for the current buffer", vim.log.levels.WARN)
     return
   end
+  reconcile_live_state(session)
   if not blocks or #blocks == 0 then
     vim.notify("No pending nvime line change selected", vim.log.levels.WARN)
     return
+  end
+
+  -- Pre-accept verify gate. A parse error in the proposed file refuses
+  -- silent ga/gA; gA!/`:NvimeAccept!` still works and logs a
+  -- verify_force audit event so the digest can surface it.
+  local ok_verify, verify = pcall(require, "nvime.verify")
+  if ok_verify and verify and type(verify.should_block_accept) == "function" then
+    local should_block, reason = verify.should_block_accept(session)
+    if should_block and not opts.force then
+      vim.notify("nvime verify: " .. (reason or "blocked"), vim.log.levels.WARN)
+      audit.write({
+        event = "verify_block",
+        file = session.file,
+        reason = reason,
+      })
+      return
+    end
+    if should_block and opts.force then
+      audit.write({
+        event = "verify_force",
+        file = session.file,
+        reason = reason,
+      })
+    end
+  end
+
+  -- High-risk force-accept confirmation. Only fires when (1) opts.force is
+  -- set (gA!), (2) the risk score is `high`, and (3) the user has not
+  -- disabled the confirm. Writes a `risk_force` audit event on proceed.
+  if opts.force then
+    local ok_risk, risk = pcall(require, "nvime.risk")
+    if ok_risk and risk and type(risk.confirm_force_accept) == "function" then
+      if not risk.confirm_force_accept(session) then
+        vim.notify("nvime risk: force-accept cancelled", vim.log.levels.INFO)
+        return
+      end
+    end
+  end
+
+  -- Per-path policy gate at accept time. The lane entry points already
+  -- gate, but a paste-in patch or chat-driven diff can sidestep that;
+  -- re-evaluate here against the proposed change size so max_changed_lines
+  -- and `require_human` rules still apply.
+  local ok_policy_accept, policy_rules_accept = pcall(require, "nvime.policy_rules")
+  if ok_policy_accept and policy_rules_accept and type(policy_rules_accept.guard) == "function" then
+    local changed_lines = 0
+    for _, block_entry in ipairs(blocks) do
+      local block_obj = block_entry
+      changed_lines = changed_lines + (block_obj.old_count or 0) + #(block_obj.new_lines or {})
+    end
+    if not policy_rules_accept.guard(session.file, "accept", { changed_lines = changed_lines }) then
+      return
+    end
+    -- require_rationale_typed_by_user: when the matched rule asks for one,
+    -- prompt the user to type a sentence-shaped justification and store it
+    -- on the session. It is later attached to every attribution entry for
+    -- these blocks. Skip the prompt if the session already captured one
+    -- (multi-block accepts shouldn't re-prompt) or in non-interactive mode.
+    local eval = policy_rules_accept.evaluate(session.file, "accept", { changed_lines = changed_lines })
+    if eval.require_rationale_typed_by_user and not session.user_rationale then
+      if opts.user_rationale and opts.user_rationale ~= "" then
+        session.user_rationale = opts.user_rationale
+      elseif vim.env.NVIME_NONINTERACTIVE == "1" then
+        vim.notify(
+          "nvime policy: this path requires a user rationale; pass opts.user_rationale or run interactively",
+          vim.log.levels.WARN
+        )
+        audit.write({
+          event = "policy_rationale_missing",
+          file = session.file,
+          rule = eval.rule and eval.rule.match,
+        })
+        return
+      else
+        local typed = vim.fn.input({
+          prompt = string.format("nvime policy (%s): one-line rationale: ", eval.rule and eval.rule.match or "?"),
+          cancelreturn = "",
+        })
+        if not typed or vim.trim(typed) == "" then
+          vim.notify("nvime policy: rationale required; accept cancelled", vim.log.levels.WARN)
+          audit.write({
+            event = "policy_rationale_missing",
+            file = session.file,
+            rule = eval.rule and eval.rule.match,
+          })
+          return
+        end
+        session.user_rationale = vim.trim(typed)
+      end
+      audit.write({
+        event = "policy_rationale_recorded",
+        file = session.file,
+        rule = eval.rule and eval.rule.match,
+        rationale = session.user_rationale,
+      })
+    end
   end
 
   local plan = {}
@@ -2001,15 +2659,17 @@ function M.accept_blocks(blocks, opts)
   for _, item in ipairs(plan) do
     offset = offset + apply_block(session, item.block, item.start_line + offset, opts)
   end
+  mark_model_synced(session)
   render_session(session)
 end
 
 function M.reject_blocks(blocks)
-  local session = state.current_diff
+  local session = (blocks and blocks[1] and blocks[1].session) or session_for_action()
   if not session then
-    vim.notify("No active nvime diff session", vim.log.levels.WARN)
+    vim.notify("No active nvime diff for the current buffer", vim.log.levels.WARN)
     return
   end
+  reconcile_live_state(session)
   if not blocks or #blocks == 0 then
     vim.notify("No pending nvime line change selected", vim.log.levels.WARN)
     return
@@ -2018,13 +2678,15 @@ function M.reject_blocks(blocks)
   for _, block in ipairs(blocks) do
     reject_block(block)
   end
+  mark_model_synced(session)
   render_session(session)
 end
 
 function M.accept_hunks(hunks, opts)
-  local session = state.current_diff
+  local session = (hunks and hunks[1] and hunks[1].blocks and hunks[1].blocks[1] and hunks[1].blocks[1].session)
+    or session_for_action()
   if not session then
-    vim.notify("No active nvime diff session", vim.log.levels.WARN)
+    vim.notify("No active nvime diff for the current buffer", vim.log.levels.WARN)
     return
   end
   if not hunks or #hunks == 0 then
@@ -2033,6 +2695,7 @@ function M.accept_hunks(hunks, opts)
   end
 
   local blocks = {}
+  reconcile_live_state(session)
   for _, hunk in ipairs(hunks) do
     for _, block in ipairs(hunk.blocks or {}) do
       if is_unresolved(block) then
@@ -2044,11 +2707,13 @@ function M.accept_hunks(hunks, opts)
 end
 
 function M.reject_hunks(hunks)
-  local session = state.current_diff
+  local session = (hunks and hunks[1] and hunks[1].blocks and hunks[1].blocks[1] and hunks[1].blocks[1].session)
+    or session_for_action()
   if not session or not hunks or #hunks == 0 then
     return
   end
   local blocks = {}
+  reconcile_live_state(session)
   for _, hunk in ipairs(hunks) do
     for _, block in ipairs(hunk.blocks or {}) do
       if block.status == "pending" then
@@ -2060,44 +2725,49 @@ function M.reject_hunks(hunks)
 end
 
 function M.accept_current()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   M.accept_blocks({ current_block(session) })
 end
 
 function M.accept_selection()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local first, last = selected_lines()
   M.accept_blocks(blocks_in_range(session, first, last))
 end
 
 function M.reject_current()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   M.reject_blocks({ current_block(session) })
 end
 
 function M.reject_selection()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local first, last = selected_lines()
   M.reject_blocks(blocks_in_range(session, first, last))
 end
 
 function M.accept_current_group(opts)
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local group = current_group(session)
   if not group then
     vim.notify("No pending nvime change block selected", vim.log.levels.WARN)
@@ -2107,10 +2777,11 @@ function M.accept_current_group(opts)
 end
 
 function M.reject_current_group()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local group = current_group(session)
   if not group then
     vim.notify("No pending nvime change block selected", vim.log.levels.WARN)
@@ -2121,10 +2792,11 @@ end
 
 function M.accept_all(opts)
   opts = opts or {}
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   if session.warnings and #session.warnings > 0 and not session.warnings_overridden and not opts.force then
     local choice = vim.fn.confirm(
       "nvime diff has truncation warnings:\n  - "
@@ -2143,10 +2815,11 @@ function M.accept_all(opts)
 end
 
 function M.reject_all()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   M.reject_blocks(pending_blocks(session))
 end
 
@@ -2171,10 +2844,11 @@ local function jump_to_group(session, group)
 end
 
 function M.next_change()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local cursor = vim.api.nvim_win_get_cursor(0)[1]
   local blocks = pending_blocks(session)
   for _, block in ipairs(blocks) do
@@ -2187,10 +2861,11 @@ function M.next_change()
 end
 
 function M.next_group()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local cursor = vim.api.nvim_win_get_cursor(0)[1]
   local groups = pending_visual_groups(session)
   for _, group in ipairs(groups) do
@@ -2203,10 +2878,11 @@ function M.next_group()
 end
 
 function M.prev_change()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local cursor = vim.api.nvim_win_get_cursor(0)[1]
   local blocks = pending_blocks(session)
   for index = #blocks, 1, -1 do
@@ -2220,10 +2896,11 @@ function M.prev_change()
 end
 
 function M.prev_group()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return
   end
+  reconcile_live_state(session)
   local cursor = vim.api.nvim_win_get_cursor(0)[1]
   local groups = pending_visual_groups(session)
   for index = #groups, 1, -1 do
@@ -2257,10 +2934,11 @@ local function block_state_lines(label, blocks)
 end
 
 function M.remaining_text()
-  local session = state.current_diff
+  local session = session_for_action()
   if not session then
     return nil
   end
+  reconcile_live_state(session)
   local current = current_block(session)
   local accepted = {}
   local rejected = {}
@@ -2297,8 +2975,15 @@ end
 -- verdict lands so the diff banner gains a verdict badge).
 function M.refresh_session(session)
   if session and session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
-    render_session(session, { silent = true })
+    render_session(session, { silent = true, focus = false })
   end
+end
+
+-- Internal: exposed so nvime.verify can read the post-accept proposed file
+-- content without duplicating apply_blocks_to_lines. Underscore-prefixed
+-- because it is not part of the public diff API.
+function M._proposed_lines(session)
+  return proposed_lines(session)
 end
 
 return M

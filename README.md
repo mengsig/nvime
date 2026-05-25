@@ -9,6 +9,7 @@ It is a Neovim Lua plugin for getting real work done with Claude Code and Codex 
 - **generation**: fill blank ranges or non-code files like `.gitignore`
 - **plan**: agent drafts a roadmap (`.nvime/plans/<id>/plan.json` + `plan.md`); you execute step-by-step — code lands only where you approved the shape
 - **rationalized patches**: every edit ships a one-line `RATIONALE:` (bug → patch → why) in the diff banner before you accept
+- **pre-accept verify lane**: tree-sitter parse + configured linters/type-checkers run against the proposed file content; parse errors block silent accept (`gA!` overrides and writes a `verify_force` audit event). Agents that have the nvime MCP server can self-check via `nvime.verify_file` and report a `VERIFY:` line — belt-and-suspenders, never the contract
 - **devil's-advocate critic**: opt-in second pass returns APPROVE / FLAG / REJECT — advisory, never blocks. Default-on for plans
 - **auto-rollback**: tests fail after accept? one keystroke restores the pre-step file
 - **test scaffolder**: `:NvimePlan add-test <id> <step>` (or `gW`) fires the edit lane to write a regression test for that step
@@ -154,10 +155,22 @@ require("nvime").setup({
   },
   diff = {
     max_visual_block_lines = 12,
+    devils_advocate = false,
   },
   chat = {
     max_history_messages = 24,
   },
+  },
+  plan = {
+    enabled = true,
+    dir = nil, -- defaults to <git-root>/.nvime/plans
+    auto_open = true,
+    auto_in_progress = true,
+    inject_context_chars = 480,
+    devils_advocate = true,
+    test_file = nil,
+    test_runner = nil,
+    session_continuity = "plan", -- "plan" or "none"
   sessions = {
     enabled = true,
     path = nil, -- defaults to .nvime/selection-sessions.json in a git repo
@@ -221,6 +234,11 @@ require("nvime").setup({
       { label = "Explain selection", prompt = "Please explain what this selected code does..." },
       { label = "Suggest minimal diff", prompt = "Please suggest the smallest approvable diff..." },
       { label = "Proceed with fix", prompt = "Please proceed with the concrete fix..." },
+      { label = "Benchmark and optimize", prompt = "Profile this selection on representative inputs..." },
+    plan = {
+      { label = "Investigate before planning", prompt = "Before drafting steps, read the relevant files..." },
+      { label = "Refactor with diff budget", prompt = "Decompose this refactor into the smallest reviewable steps..." },
+      { label = "Bug investigation plan", prompt = "Identify the root cause, the exact files and ranges to change..." },
     },
   },
 })
@@ -422,6 +440,12 @@ compact control header per block. Large contiguous replacements are split into
 review-sized blocks by default (`diff.max_visual_block_lines = 12`) so an
 80-line rewrite is not one giant accept/reject target. The source buffer stays
 editable during review.
+
+Diff review is file-local. If multiple files receive patches close together,
+each file keeps its own active diff and `:NvimeDiff` opens the diff for the
+buffer you are currently in. If another patch lands for a file that already has
+an unresolved diff, nvime queues it and promotes it after the current diff is
+accepted or rejected.
 
 Inline diff mappings in the target file:
 

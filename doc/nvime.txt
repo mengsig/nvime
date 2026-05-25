@@ -268,6 +268,10 @@ Inline diff mappings in the target file:
         above, current red lines below, and one compact controls header per
         block. Large contiguous replacements are split into smaller visual
         blocks by default. Review units remain line-level internally.
+        Diff review is file-local: commands act on the active diff for the
+        current buffer/review pane. Different files can have independent active
+        diffs, while multiple diffs for the same file are queued and promoted
+        after the current diff is resolved.
         :NvimeDiff
                 open the proposed/editable review workspace
         ]n      next unresolved line
@@ -482,6 +486,23 @@ Common options:
             max_visual_block_lines = 12,
             devils_advocate = false,    -- enable critic for ALL edit-lane diffs (off by default)
           },
+          verify = {
+            enabled = true,
+            treesitter_parse = true,    -- universal pre-accept parse check
+            block_on_parse_error = true,-- refuse silent ga/gA on parse error
+            timeout_ms = 8000,          -- per-check timeout
+            checks = {},                -- user-defined checks merged with built-ins
+          },
+          risk = {
+            enabled = true,
+            sensitive_paths = nil,      -- defaults: migrations/lockfiles/secrets
+            generated_globs = nil,      -- defaults: protobuf/_generated
+            thresholds = {
+              lines = { medium = 40, high = 120 },
+              ai_share = { high = 0.5 },
+            },
+            confirm_on_force_high = true,
+          },
         })
 <
 
@@ -526,6 +547,9 @@ Top-level edit rules from the prompt contract:
         - Prefer NVIME_DIFF for any change to existing nonblank text.
         - NVIME_DIFF must include --- a/path, +++ b/path, and ranged @@
           headers.
+        - Optionally emit a `VERIFY:` line next to the rationale, attesting
+          that nvime.verify_file (MCP) reported `ok`. nvime re-runs the
+          same checks on the user's side before accept.
 
 Top-level perf rules from the prompt contract:
         - Focus on computational cost and scalability.
@@ -545,6 +569,185 @@ include an explicit patch verb such as "fix", "add", "remove", "replace",
 "implement", or "update".
 
 The full protocol is documented in PROTOCOL.md at the repository root.
+
+VERIFY LANE                                                       *nvime-verify*
+
+When a diff session opens, nvime runs the pre-accept verify lane against the
+*proposed* full-file content — the state the buffer would have if every
+pending block were accepted. The lane has three families of check:
+
+    parse     Tree-sitter parse of the proposed text. A parse error trips
+              the accept gate.
+    lint      Configured external linter matched by glob (ruff, shellcheck,
+              luacheck, selene, ...). Advisory only.
+    type      Configured type checker (mypy, etc.). Advisory only.
+
+Built-in checks ship for ruff (*.py), shellcheck (*.sh, *.bash), luacheck
+and selene (*.lua), gofmt -e (*.go), zig ast-check (*.zig), and mypy (*.py).
+A check is silently skipped when its binary is not on $PATH.
+
+User-defined checks merge in from `state.config.verify.checks`:
+
+>
+        verify = {
+          checks = {
+            eslint = {
+              match = { "*.ts", "*.tsx", "*.js", "*.jsx" },
+              kind = "lint",
+              cmd = function(tempfile)
+                return { "eslint", "--format=compact", tempfile }
+              end,
+              parse = function(stdout, stderr) ... end,
+            },
+          },
+        },
+<
+
+A parse error in the proposed content blocks silent `ga` / `gA` accept and
+writes a `verify_block` audit event. `gA!` / `:NvimeAccept!` overrides the
+gate and writes a `verify_force` event. Both events surface in
+`:NvimeAudit summary`.
+
+Agent-side verify: when nvime's MCP server is reachable, the patch worker
+is instructed to call `nvime.verify_file` on the proposed full-file content
+before emitting NVIME_DIFF and to report the result via a single optional
+`VERIFY: ok` / `VERIFY: <N> findings` line above the marker. nvime re-runs
+the same checks on this end at accept time, so the agent attestation is
+belt-and-suspenders rather than the contract.
+
+RISK BADGE                                                          *nvime-risk*
+
+Alongside the verify status, the diff banner shows a blast-radius badge:
+
+    risk medium · +42 −7 · {}: +1 · ai 31% · sensitive
+
+Inputs:
+    +N −M       lines added / removed across the session's hunks.
+    bracket     reuse of bracket-drift counts already computed by diff.lua.
+    ai N%       fraction of the file's lines covered by the attribution
+                ledger; a rough proxy for "lines authored by an agent".
+    tags        result of sensitive-path and generated-path glob matching;
+                defaults flag migrations, lockfiles, secrets, key files
+                and protobuf-generated code.
+
+Levels are advisory by default; only `gA!` / `:NvimeAccept!` on a `high`
+risk diff prompts a confirmation, after which `risk_force` is written to
+the audit ledger. The confirmation can be disabled with
+`risk.confirm_on_force_high = false`.
+
+PER-PATH POLICY                                                  *nvime-policy-rules*
+
+`.nvime/policy.json` declares per-path rules that gate which files the
+lanes are allowed to touch. Schema v1:
+
+>
+        {
+          "version": 1,
+          "rules": [
+            { "match": "migrations/**", "require_human": true },
+            { "match": "**/*.lock",     "require_human": true },
+            { "match": "secrets/**",    "require_human": true, "allow_lanes": [] },
+            { "match": "**/*.py",
+              "max_changed_lines": 80,
+              "allow_lanes": ["ask", "edit", "plan"] }
+          ]
+        }
+<
+
+Rule fields:
+    match                 glob (basename when no slash, full path otherwise)
+    require_human         absolute refusal — no lane may touch the file
+    max_changed_lines     accept-time cap on hunks affected
+    allow_lanes           subset of {ask, edit, plan, accept}; absent means all
+
+Defaults (applied only when the project file is missing) flag migrations,
+lockfiles, secrets, and private keys as `require_human`. The project file
+fully replaces defaults rather than merging, so the rule set on disk is
+always exactly what is active.
+
+Commands:
+    :NvimePolicy list
+        Print the active rule set.
+
+    :NvimePolicy check <path> [lane]
+        Evaluate a single path/lane and print the decision.
+
+    :NvimePolicy edit
+        Open .nvime/policy.json, creating it with a starter template
+        when it does not exist.
+
+Blocked attempts write a `policy_block` audit event that surfaces in
+`:NvimeAudit summary`.
+
+A rule may also set `require_rationale_typed_by_user = true`. The lane
+is still allowed to send a prompt, but at accept time the user is asked
+to type a one-line rationale (via `vim.fn.input`). The typed rationale
+lands in the attribution ledger entry as `user_rationale` and writes a
+`policy_rationale_recorded` audit event. Empty rationales cancel the
+accept (`policy_rationale_missing` is recorded). For non-interactive
+runs (`NVIME_NONINTERACTIVE=1` or programmatic `accept_all({
+user_rationale = "..." })`), the rationale must be supplied via opts or
+the accept refuses.
+
+INTENT LINTER                                                     *nvime-intent*
+
+Before the edit lane sends an intent to the model, a local heuristic
+classifies it as `ok`, `questionable`, or `vague`. The check is pure
+Lua and runs inside Neovim — no network calls, no extra tokens.
+
+Heuristics:
+    short                      < intent.min_words (default 4) → vague
+    vague phrase               "clean this up", "fix bugs", "polish",
+                               "look at", "make better" → vague
+    only vague verbs           "polish improve enhance optimize" with no
+                               concrete verb like add / rename / fix → vague
+    no concrete object         intent mentions a verb but only references
+                               "it" / "this" / "stuff" → questionable
+
+`vague` verdicts pop a confirmation; pressing Send writes an
+`intent_override` audit event, pressing Cancel writes `intent_block`.
+`questionable` verdicts notify and proceed. The plan executor bypasses
+the linter for plan-step prompts (which carry a structured plan-context
+header that the heuristic would misread as boilerplate).
+
+Optional model upgrade: set `intent.classifier = "model"` to have nvime
+consult a cheap provider call (via the read-only critic lane) whenever
+the heuristic returns `questionable`. The model can promote the verdict
+to `ok` or demote to `vague`. Verdicts are cached on disk at
+`.nvime/intent-cache.json` keyed by intent hash, so the same prompt is
+never re-classified. Model calls are bounded by
+`intent.model_timeout_ms` (default 5000); timeouts fall through to the
+heuristic and do not block.
+
+COMMIT HOOK + PR SIDECAR                                       *nvime-pr-hooks*
+
+Two surfaces lift the in-editor provenance into commit-level and
+PR-level review artifacts.
+
+The `prepare-commit-msg` hook lives at `scripts/nvime-commit-msg` and
+appends `Co-authored-by:` trailers based on the attribution ledger. It
+is installed via:
+
+    :NvimeHooks install
+    :NvimeHooks status
+    :NvimeHooks uninstall
+
+When a hook already exists at `.git/hooks/prepare-commit-msg`, nvime
+moves it aside to `prepare-commit-msg.nvime-prev` and chains: the
+user's hook runs first, then nvime's. Uninstall restores the chained
+hook. The hook is idempotent.
+
+`:NvimePr [--dry-run] [base-branch]` writes `.nvime/pr.md` — a single
+Markdown page summarizing the AI-attributed hunks on the current branch
+plus review-first events (`verify_force`, `risk_force`,
+`block_force_applied`, `policy_block`, `intent_override`). The base
+branch is auto-detected (origin/main → main → HEAD~1).
+
+The sidecar has three sections:
+    Review-first events — bypassed gates and forced actions; read first.
+    AI-attributed changes — per-file groups of attribution entries with
+                            rationale + critic verdict + timestamp.
+    Changed files without nvime attribution — pure-human surface area.
 
 ==============================================================================
 PLAN                                                                *nvime-plan*

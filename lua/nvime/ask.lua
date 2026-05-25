@@ -29,10 +29,10 @@ local function build_prompt(selection, question)
   end
   local fence = string.rep("`", max_run + 1)
   return table.concat({
-    "NVIME READ-ONLY SELECTION CHAT.",
-    "You are the read-only side agent inside Neovim.",
+    "NVIME READ-ONLY SELECTION CHAT — look, don't touch.",
+    "You are the read-only blade inside Neovim: sharp eyes, hands tied.",
     "Answer the user's question about the selected code. You may use read/search, web fetch/search, and shell commands such as curl for inspection, external docs, or tests when available.",
-    "Do not edit files directly. Do not produce a patch unless only explaining what a future patch would do.",
+    "Do not edit files directly. Do not produce a patch unless you are only narrating what a future patch would do.",
     "",
     "File: " .. selection.path,
     "Selected range: " .. selection.line1 .. "-" .. selection.line2 .. " (" .. selection.source .. ")",

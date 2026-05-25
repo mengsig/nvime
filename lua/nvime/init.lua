@@ -588,6 +588,138 @@ function M.setup(opts)
     desc = "Refocus the active nvime plan UI float",
   })
 
+  vim.api.nvim_create_user_command("NvimeHooks", function(args)
+    local hooks = require("nvime.hooks")
+    local sub = vim.trim(args.args or "")
+    if sub == "install" then
+      local ok, err = hooks.install()
+      if ok then
+        vim.notify("nvime hooks: prepare-commit-msg installed", vim.log.levels.INFO)
+      else
+        vim.notify("nvime hooks: install failed: " .. tostring(err), vim.log.levels.ERROR)
+      end
+    elseif sub == "uninstall" then
+      local ok, err = hooks.uninstall()
+      if ok then
+        vim.notify("nvime hooks: prepare-commit-msg removed", vim.log.levels.INFO)
+      else
+        vim.notify("nvime hooks: uninstall: " .. tostring(err), vim.log.levels.WARN)
+      end
+    else
+      local status = hooks.status()
+      vim.notify(
+        string.format(
+          "nvime hooks: installed=%s chained=%s path=%s",
+          tostring(status.installed),
+          tostring(status.chained),
+          tostring(status.hook_path or "(none)")
+        ),
+        vim.log.levels.INFO
+      )
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      return { "install", "uninstall", "status" }
+    end,
+    desc = "Install or remove the nvime prepare-commit-msg git hook",
+  })
+
+  vim.api.nvim_create_user_command("NvimePr", function(args)
+    local pr = require("nvime.pr")
+    local fargs = args.fargs or {}
+    local opts = {}
+    if fargs[1] == "--dry-run" then
+      opts.dry_run = true
+      table.remove(fargs, 1)
+    end
+    if fargs[1] and fargs[1] ~= "" then
+      opts.base = fargs[1]
+    end
+    local body, path = pr.render(opts)
+    if opts.dry_run then
+      vim.notify(body or "", vim.log.levels.INFO)
+      return
+    end
+    if not path then
+      vim.notify("nvime pr: " .. tostring(body or "write failed"), vim.log.levels.ERROR)
+      return
+    end
+    vim.notify("nvime pr: wrote " .. path, vim.log.levels.INFO)
+    vim.cmd("edit " .. vim.fn.fnameescape(path))
+  end, {
+    nargs = "*",
+    complete = function()
+      return { "--dry-run", "origin/main", "main", "master" }
+    end,
+    desc = "Render .nvime/pr.md — reviewer-facing summary of AI-attributed changes",
+  })
+
+  vim.api.nvim_create_user_command("NvimePolicy", function(args)
+    local policy_rules = require("nvime.policy_rules")
+    local fargs = args.fargs or {}
+    local sub = fargs[1] or "list"
+    if sub == "list" then
+      local rules = policy_rules.rules() or {}
+      local out = { string.format("nvime policy_rules (%d rules) from %s:", #rules, policy_rules.path()) }
+      for index, rule in ipairs(rules) do
+        local flags = {}
+        if rule.require_human then
+          flags[#flags + 1] = "require_human"
+        end
+        if rule.max_changed_lines then
+          flags[#flags + 1] = "max_changed_lines=" .. tostring(rule.max_changed_lines)
+        end
+        if rule.allow_lanes then
+          flags[#flags + 1] = "allow_lanes=" .. table.concat(rule.allow_lanes, ",")
+        end
+        out[#out + 1] = string.format("  %d. %s — %s", index, rule.match or "?", table.concat(flags, " "))
+      end
+      vim.notify(table.concat(out, "\n"), vim.log.levels.INFO)
+    elseif sub == "check" then
+      local target = fargs[2]
+      if not target or target == "" then
+        target = vim.fn.expand("%:.")
+      end
+      local result = policy_rules.evaluate(target, fargs[3] or "edit")
+      vim.notify(
+        string.format(
+          "nvime policy_rules: %s lane=%s allowed=%s reason=%s rule=%s",
+          target,
+          fargs[3] or "edit",
+          tostring(result.allowed),
+          result.reason or "?",
+          result.rule and result.rule.match or "(none)"
+        ),
+        result.allowed and vim.log.levels.INFO or vim.log.levels.WARN
+      )
+    elseif sub == "edit" then
+      local path = policy_rules.path()
+      vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
+      if vim.fn.filereadable(path) ~= 1 then
+        vim.fn.writefile({
+          '{',
+          '  "version": 1,',
+          '  "rules": [',
+          '    { "match": "migrations/**", "require_human": true },',
+          '    { "match": "**/*.lock",     "require_human": true },',
+          '    { "match": "secrets/**",    "require_human": true, "allow_lanes": [] }',
+          '  ]',
+          '}',
+        }, path)
+      end
+      vim.cmd("edit " .. vim.fn.fnameescape(path))
+    else
+      vim.notify("nvime policy: usage `:NvimePolicy [list|check <path> <lane>|edit]`", vim.log.levels.WARN)
+    end
+  end, {
+    nargs = "*",
+    complete = function()
+      return { "list", "check", "edit" }
+    end,
+    desc = "List, check, or edit the nvime per-path policy rules",
+  })
+
   install_keymaps()
 
   pcall(vim.api.nvim_clear_autocmds, { group = persist_group })

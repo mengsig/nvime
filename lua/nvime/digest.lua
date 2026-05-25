@@ -7,7 +7,8 @@ local ui = require("nvime.ui")
 -- Streams .nvime/audit.jsonl, groups events by (lane, day, file, session),
 -- and renders a compact digest in a float. Unlike :NvimeAudit (which opens
 -- the raw jsonl), this surface is meant to make the *risky* events legible:
--- block_force_applied, block_conflict, plan_step_rollback, agent_cancelled.
+-- block_force_applied, block_conflict, plan_step_rollback, agent_cancelled,
+-- and the verify-lane events verify_force / verify_block.
 
 local M = {}
 
@@ -117,6 +118,9 @@ function M.summarize(events)
       or kind == "block_conflict"
       or kind == "plan_step_rollback"
       or kind == "blocked"
+      or kind == "verify_force"
+      or kind == "verify_block"
+      or kind == "risk_force"
     then
       stats.risky[#stats.risky + 1] = event
     end
@@ -276,6 +280,17 @@ local function render_digest(stats, window_days)
         )
       elseif event.event == "blocked" then
         detail = string.format("%s · %s", event.surface or "?", event.reason or "?")
+      elseif event.event == "verify_force" or event.event == "verify_block" then
+        detail = string.format("%s · %s", event.file or "?", event.reason or "parse error")
+      elseif event.event == "risk_force" then
+        detail = string.format(
+          "%s · %s · +%d −%d ai %d%%",
+          event.file or "?",
+          event.level or "?",
+          tonumber(event.lines_added) or 0,
+          tonumber(event.lines_removed) or 0,
+          math.floor(((tonumber(event.ai_share) or 0)) * 100 + 0.5)
+        )
       else
         detail = vim.inspect(event):sub(1, 80)
       end

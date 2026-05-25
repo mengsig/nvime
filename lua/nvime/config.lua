@@ -83,6 +83,81 @@ M.defaults = {
     -- user. Costs roughly one extra agent call per diff.
     devils_advocate = false,
   },
+  verify = {
+    -- Pre-accept verification lane. When a diff session opens, run cheap
+    -- deterministic checks (tree-sitter parse + configured linters/type
+    -- checkers) against the *proposed* full-file content. Findings render
+    -- in the diff banner.
+    enabled = true,
+    -- Tree-sitter parses the proposed content; any ERROR node trips the
+    -- gate.
+    treesitter_parse = true,
+    -- When the proposed content has a tree-sitter parse error, refuse
+    -- silent ga/gA accept. gA!/`:NvimeAccept!` still works and writes a
+    -- `verify_force` audit event.
+    block_on_parse_error = true,
+    -- Per-check timeout (milliseconds).
+    timeout_ms = 8000,
+    -- User-defined checks: each value is { match = { glob, ... }, cmd =
+    -- function(tempfile) return { argv } end, parse = function(stdout,
+    -- stderr) return findings end, kind = "lint"|"type"|"parse" }.
+    -- See lua/nvime/verify.lua for the built-in shape and shipped checks
+    -- (ruff/shellcheck/luacheck/selene/gofmt/zig ast-check/mypy).
+    checks = {},
+  },
+  risk = {
+    -- Blast-radius badge in the diff banner. Computes lines added/removed,
+    -- bracket drift (reused from diff.lua), ai-share from the attribution
+    -- ledger, and sensitive/generated path tags from globs. Advisory; only
+    -- `gA!` at the `high` level prompts a confirmation.
+    enabled = true,
+    sensitive_paths = nil,    -- defaults: migrations/lockfiles/secrets/keys
+    generated_globs = nil,    -- defaults: protobuf/_generated/generated dirs
+    thresholds = {
+      lines = { medium = 40, high = 120 },
+      ai_share = { high = 0.5 },
+    },
+    -- When true (default), force-accept on a high-risk diff prompts a
+    -- confirmation; `risk_force` audit event fires on proceed.
+    confirm_on_force_high = true,
+  },
+  policy_rules = {
+    -- Per-path policy. Reads .nvime/policy.json (schema v1); when absent,
+    -- a small built-in default flags migrations, lockfiles, secrets, and
+    -- private keys as `require_human`. The project file fully replaces
+    -- defaults rather than merging into them, so the active rule set is
+    -- always exactly what the user has on disk.
+    enabled = true,
+    path = nil, -- defaults to .nvime/policy.json in the git root
+  },
+  intent = {
+    -- Local intent linter. Refuses or warns on vague prompts BEFORE the
+    -- model sees them. The default classifier is pure heuristic and runs
+    -- inside Neovim with no network calls.
+    enabled = true,
+    -- Intents with fewer words than this are flagged as vague.
+    min_words = 4,
+    -- "heuristic" or "model".
+    --   "heuristic" — pure local check, no network.
+    --   "model"     — heuristic runs first; only when it returns
+    --                 "questionable" does nvime consult a cheap model
+    --                 (via the read-only critic lane) to disambiguate.
+    --                 Verdicts are cached on disk under
+    --                 .nvime/intent-cache.json keyed by intent hash.
+    classifier = "heuristic",
+    -- Model timeout (ms). Times out fall through to the heuristic
+    -- verdict and do not block.
+    model_timeout_ms = 5000,
+  },
+  pr = {
+    -- :NvimePr renders .nvime/pr.md — a reviewer-facing summary of every
+    -- AI-attributed hunk on the current branch, plus any review-first
+    -- events (force-accepts, policy overrides, intent overrides).
+    enabled = true,
+    path = nil,             -- defaults to .nvime/pr.md in the git root
+    base_branch = nil,      -- nil = auto-detect (origin/main → main → HEAD~1)
+    include_unattributed = true,
+  },
   chat = {
     max_history_messages = 24,
   },
@@ -274,6 +349,9 @@ local optional_types = {
   ["mcp.config_path"] = { "string", "nil" },
   ["mcp.self_command"] = { "string", "nil" },
   ["mcp.servers"] = { "table" },
+  ["verify.checks"] = { "table" },
+  ["risk.sensitive_paths"] = { "list", "nil" },
+  ["risk.generated_globs"] = { "list", "nil" },
 }
 
 local function type_label(value)

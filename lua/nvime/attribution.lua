@@ -189,6 +189,7 @@ function M.record(entry)
     line2 = entry.line2,
     anchor = build_anchor(entry.lines),
     rationale = entry.rationale,
+    user_rationale = entry.user_rationale,
     verdict = entry.verdict,
     provider = entry.provider,
     plan_id = entry.plan_id,
