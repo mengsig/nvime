@@ -90,9 +90,12 @@ require("nvime").setup({
   providers = {
     claude = {
       cmd = "claude",
+      models = { "opus", "sonnet", "haiku" },
     },
     codex = {
       cmd = "codex",
+      models = { "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark" },
+      reasoning_effort = nil,
     },
   },
   ui = {
@@ -166,6 +169,8 @@ require("nvime").setup({
   },
   risk = {
     enabled = true,
+    sensitive_paths = nil,    -- defaults: migrations/lockfiles/secrets/keys
+    generated_globs = nil,    -- defaults: protobuf/_generated/generated dirs
     thresholds = {
       lines = { medium = 40, high = 120 },
       ai_share = { high = 0.5 },
@@ -180,6 +185,7 @@ require("nvime").setup({
     enabled = true,
     min_words = 4,
     classifier = "heuristic",
+    model_timeout_ms = 5000,
   },
   pr = {
     enabled = true,
@@ -243,13 +249,16 @@ require("nvime").setup({
       diff = "v",
       last = "n",
       provider = "p",
+      model = "m",
       plan = "P",
       blame = "b",
       usage = "u",
+      quick_fix = "f",
     },
     visual = {
       edit = "e",
       ask = "q",
+      quick_fix = "f",
     },
   },
   prompts = {
@@ -265,6 +274,7 @@ require("nvime").setup({
       { label = "Suggest minimal diff", prompt = "Please suggest the smallest approvable diff..." },
       { label = "Proceed with fix", prompt = "Please proceed with the concrete fix..." },
       { label = "Benchmark and optimize", prompt = "Profile this selection on representative inputs..." },
+    },
     plan = {
       { label = "Investigate before planning", prompt = "Before drafting steps, read the relevant files..." },
       { label = "Refactor with diff budget", prompt = "Decompose this refactor into the smallest reviewable steps..." },

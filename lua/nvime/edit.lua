@@ -596,6 +596,8 @@ end
 
 run_edit = function(selection, intent, provider, session_opts)
   session_opts = session_opts or {}
+  local prior_session = session_opts.session_id and selection_state.get_session(session_opts.session_id)
+  local prior_mode = prior_session and prior_session.mode
   selection_state.open({
     provider = provider,
     mode = "edit",
@@ -641,7 +643,20 @@ run_edit = function(selection, intent, provider, session_opts)
 
   local resuming = effective_resume and effective_resume ~= ""
   local prompt
-  if resuming then
+  if resuming and prior_mode == "ask" then
+    prompt = table.concat({
+      "MODE SWITCH: you were in read-only ask mode, now switching to NVIME EDIT MODE.",
+      "You already investigated this code in the previous messages. Use that context. You may re-read the selected file to verify exact line content before patching.",
+      "Produce a patch using NVIME_DIFF or NVIME_REPLACEMENT format.",
+      "You may only propose changes for the selected range in the current file.",
+      "Prefer NVIME_DIFF for changes to existing text. Include --- a/ +++ b/ and @@ headers.",
+      "Emit one RATIONALE: line before the patch block.",
+      "",
+      "File: " .. (selection.path or "unknown"),
+      "Allowed range: " .. tostring(selection.line1 or 1) .. "-" .. tostring(selection.line2 or selection.line1 or 1),
+      "Intent: " .. intent,
+    }, "\n")
+  elseif resuming then
     prompt = table.concat({
       "Follow-up on the same selection.",
       "The file, range, edit rules, and response format from the prior turn still apply.",
