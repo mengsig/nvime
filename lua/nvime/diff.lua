@@ -5,6 +5,7 @@ local ui = require("nvime.ui")
 
 local M = {}
 
+local uv = vim.uv or vim.loop
 local ns = vim.api.nvim_create_namespace("nvime.diff.inline")
 
 local function diff_config()
@@ -1472,7 +1473,7 @@ local function proposed_lines(session)
 end
 
 local function review_name(session, kind)
-  session.review_id = session.review_id or tostring(vim.loop.hrtime())
+  session.review_id = session.review_id or tostring(uv.hrtime())
   return "nvime://diff/" .. kind .. "/" .. session.review_id .. "/" .. tostring(session.file or "buffer")
 end
 

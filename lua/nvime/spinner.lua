@@ -101,10 +101,10 @@ end
 
 local function format_row(item, frame)
   local session = item.session
-  local provider_name = session.provider or "?"
+  local provider_name = session.provider or "agent"
   local lane = item.kind == "chat" and "review/docs" or (session.mode or "selection")
   local detail = progress.compact(session.progress or "")
-  detail = detail:gsub("^" .. provider_name .. "%s*", "")
+  detail = detail:gsub("^" .. vim.pesc(provider_name) .. "%s*", "")
   if detail == "" then
     detail = "working"
   end

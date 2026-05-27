@@ -24,7 +24,7 @@ local function parse_iso_ts(value)
   if not year then
     return nil
   end
-  return os.time({
+  local utc = os.time({
     year = tonumber(year),
     month = tonumber(month),
     day = tonumber(day),
@@ -32,6 +32,9 @@ local function parse_iso_ts(value)
     min = tonumber(min),
     sec = tonumber(sec),
   })
+  local utc_decomp = os.date("!*t", utc)
+  utc_decomp.isdst = os.date("*t", utc).isdst
+  return utc + os.difftime(utc, os.time(utc_decomp))
 end
 
 function M.read_events(opts)
@@ -566,12 +569,7 @@ end
 function M.show_force_review()
   local events = M.read_events({})
   local forces = M.force_review(events)
-  -- Re-attach _ts so the renderer can sort/show times.
-  local indexed = {}
-  for _, e in ipairs(forces) do
-    indexed[#indexed + 1] = e
-  end
-  local lines, marks = render_force_review(indexed)
+  local lines, marks = render_force_review(forces)
   return open_panel("nvime force-accept review", "q close · r refresh · o raw audit", lines, marks, function()
     M.show_force_review()
   end)

@@ -3,6 +3,8 @@ local state = require("nvime.state")
 
 local M = {}
 
+local uv = vim.uv or vim.loop
+
 local GIT_CACHE_TTL = 30
 local root_cache = {}
 local ref_cache = {}
@@ -12,7 +14,7 @@ local function now()
 end
 
 local function cached_git_root(cwd)
-  cwd = cwd or vim.loop.cwd()
+  cwd = cwd or uv.cwd()
   local cached = root_cache[cwd]
   if cached and cached.expires_at > now() then
     return cached.value
@@ -63,7 +65,7 @@ local function audit_path()
     return vim.fn.fnamemodify(audit.path, ":p")
   end
 
-  local root = cached_git_root(vim.loop.cwd())
+  local root = cached_git_root(uv.cwd())
   if root then
     return root .. "/.nvime/audit.jsonl"
   end
@@ -122,7 +124,7 @@ function M.write(event)
 
   event = redact(event or {})
   event.ts = event.ts or os.date("!%Y-%m-%dT%H:%M:%SZ")
-  event.cwd = event.cwd or vim.loop.cwd()
+  event.cwd = event.cwd or uv.cwd()
   event.git_root = event.git_root or cached_git_root(event.cwd)
   local git_ref, git_branch = cached_git_meta(event.git_root)
   event.git_ref = event.git_ref or git_ref

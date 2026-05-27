@@ -573,9 +573,9 @@ local function decorate_input(bufnr)
   local busy_status = nil
   local session = active_session()
   if session and session.busy then
-    local provider_name = session.provider or "?"
+    local provider_name = session.provider or "agent"
     local detail = progress.compact(session.progress or "")
-    detail = detail:gsub("^" .. provider_name .. "%s*", "")
+    detail = detail:gsub("^" .. vim.pesc(provider_name) .. "%s*", "")
     if detail == "" then
       detail = "working"
     end

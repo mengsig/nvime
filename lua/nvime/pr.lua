@@ -270,8 +270,15 @@ function M.render(opts)
   if not fd then
     return nil, err
   end
-  fd:write(body)
-  fd:close()
+  local write_ok, write_err = pcall(function()
+    fd:write(body)
+  end)
+  pcall(function()
+    fd:close()
+  end)
+  if not write_ok then
+    return nil, write_err
+  end
   audit.write({
     event = "pr_sidecar",
     path = path,

@@ -56,7 +56,7 @@ local function parse_utc_ts(value)
   if not year then
     return nil
   end
-  return os.time({
+  local utc = os.time({
     year = tonumber(year),
     month = tonumber(month),
     day = tonumber(day),
@@ -64,6 +64,9 @@ local function parse_utc_ts(value)
     min = tonumber(min),
     sec = tonumber(sec),
   })
+  local utc_decomp = os.date("!*t", utc)
+  utc_decomp.isdst = os.date("*t", utc).isdst
+  return utc + os.difftime(utc, os.time(utc_decomp))
 end
 
 local function recent_blocked_events(path)

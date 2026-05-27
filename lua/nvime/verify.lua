@@ -80,7 +80,7 @@ end
 
 local function tempfile_for(session)
   local base = vim.fn.fnamemodify(session.file or "buf", ":t")
-  local sig = tostring(session.review_id or session.target_bufnr or vim.loop.hrtime())
+  local sig = tostring(session.review_id or session.target_bufnr or uv.hrtime())
   return cache_dir() .. "/" .. sig .. "-" .. base
 end
 

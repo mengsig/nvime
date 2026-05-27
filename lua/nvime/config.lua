@@ -251,13 +251,16 @@ M.defaults = {
       diff = "v",
       last = "n",
       provider = "p",
+      model = "m",
       plan = "P",
       blame = "b",
       usage = "u",
+      quick_fix = "f",
     },
     visual = {
       edit = "e",
       ask = "q",
+      quick_fix = "f",
     },
   },
   prompts = {

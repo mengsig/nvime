@@ -689,9 +689,9 @@ local function decorate_input(bufnr)
     local virt_lines = {}
     local session_for_status = active_session()
     if session_for_status and session_for_status.busy then
-      local provider_name = session_for_status.provider or "?"
+      local provider_name = session_for_status.provider or "agent"
       local detail = progress.compact(session_for_status.progress or "")
-      detail = detail:gsub("^" .. provider_name .. "%s*", "")
+      detail = detail:gsub("^" .. vim.pesc(provider_name) .. "%s*", "")
       if detail == "" then
         detail = "working"
       end

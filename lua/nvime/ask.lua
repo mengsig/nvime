@@ -36,7 +36,7 @@ local function build_prompt(selection, question)
     "Do not edit files directly. Do not produce a patch unless you are only narrating what a future patch would do.",
     "",
     "File: " .. selection.path,
-    "Selected range: " .. selection.line1 .. "-" .. selection.line2 .. " (" .. selection.source .. ")",
+    "Selected range: " .. tostring(selection.line1) .. "-" .. tostring(selection.line2) .. " (" .. (selection.source or "range") .. ")",
     "Question: " .. question,
     "",
     "Selected code:",
@@ -123,7 +123,6 @@ local function response_has_patch(body)
     or body:find("NVIME_REPLACEMENT", 1, true) ~= nil
     or body:find("```diff", 1, true) ~= nil
     or body:find("--- a/", 1, true) ~= nil
-    or body:find("--- b/", 1, true) ~= nil
 end
 
 local run

@@ -189,7 +189,7 @@ local function plan_progress_label(plan)
   if c.total == 0 then
     return "no steps"
   end
-  if c.done == c.total then
+  if c.done + c.abandoned == c.total then
     return "complete (" .. c.done .. "/" .. c.total .. ")"
   end
   local parts = {}
@@ -216,7 +216,7 @@ local function plan_overall_status(plan)
   if c.total == 0 then
     return "draft"
   end
-  if c.done == c.total then
+  if c.done + c.abandoned == c.total then
     return "done"
   end
   if c.blocked > 0 then

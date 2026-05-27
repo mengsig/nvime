@@ -27,7 +27,7 @@ local function attribution_path()
   if cfg.path and cfg.path ~= "" then
     return vim.fn.fnamemodify(cfg.path, ":p")
   end
-  local root = git.root(vim.loop.cwd())
+  local root = git.root()
   if root then
     return root .. "/.nvime/attribution.json"
   end
