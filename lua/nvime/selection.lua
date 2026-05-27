@@ -554,11 +554,15 @@ local function prompt_has_submit_text(panel)
   end
   local lnum = panel.input_start or 1
   local ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
-  if not ok or cursor[1] ~= lnum then
+  if not ok or cursor[1] < lnum then
     return false
   end
-  local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, lnum, false)[1] or ""
-  return vim.trim(extract_prompt_text(line)) ~= ""
+  local all_lines = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, -1, false)
+  if #all_lines == 0 then
+    return false
+  end
+  all_lines[1] = extract_prompt_text(all_lines[1])
+  return vim.trim(table.concat(all_lines, "\n")) ~= ""
 end
 
 local function decorate_scrollback(bufnr)
@@ -656,20 +660,24 @@ local function reset_input(text, opts)
       if fresh then
         -- M.append assumes there are at least 2 blank lines above the prompt;
         -- seed the fresh buffer with that headroom so streaming appends merge cleanly.
-        vim.api.nvim_buf_set_lines(bufnr, 0, count, false, {
-          "",
-          "",
-          prompt_prefix() .. (text or ""),
-        })
+        local text_lines = vim.split(text or "", "\n", { plain = true })
+        local seed = { "", "", prompt_prefix() .. (text_lines[1] or "") }
+        for i = 2, #text_lines do
+          seed[#seed + 1] = text_lines[i]
+        end
+        vim.api.nvim_buf_set_lines(bufnr, 0, count, false, seed)
         panel.input_start = 3
         return
       end
       start = count + 1
     end
-    vim.api.nvim_buf_set_lines(bufnr, start - 1, count, false, {
-      prompt_prefix() .. (text or ""),
-    })
-    panel.input_start = vim.api.nvim_buf_line_count(bufnr)
+    local text_lines = vim.split(text or "", "\n", { plain = true })
+    local new_lines = { prompt_prefix() .. (text_lines[1] or "") }
+    for i = 2, #text_lines do
+      new_lines[#new_lines + 1] = text_lines[i]
+    end
+    vim.api.nvim_buf_set_lines(bufnr, start - 1, count, false, new_lines)
+    panel.input_start = start
   end, decorate_input)
   if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
     if follow then
@@ -841,10 +849,10 @@ local function attach_panel(bufnr)
     require("nvime.selection").focus_input()
   end, opts)
   vim.keymap.set("n", "a", function()
-    require("nvime.selection").focus_input({ cursor = "end" })
+    require("nvime.selection").focus_input({ preserve_cursor = true, after = true })
   end, opts)
   vim.keymap.set("n", "A", function()
-    require("nvime.selection").focus_input({ cursor = "end" })
+    require("nvime.selection").focus_input({ cursor = "eol", preserve_cursor = true })
   end, opts)
   vim.keymap.set("n", "o", function()
     require("nvime.selection").focus_input({ cursor = "end" })
@@ -881,6 +889,29 @@ local function attach_panel(bufnr)
     vim.cmd.stopinsert()
     require("nvime.selection").cancel_active()
   end, opts)
+  local function insert_newline()
+    local panel = state.panels.selection
+    if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
+      return
+    end
+    local winid = panel.winid
+    if not winid or not vim.api.nvim_win_is_valid(winid) then
+      return
+    end
+    local row, col = unpack(vim.api.nvim_win_get_cursor(winid))
+    if row < (panel.input_start or 1) then
+      return
+    end
+    buffer_guard.suspend(panel.bufnr, function()
+      vim.api.nvim_buf_set_text(panel.bufnr, row - 1, col, row - 1, col, { "", "" })
+    end)
+    buffer_guard.sync(panel.bufnr, panel)
+    pcall(vim.api.nvim_win_set_cursor, winid, { row + 1, 0 })
+    decorate_input(panel.bufnr)
+  end
+  vim.keymap.set("i", "<C-j>", insert_newline, opts)
+  vim.keymap.set("i", "<S-CR>", insert_newline, opts)
+  vim.keymap.set("i", "<C-CR>", insert_newline, opts)
   vim.keymap.set("i", "<C-U>", function()
     local panel = state.panels.selection
     if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
@@ -889,7 +920,7 @@ local function attach_panel(bufnr)
     local lnum = prompt_lnum(panel)
     local prefix = prompt_prefix()
     buffer_guard.suspend(panel.bufnr, function()
-      vim.api.nvim_buf_set_lines(panel.bufnr, lnum - 1, lnum, false, { prefix })
+      vim.api.nvim_buf_set_lines(panel.bufnr, lnum - 1, -1, false, { prefix })
     end)
     buffer_guard.sync(panel.bufnr, panel)
     if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
@@ -1298,6 +1329,16 @@ end
 
 function M.focus_input(opts)
   opts = opts or {}
+  local saved_cursor
+  if opts.preserve_cursor then
+    local panel = state.panels.selection
+    if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+      local ok, cur = pcall(vim.api.nvim_win_get_cursor, panel.winid)
+      if ok then
+        saved_cursor = cur
+      end
+    end
+  end
   M.open()
   local panel = state.panels.selection
   if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
@@ -1309,14 +1350,25 @@ function M.focus_input(opts)
   local lnum = prompt_lnum(panel)
   local prefix_col = #prompt_prefix()
   local end_col = prompt_end_col(panel)
-  if opts.preserve_cursor then
-    local cur_ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
-    if cur_ok and cursor[1] == lnum and cursor[2] >= prefix_col then
-      pcall(vim.cmd, "startinsert")
+  if saved_cursor then
+    if saved_cursor[1] >= lnum and (saved_cursor[1] > lnum or saved_cursor[2] >= prefix_col) then
+      if opts.cursor == "eol" then
+        local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, saved_cursor[1] - 1, saved_cursor[1], false)[1] or ""
+        pcall(vim.api.nvim_win_set_cursor, panel.winid, { saved_cursor[1], #line })
+        pcall(vim.cmd, "startinsert!")
+      elseif opts.after then
+        local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, saved_cursor[1] - 1, saved_cursor[1], false)[1] or ""
+        local col = math.min(saved_cursor[2] + 1, #line)
+        pcall(vim.api.nvim_win_set_cursor, panel.winid, { saved_cursor[1], col })
+        pcall(vim.cmd, col >= #line and "startinsert!" or "startinsert")
+      else
+        pcall(vim.api.nvim_win_set_cursor, panel.winid, saved_cursor)
+        pcall(vim.cmd, "startinsert")
+      end
       return
     end
   end
-  local append = opts.cursor == "end"
+  local append = opts.cursor == "end" or opts.cursor == "eol"
   local empty_prompt = end_col <= prefix_col
   local col = (append or empty_prompt) and math.max(0, end_col - 1) or prefix_col
   pcall(vim.api.nvim_win_set_cursor, panel.winid, { lnum, col })
