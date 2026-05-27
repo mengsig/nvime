@@ -513,7 +513,7 @@ assert(
 )
 local progress_flush_transcript = table.concat(vim.api.nvim_buf_get_lines(chat_buf, 0, -1, false), "\n")
 assert(progress_flush_transcript:find("progress final", 1, true), "chat progress fixture delivers final answer")
-assert(not progress_flush_transcript:find("tool: Bash", 1, true), "chat progress is not appended to transcript")
+assert(progress_flush_transcript:find("tool: Bash", 1, true), "chat tool log is visible in transcript")
 assert(require("nvime.state").chat.progress == nil, "chat progress is cleared after completion")
 require("nvime.state").config.providers.claude.cmd = old_claude_cmd
 

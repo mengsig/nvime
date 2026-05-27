@@ -1,6 +1,6 @@
 # nvime
 
-`nvime` means "No Vibe Coding In My Editor": no AI sprawl, no mystery edits, no bullshit.
+`nvime` — No Vibe Coding In My Editor. AI doesn't touch your code unless you tell it exactly where, how, and why. No sprawl. No mystery edits. No permissionless slop. No hand-holding. No bullshit.
 
 It is a Neovim Lua plugin for getting real work done with Claude Code and Codex CLI through explicit engineering lanes:
 
@@ -157,9 +157,38 @@ require("nvime").setup({
     max_visual_block_lines = 12,
     devils_advocate = false,
   },
+  verify = {
+    enabled = true,
+    treesitter_parse = true,
+    block_on_parse_error = true,
+    timeout_ms = 8000,
+    checks = {},
+  },
+  risk = {
+    enabled = true,
+    thresholds = {
+      lines = { medium = 40, high = 120 },
+      ai_share = { high = 0.5 },
+    },
+    confirm_on_force_high = true,
+  },
+  policy_rules = {
+    enabled = true,
+    path = nil, -- defaults to .nvime/policy.json in git root
+  },
+  intent = {
+    enabled = true,
+    min_words = 4,
+    classifier = "heuristic",
+  },
+  pr = {
+    enabled = true,
+    path = nil, -- defaults to .nvime/pr.md in git root
+    base_branch = nil,
+    include_unattributed = true,
+  },
   chat = {
     max_history_messages = 24,
-  },
   },
   plan = {
     enabled = true,
@@ -171,6 +200,7 @@ require("nvime").setup({
     test_file = nil,
     test_runner = nil,
     session_continuity = "plan", -- "plan" or "none"
+  },
   sessions = {
     enabled = true,
     path = nil, -- defaults to .nvime/selection-sessions.json in a git repo
@@ -303,6 +333,9 @@ require("nvime").setup({
   the cursor.
 - `:NvimeUsage [summary|reset]` opens the token + cost dashboard, prints a
   summary, or resets counters.
+- `:NvimeHooks [install|uninstall|status]` installs or removes the `prepare-commit-msg` git hook; annotates commits with nvime attribution.
+- `:NvimePr [--dry-run] [<base>]` renders `.nvime/pr.md` — a reviewer-facing summary of AI-attributed changes on the current branch.
+- `:NvimePolicy [list|check <path> <lane>|edit]` lists, evaluates, or edits per-path policy rules (`.nvime/policy.json`).
 
 ## Chat Panel
 
@@ -380,6 +413,12 @@ Inside the chat window:
 - `<leader>nv`: open the active diff review workspace
 - `<leader>nn`: reopen the last used nvime conversation
 - `<leader>np`: choose Claude or Codex
+- `<leader>nm`: choose model for the active provider
+- `<leader>nP`: open the plan picker (or refocus active plan UI)
+- `<leader>nb`: show agent attribution for the current line
+- `<leader>nu`: open the token + cost usage dashboard
+- `<leader>nf`: quick fix at cursor
+- visual `<leader>nf`: quick fix visual selection
 
 Use `NvimeAsk` for questions such as "does this look right?" or "what does
 this do?". Use `NvimeEdit` only when you want a concrete patch. If the edit

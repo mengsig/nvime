@@ -42,8 +42,12 @@ local DEFAULT_RATES = {
   ["claude-sonnet-4-6"] = { input = 3.0, output = 15.0, cache_read = 0.3, cache_creation = 3.75 },
   ["claude-haiku-4-5"] = { input = 1.0, output = 5.0, cache_read = 0.1, cache_creation = 1.25 },
   ["claude-haiku-4-5-20251001"] = { input = 1.0, output = 5.0, cache_read = 0.1, cache_creation = 1.25 },
-  -- Codex defaults (gpt-5 family, ballpark — override in config.usage.rates).
-  ["codex-default"] = { input = 1.25, output = 10.0, cache_read = 0.125, cache_creation = 1.25 },
+  -- Codex / GPT-5 family. Rates from https://developers.openai.com/api/docs/pricing
+  -- OpenAI charges uncached input at full rate; no separate cache-creation premium.
+  ["gpt-5.5"] = { input = 5.0, output = 30.0, cache_read = 0.5, cache_creation = 5.0 },
+  ["gpt-5.4"] = { input = 2.0, output = 8.0, cache_read = 0.2, cache_creation = 2.0 },
+  ["gpt-5.4-mini"] = { input = 0.4, output = 1.6, cache_read = 0.04, cache_creation = 0.4 },
+  ["codex-default"] = { input = 5.0, output = 30.0, cache_read = 0.5, cache_creation = 5.0 },
 }
 
 local function usage_config()
@@ -299,10 +303,12 @@ function M.parse_codex(decoded)
     return nil
   end
   local usage = decoded.usage or {}
+  local total_input = tonumber(usage.input_tokens) or 0
+  local cached = tonumber(usage.cached_input_tokens) or 0
   return {
-    input = tonumber(usage.input_tokens) or 0,
+    input = total_input - cached,
     output = tonumber(usage.output_tokens) or 0,
-    cache_read = tonumber(usage.cached_input_tokens) or 0,
+    cache_read = cached,
     cache_creation = 0,
     reasoning = tonumber(usage.reasoning_output_tokens) or 0,
     cost_usd = 0,
@@ -528,6 +534,38 @@ end
 
 function M.close_panel()
   close_panel()
+end
+
+function M.fmt_tokens(n)
+  return fmt_tokens(n)
+end
+
+function M.fmt_usd(v)
+  return fmt_usd(v)
+end
+
+function M.run_summary(sample)
+  if not sample or type(sample) ~= "table" then
+    return nil
+  end
+  local out = (sample.output or 0) + (sample.reasoning or 0)
+  local new = sample.input or 0
+  local cached = (sample.cache_read or 0) + (sample.cache_creation or 0)
+  if cached > 0 then
+    return string.format(
+      "↑%s out · ↓%s new · ↓%s cached · %s",
+      fmt_tokens(out),
+      fmt_tokens(new),
+      fmt_tokens(cached),
+      fmt_usd(sample.cost_usd)
+    )
+  end
+  return string.format(
+    "↑%s out · ↓%s ctx · %s",
+    fmt_tokens(out),
+    fmt_tokens(new),
+    fmt_usd(sample.cost_usd)
+  )
 end
 
 return M

@@ -59,6 +59,20 @@ local function visual_ask()
   })
 end
 
+local function visual_quick_fix()
+  vim.cmd.normal({ args = { "\27" }, bang = true })
+  local line1 = vim.fn.line("'<")
+  local line2 = vim.fn.line("'>")
+  if line1 > line2 then
+    line1, line2 = line2, line1
+  end
+  require("nvime.edit").quick_fix({
+    line1 = line1,
+    line2 = line2,
+    range = 2,
+  })
+end
+
 function M.open_last()
   local chat = require("nvime.chat")
   local selection = require("nvime.selection")
@@ -160,6 +174,7 @@ local function install_keymaps()
   end, "nvime open diff review workspace")
   set_keymap("n", prefix .. (normal.last or "n"), M.open_last, "nvime reopen last conversation")
   set_keymap("n", prefix .. (normal.provider or "p"), provider.choose, "nvime choose provider")
+  set_keymap("n", prefix .. (normal.model or "m"), provider.choose_model, "nvime choose model")
   set_keymap("n", prefix .. (normal.plan or "P"), function()
     local plan = require("nvime.plan")
     -- If a plan UI float is already open but unfocused, refocus it instead of
@@ -177,8 +192,12 @@ local function install_keymaps()
     require("nvime.usage").open_panel()
   end, "nvime usage: token + cost dashboard")
 
+  set_keymap("n", prefix .. (normal.quick_fix or "f"), function()
+    require("nvime.edit").quick_fix()
+  end, "nvime quick fix at cursor")
   set_keymap("x", prefix .. (visual.edit or "e"), visual_edit, "nvime edit visual selection")
   set_keymap("x", prefix .. (visual.ask or "q"), visual_ask, "nvime ask about visual selection")
+  set_keymap("x", prefix .. (visual.quick_fix or "f"), visual_quick_fix, "nvime quick fix visual selection")
 end
 
 local function parse_provider(args)

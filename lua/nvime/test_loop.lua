@@ -177,9 +177,9 @@ local function launch_followup(payload, runner, captured)
       selection = {
         bufnr = payload.target_bufnr,
         path = payload.path,
-        start_line = lo,
-        end_line = hi,
-        kind = "test_loop",
+        line1 = lo,
+        line2 = hi,
+        source = "test_loop",
       },
       provider = payload.provider,
       intent = edit_intent,
@@ -190,14 +190,36 @@ local function launch_followup(payload, runner, captured)
   end)
 end
 
+local function detect_venv_path(cwd)
+  local candidates = { ".venv/bin", "venv/bin", ".env/bin", "env/bin" }
+  for _, rel in ipairs(candidates) do
+    local bin = cwd .. "/" .. rel
+    if vim.fn.isdirectory(bin) == 1 then
+      return bin
+    end
+  end
+  local venv = vim.env.VIRTUAL_ENV
+  if venv and venv ~= "" and vim.fn.isdirectory(venv .. "/bin") == 1 then
+    return venv .. "/bin"
+  end
+  return nil
+end
+
 local function run_runner(runner, cwd, on_done)
   local stdout_chunks = {}
   local stderr_chunks = {}
+  local env = nil
+  local venv_bin = detect_venv_path(cwd)
+  if venv_bin then
+    env = vim.fn.environ()
+    env.PATH = venv_bin .. ":" .. (env.PATH or "/usr/bin:/bin")
+  end
   -- sh -c, NOT -lc: a login shell sources the user's profile and may cd
   -- to $HOME, which would defeat the cwd we set explicitly.
   local handle = vim.system({ "sh", "-c", runner }, {
     text = true,
     cwd = cwd,
+    env = env,
     stdout = function(_, data)
       if data then
         stdout_chunks[#stdout_chunks + 1] = data

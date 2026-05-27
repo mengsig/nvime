@@ -4,6 +4,7 @@ local git = require("nvime.git")
 local selection_state = require("nvime.selection")
 local state = require("nvime.state")
 local ts = require("nvime.treesitter")
+local usage = require("nvime.usage")
 
 local M = {}
 
@@ -336,6 +337,42 @@ local function build_project_context(selection)
   return text
 end
 
+local function build_quick_prompt(selection, intent)
+  local selected_display, fence = selection_body_and_fence(selection)
+  return table.concat({
+    "NVIME QUICK FIX. Minimal patch worker — no tools, no file exploration.",
+    "Fix the selected code based on the intent using ONLY what is shown below.",
+    "If you cannot fix it without seeing more code, return NVIME_NO_CHANGE and state exactly what context you need.",
+    "",
+    "Response format (pick one):",
+    "",
+    "NVIME_NO_CHANGE",
+    "<reason or what context you need>",
+    "",
+    "NVIME_REPLACEMENT",
+    "```",
+    "<full replacement for the selected range>",
+    "```",
+    "",
+    "NVIME_DIFF",
+    "```diff",
+    "--- a/" .. (selection.path or "file"),
+    "+++ b/" .. (selection.path or "file"),
+    "@@ -<line>,<count> +<line>,<count> @@",
+    "<hunks>",
+    "```",
+    "",
+    "File: " .. (selection.path or "unknown"),
+    "Range: " .. tostring(selection.line1 or 1) .. "-" .. tostring(selection.line2 or selection.line1 or 1),
+    "Intent: " .. intent,
+    "",
+    "Selected code:",
+    fence,
+    selected_display,
+    fence,
+  }, "\n")
+end
+
 local function build_perf_prompt(selection, intent)
   local selected_display, fence = selection_body_and_fence(selection)
   return table.concat({
@@ -387,7 +424,7 @@ local function build_perf_prompt(selection, intent)
     "```",
     "",
     "File: " .. selection.path,
-    "Allowed range: " .. selection.line1 .. "-" .. selection.line2 .. " (" .. selection.source .. ")",
+    "Allowed range: " .. tostring(selection.line1 or 1) .. "-" .. tostring(selection.line2 or selection.line1 or 1) .. " (" .. (selection.source or "range") .. ")",
     "Intent: " .. intent,
     "",
     "Selected code:",
@@ -474,7 +511,7 @@ local function build_prompt(selection, intent)
     "```",
     "",
     "File: " .. selection.path,
-    "Allowed range: " .. selection.line1 .. "-" .. selection.line2 .. " (" .. selection.source .. ")",
+    "Allowed range: " .. tostring(selection.line1 or 1) .. "-" .. tostring(selection.line2 or selection.line1 or 1) .. " (" .. (selection.source or "range") .. ")",
     "Intent: " .. intent,
     table.concat(prior_context, "\n"),
     project_context and table.concat({
@@ -494,12 +531,28 @@ end
 
 local run_edit
 
+local edit_keywords = {
+  "make", "change", "fix", "add", "remove", "replace", "implement",
+  "refactor", "rename", "convert", "update", "handle", "delete",
+  "move", "extract", "inline", "wrap", "unwrap", "rewrite",
+}
+
+local function has_edit_keyword(text)
+  for _, kw in ipairs(edit_keywords) do
+    local pattern = "%f[%w]" .. kw .. "%f[%W]"
+    if text:find(pattern) then
+      return true
+    end
+  end
+  return false
+end
+
 local function looks_like_question(intent)
   local text = (intent or ""):lower()
   if text == "" then
     return false
   end
-  if text:match("%f[%w](make|change|fix|add|remove|replace|implement|refactor|rename|convert|update|handle)%f[%W]") then
+  if has_edit_keyword(text) then
     return false
   end
   return text:find("?", 1, true)
@@ -524,16 +577,7 @@ end
 local function submit_edit(selection, fallback_provider, input, selected_provider, session_id, lane)
   selected_provider = selected_provider or fallback_provider
   local active_session_id = session_id or selection_state.active_session_id()
-  if lane ~= "perf" and looks_like_question(input) then
-    require("nvime.ask").start({
-      selection = selection,
-      provider = selected_provider,
-      question = input,
-      session_id = active_session_id,
-    })
-  else
-    run_edit(selection, input, selected_provider, { session_id = active_session_id, lane = lane })
-  end
+  run_edit(selection, input, selected_provider, { session_id = active_session_id, lane = lane })
 end
 
 local function arm_edit_followup(selection, provider, session_id, open_panel)
@@ -564,8 +608,7 @@ run_edit = function(selection, intent, provider, session_opts)
   selection_state.append_response_header(provider, "edit", session_id)
 
   local response = {}
-  local lane = (session_opts.lane == "perf") and "perf" or "edit"
-  local prompt = (lane == "perf") and build_perf_prompt(selection, intent) or build_prompt(selection, intent)
+  local lane = session_opts.lane == "perf" and "perf" or session_opts.lane == "quick" and "quick" or "edit"
   local agent_session = selection_state.agent_run_opts(session_id, provider)
   -- Plan-level continuity override: when the caller passes a plan_continuity
   -- table, its resume_session_id wins over the selection-session one (so all
@@ -595,15 +638,36 @@ run_edit = function(selection, intent, provider, session_opts)
       end
     end
   end
+
+  local resuming = effective_resume and effective_resume ~= ""
+  local prompt
+  if resuming then
+    prompt = table.concat({
+      "Follow-up on the same selection.",
+      "The file, range, edit rules, and response format from the prior turn still apply.",
+      "New intent: " .. intent,
+    }, "\n")
+  elseif lane == "perf" then
+    prompt = build_perf_prompt(selection, intent)
+  elseif lane == "quick" then
+    prompt = build_quick_prompt(selection, intent)
+  else
+    prompt = build_prompt(selection, intent)
+  end
   state.selection.last_edit_prompt = prompt
+  local model = require("nvime.provider").current_model({ scope = "selection" })
   selection_state.set_busy(true, session_id)
   local handle
   handle = agents.run({
     provider = provider,
     lane = lane,
     prompt = prompt,
+    model = model,
+    max_turns = tonumber(edit_config().max_turns),
     persist_session = agent_session.persist_session,
     resume_session_id = effective_resume,
+    previous_cumulative_usage = agent_session.previous_cumulative_usage,
+    on_cumulative_usage = agent_session.on_cumulative_usage,
     on_session_id = effective_on_session_id,
     on_text = function(text)
       response[#response + 1] = text
@@ -611,6 +675,9 @@ run_edit = function(selection, intent, provider, session_opts)
     end,
     on_progress = function(text)
       selection_state.set_progress(text, session_id)
+      if edit_config().show_tool_log ~= false then
+        selection_state.append(text, session_id)
+      end
     end,
     on_handle = function(agent_handle)
       handle = agent_handle
@@ -637,6 +704,12 @@ run_edit = function(selection, intent, provider, session_opts)
       end
       if cancelled then
         return
+      end
+      if result.nvime_usage then
+        local label = usage.run_summary(result.nvime_usage)
+        if label then
+          selection_state.append("\n[nvime] " .. label .. "\n", session_id)
+        end
       end
       local opened_diff = false
       if result.code ~= 0 then
@@ -772,17 +845,6 @@ function M.start(opts)
       return
     end
 
-    if not force_edit and looks_like_question(intent) then
-      require("nvime.ask").start({
-        selection = selection,
-        provider = proceed_provider,
-        question = intent,
-        session_id = session_opts.session_id,
-        new_session = session_opts.new_session,
-      })
-      return
-    end
-
     -- Intent linter. Vague prompts get a confirmation; questionable
     -- prompts get a notice and proceed. The plan executor (force_edit)
     -- prefixes a structured plan-context header that may itself look
@@ -817,17 +879,6 @@ function M.start(opts)
       on_submit = function(input, selected_provider, lane)
         submit_edit(selection, provider, input, selected_provider, selection_state.active_session_id(), lane)
       end,
-    })
-    return
-  end
-
-  if not force_edit and looks_like_question(intent) then
-    require("nvime.ask").start({
-      selection = selection,
-      provider = provider,
-      question = intent,
-      session_id = opts.session_id,
-      new_session = opts.new_session,
     })
     return
   end
@@ -886,12 +937,14 @@ function M.continue_remaining()
         "",
         "User question: " .. input,
       }, "\n")
+      local discuss_model = require("nvime.provider").current_model({ scope = "selection" })
       local handle
       handle = agents.run({
         provider = selected_provider,
         lane = "edit",
         prompt = prompt,
         input = remaining,
+        model = discuss_model,
         persist_session = agent_session.persist_session,
         resume_session_id = agent_session.resume_session_id,
         on_session_id = agent_session.on_session_id,
@@ -901,6 +954,9 @@ function M.continue_remaining()
         end,
         on_progress = function(text)
           selection_state.set_progress(text, selection_session_id)
+          if edit_config().show_tool_log ~= false then
+            selection_state.append(text, selection_session_id)
+          end
         end,
         on_handle = function(agent_handle)
           handle = agent_handle
@@ -927,6 +983,12 @@ function M.continue_remaining()
           end
           if cancelled then
             return
+          end
+          if result.nvime_usage then
+            local label = usage.run_summary(result.nvime_usage)
+            if label then
+              selection_state.append("\n[nvime] " .. label .. "\n", selection_session_id)
+            end
           end
           local body = table.concat(response)
           local opened_diff = false
@@ -966,8 +1028,42 @@ function M.continue_remaining()
   })
 end
 
+function M.quick_fix(opts)
+  opts = opts or {}
+  local selection, err
+  if opts.selection then
+    selection = opts.selection
+  else
+    selection, err = ts.range_from_command(opts)
+  end
+  if not selection then
+    vim.notify(err or "nvime needs a visual range or a Tree-sitter function at the cursor", vim.log.levels.ERROR)
+    return
+  end
+  selection.path = selection.path or current_path(selection.bufnr)
+  if not selection.path then
+    vim.notify("nvime quick fix requires a named file buffer", vim.log.levels.ERROR)
+    return
+  end
+  local provider = opts.provider or state.config.provider
+  local intent = opts.intent
+  if not intent or intent == "" then
+    selection_state.prompt({
+      provider = provider,
+      mode = "edit",
+      selection = selection,
+      on_submit = function(input, selected_provider)
+        run_edit(selection, input, selected_provider or provider, { lane = "quick", new_session = true })
+      end,
+    })
+    return
+  end
+  run_edit(selection, intent, provider, { lane = "quick", new_session = true })
+end
+
 M._build_prompt = build_prompt
 M._build_perf_prompt = build_perf_prompt
+M._build_quick_prompt = build_quick_prompt
 M._looks_like_question = looks_like_question
 
 return M

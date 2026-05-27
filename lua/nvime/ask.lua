@@ -4,6 +4,7 @@ local git = require("nvime.git")
 local selection_state = require("nvime.selection")
 local state = require("nvime.state")
 local ts = require("nvime.treesitter")
+local usage = require("nvime.usage")
 
 local M = {}
 
@@ -167,12 +168,16 @@ run = function(selection, question, provider, session_opts)
   local response = {}
   local prompt = build_prompt(selection, question)
   local agent_session = selection_state.agent_run_opts(session_id, provider)
+  local model = require("nvime.provider").current_model({ scope = "selection" })
+  local max_turns = tonumber(((state.config or {}).edit or {}).max_turns)
   selection_state.set_busy(true, session_id)
   local handle
   handle = agents.run({
     provider = provider,
     lane = "ask",
     prompt = prompt,
+    model = model,
+    max_turns = max_turns,
     persist_session = agent_session.persist_session,
     resume_session_id = agent_session.resume_session_id,
     on_session_id = agent_session.on_session_id,
@@ -182,6 +187,9 @@ run = function(selection, question, provider, session_opts)
     end,
     on_progress = function(text)
       selection_state.set_progress(text, session_id)
+      if ((state.config or {}).edit or {}).show_tool_log ~= false then
+        selection_state.append(text, session_id)
+      end
     end,
     on_handle = function(agent_handle)
       handle = agent_handle
@@ -208,6 +216,12 @@ run = function(selection, question, provider, session_opts)
       end
       if cancelled then
         return
+      end
+      if result.nvime_usage then
+        local label = usage.run_summary(result.nvime_usage)
+        if label then
+          selection_state.append("\n[nvime] " .. label .. "\n", session_id)
+        end
       end
       local answer = vim.trim(table.concat(response))
       selection_state.mark_last_ask(session_id, {

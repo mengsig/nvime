@@ -147,7 +147,16 @@ local function claude_args(cfg, lane, prompt, run_opts)
     "--verbose",
     "--include-partial-messages",
     "--strict-mcp-config",
+    "--exclude-dynamic-system-prompt-sections",
   }
+
+  if run_opts.model and run_opts.model ~= "" then
+    vim.list_extend(args, { "--model", run_opts.model })
+  end
+
+  if run_opts.max_turns and run_opts.max_turns > 0 then
+    vim.list_extend(args, { "--max-turns", tostring(math.floor(run_opts.max_turns)) })
+  end
 
   if run_opts.resume_session_id and run_opts.resume_session_id ~= "" then
     vim.list_extend(args, { "--resume", run_opts.resume_session_id })
@@ -181,6 +190,13 @@ local function claude_args(cfg, lane, prompt, run_opts)
       "--disallowedTools",
       claude_plan_disallowed(),
     })
+  elseif lane == "quick" then
+    vim.list_extend(args, {
+      "--permission-mode",
+      "dontAsk",
+      "--tools",
+      "",
+    })
   elseif lane == "critic" then
     -- The critic is read-only by design: it reviews a proposed patch and
     -- returns APPROVE/FLAG/REJECT. No edits, no Bash, no web — strictly
@@ -210,10 +226,10 @@ local function claude_args(cfg, lane, prompt, run_opts)
     })
   end
 
-  -- Inject MCP servers (user-defined + nvime's own self-server) when
-  -- enabled. The critic lane stays mcp-free; only the working lanes
-  -- benefit from the extra tool surface.
-  if lane ~= "critic" then
+  -- Inject MCP servers only for review and plan lanes where the
+  -- broader tool surface (plans, attribution, test runner) helps.
+  -- All other lanes skip MCP to reduce context tokens.
+  if lane == "review" or lane == "plan" then
     local ok_mcp, mcp = pcall(require, "nvime.mcp")
     if ok_mcp then
       local config_path = mcp.config_path()
@@ -242,10 +258,25 @@ local function claude_args(cfg, lane, prompt, run_opts)
   return args
 end
 
+local function codex_model_overrides(cfg, run_opts)
+  local overrides = {}
+  local model = (run_opts and run_opts.model and run_opts.model ~= "") and run_opts.model or nil
+  if model then
+    overrides[#overrides + 1] = "-c"
+    overrides[#overrides + 1] = string.format("model=%q", model)
+  end
+  local effort = cfg.reasoning_effort
+  if effort and effort ~= "" then
+    overrides[#overrides + 1] = "-c"
+    overrides[#overrides + 1] = string.format("model_reasoning_effort=%q", effort)
+  end
+  return overrides
+end
+
 local function codex_args(cfg, lane, _prompt, cwd, run_opts)
   run_opts = run_opts or {}
   if run_opts.resume_session_id and run_opts.resume_session_id ~= "" then
-    return {
+    local args = {
       cfg.cmd,
       "exec",
       "resume",
@@ -253,9 +284,10 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
       "--ignore-user-config",
       "--ignore-rules",
       "--skip-git-repo-check",
-      run_opts.resume_session_id,
-      "-",
     }
+    vim.list_extend(args, codex_model_overrides(cfg, run_opts))
+    vim.list_extend(args, { run_opts.resume_session_id, "-" })
+    return args
   end
 
   local sandbox = "read-only"
@@ -277,6 +309,7 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
     "exec",
     "--json",
   }
+  vim.list_extend(args, codex_model_overrides(cfg, run_opts))
   if not run_opts.persist_session then
     args[#args + 1] = "--ephemeral"
   end
@@ -298,9 +331,9 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
   -- claude sees via --mcp-config. Codex still auto-cancels MCP tool
   -- calls in non-interactive exec mode unless the explicit bypass flag
   -- below is enabled.
-  -- Critic + perf lanes stay MCP-free (critic is a verdict-only call;
-  -- perf runs in a /tmp scratch dir where the project tools don't help).
-  if lane ~= "critic" and lane ~= "perf" then
+  -- Only review and plan lanes get MCP tools (plans, attribution,
+  -- test runner). All other lanes skip MCP to reduce context tokens.
+  if lane == "review" or lane == "plan" then
     local ok_mcp, mcp = pcall(require, "nvime.mcp")
     if ok_mcp then
       local servers = mcp.servers() or {}
@@ -869,6 +902,8 @@ function M.run(opts)
   local run_opts = {
     persist_session = opts.persist_session == true,
     resume_session_id = opts.resume_session_id,
+    model = opts.model,
+    max_turns = opts.max_turns,
   }
   local workspace = prepare_markdown_workspace(lane, opts.allow_markdown_workspace, opts.markdown_workspace)
   local plan_workspace = prepare_plan_workspace(lane)
@@ -959,6 +994,26 @@ function M.run(opts)
       vim.schedule(function()
         local synced = sync_markdown_workspace(workspace)
         local synced_plans = sync_plan_workspace(plan_workspace)
+        -- Codex turn.completed reports cumulative session usage, not per-turn.
+        -- Compute the per-turn delta by subtracting the previous cumulative.
+        local on_cumulative_usage = opts.on_cumulative_usage or function() end
+        if observed_usage and provider == "codex" then
+          local prev = opts.previous_cumulative_usage
+          -- Store the raw cumulative for next run's subtraction.
+          on_cumulative_usage({
+            input = (observed_usage.input or 0) + (observed_usage.cache_read or 0),
+            output = (observed_usage.output or 0),
+            cache_read = (observed_usage.cache_read or 0),
+            reasoning = (observed_usage.reasoning or 0),
+          })
+          if prev then
+            observed_usage.input = math.max(0, (observed_usage.input or 0) - (prev.input or 0) + (prev.cache_read or 0))
+            observed_usage.output = math.max(0, (observed_usage.output or 0) - (prev.output or 0))
+            observed_usage.cache_read = math.max(0, (observed_usage.cache_read or 0) - (prev.cache_read or 0))
+            observed_usage.reasoning = math.max(0, (observed_usage.reasoning or 0) - (prev.reasoning or 0))
+            observed_usage.cost_usd = 0
+          end
+        end
         local recorded_usage
         if observed_usage then
           recorded_usage = usage.record({

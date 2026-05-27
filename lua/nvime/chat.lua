@@ -8,6 +8,7 @@ local provider_api = require("nvime.provider")
 local render = require("nvime.render")
 local spinner = require("nvime.spinner")
 local state = require("nvime.state")
+local usage = require("nvime.usage")
 local ui = require("nvime.ui")
 local version = require("nvime.version")
 
@@ -940,6 +941,12 @@ local function attach_panel(bufnr)
   vim.keymap.set("n", "P", function()
     provider_api.choose({ scope = "chat" })
   end, opts)
+  vim.keymap.set("n", "m", function()
+    provider_api.cycle_model({ scope = "chat" })
+  end, opts)
+  vim.keymap.set("n", "M", function()
+    provider_api.choose_model({ scope = "chat" })
+  end, opts)
   vim.keymap.set("n", "?", function()
     require("nvime.chat").choose_prompt()
   end, opts)
@@ -1518,11 +1525,13 @@ function M.submit(text, opts)
     native_context_only = true,
   })
   local response = {}
+  local chat_model = require("nvime.provider").current_model({ scope = "chat" })
   local handle
   handle = agents.run({
     provider = provider_name,
     lane = "review",
     prompt = prompt,
+    model = chat_model,
     persist_session = agent_session.persist_session,
     resume_session_id = agent_session.resume_session_id,
     markdown_workspace = agent_session.markdown_workspace,
@@ -1533,6 +1542,9 @@ function M.submit(text, opts)
     end,
     on_progress = function(chunk)
       M.set_progress(chunk, session.id)
+      if ((state.config or {}).edit or {}).show_tool_log ~= false then
+        append_scrollback(chunk, session.id)
+      end
     end,
     on_handle = function(agent_handle)
       handle = agent_handle
@@ -1558,6 +1570,12 @@ function M.submit(text, opts)
       session.busy = false
       if cancelled then
         session.cancelled = false
+      end
+      if not cancelled and result.nvime_usage then
+        local label = usage.run_summary(result.nvime_usage)
+        if label then
+          append_scrollback("\n[nvime] " .. label .. "\n", session.id)
+        end
       end
       session.progress = nil
       touch_session(session)

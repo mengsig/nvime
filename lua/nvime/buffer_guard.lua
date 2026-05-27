@@ -55,26 +55,55 @@ function M.enforce(opts)
   end
 
   local current = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local expected = copy_lines(baseline)
   local prompt_lnum = opts.prompt_lnum(panel)
   local prefix = opts.prompt_prefix()
-  local invalid = false
 
-  if prompt_lnum >= 1 and prompt_lnum <= #expected then
-    local prompt_line = current[prompt_lnum] or expected[prompt_lnum] or prefix
-    if vim.startswith(prompt_line, prefix) then
-      expected[prompt_lnum] = prompt_line
-    else
-      invalid = true
+  -- Protect scrollback (lines above the prompt) from modification.
+  -- Lines from the prompt onward are the user's input area and may
+  -- span multiple lines (multi-line paste).
+  local scrollback_ok = true
+  local scrollback_end = math.min(prompt_lnum - 1, #baseline, #current)
+  for i = 1, scrollback_end do
+    if current[i] ~= baseline[i] then
+      scrollback_ok = false
+      break
     end
   end
+  if #current < prompt_lnum then
+    scrollback_ok = false
+  end
 
-  if lines_equal(current, expected) and not invalid then
+  local prompt_line = current[prompt_lnum] or ""
+  if not vim.startswith(prompt_line, prefix) then
+    scrollback_ok = false
+  end
+
+  if scrollback_ok then
     panel.guard_lines = copy_lines(current)
     if opts.decorate then
       opts.decorate(bufnr)
     end
     return
+  end
+
+  -- Scrollback was damaged — restore it but preserve the input area.
+  local input_lines = {}
+  if prompt_lnum <= #current then
+    for i = prompt_lnum, #current do
+      input_lines[#input_lines + 1] = current[i]
+    end
+  end
+  local restored = copy_lines(baseline)
+  if #input_lines > 0 and vim.startswith(input_lines[1] or "", prefix) then
+    for i = #restored + 1, prompt_lnum - 1 do
+      restored[i] = ""
+    end
+    for i = prompt_lnum, prompt_lnum + #input_lines - 1 do
+      restored[i] = input_lines[i - prompt_lnum + 1]
+    end
+    while #restored > prompt_lnum + #input_lines - 1 do
+      restored[#restored] = nil
+    end
   end
 
   panel.guard_restoring = true
@@ -83,12 +112,12 @@ function M.enforce(opts)
     local modifiable = vim.bo[bufnr].modifiable
     vim.bo[bufnr].readonly = false
     vim.bo[bufnr].modifiable = true
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, expected)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, restored)
     vim.bo[bufnr].modifiable = modifiable
     vim.bo[bufnr].readonly = readonly
   end)
   panel.guard_restoring = false
-  panel.guard_lines = copy_lines(expected)
+  panel.guard_lines = copy_lines(restored)
 
   if opts.decorate then
     opts.decorate(bufnr)

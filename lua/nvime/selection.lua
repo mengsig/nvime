@@ -490,7 +490,7 @@ end
 
 local function scroll_config()
   local dim = dimensions()
-  local footer = " i input | ? prompts | <CR> send on prompt | p provider | P choose | q close "
+  local footer = " i input | ? prompts | <CR> send on prompt | p provider | m model | q close "
   return {
     relative = "editor",
     width = dim.width,
@@ -535,9 +535,14 @@ local function current_input_text()
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return ""
   end
-  local prompt_lnum = (panel.input_start or line_count(bufnr)) + INPUT_PROMPT_LINE - 1
-  local line = vim.api.nvim_buf_get_lines(bufnr, prompt_lnum - 1, prompt_lnum, false)[1] or ""
-  return extract_prompt_text(line)
+  local plnum = (panel.input_start or line_count(bufnr)) + INPUT_PROMPT_LINE - 1
+  local total = line_count(bufnr)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, plnum - 1, total, false)
+  if not lines or #lines == 0 then
+    return ""
+  end
+  lines[1] = extract_prompt_text(lines[1])
+  return table.concat(lines, "\n")
 end
 
 local function prompt_has_submit_text(panel)
@@ -855,6 +860,12 @@ local function attach_panel(bufnr)
   end, opts)
   vim.keymap.set("n", "P", function()
     provider_api.choose({ scope = "selection" })
+  end, opts)
+  vim.keymap.set("n", "m", function()
+    provider_api.cycle_model({ scope = "selection" })
+  end, opts)
+  vim.keymap.set("n", "M", function()
+    provider_api.choose_model({ scope = "selection" })
   end, opts)
   vim.keymap.set("n", "?", function()
     require("nvime.selection").choose_prompt()
@@ -1325,8 +1336,12 @@ function M.submit_current()
 
   local panel = state.panels.selection
   local lnum = prompt_lnum(panel)
-  local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, lnum, false)[1] or ""
-  local text = vim.trim(extract_prompt_text(line))
+  local total = line_count(panel.input_bufnr)
+  local lines = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, total, false)
+  if lines and #lines > 0 then
+    lines[1] = extract_prompt_text(lines[1])
+  end
+  local text = vim.trim(table.concat(lines or {}, "\n"))
   reset_input("")
   if text == "" then
     M.focus_input()
@@ -1422,10 +1437,13 @@ function M.winbar_text()
   local status_hl = busy and "NvimeStatusRunning" or "NvimeStatusIdle"
   local status_text = busy and (render.spinner_text() .. " running") or (ui.icon("idle") .. " idle")
 
+  local model_name = (session and session.model) or (state.selection and state.selection.model)
+  local provider_display = model_name and (provider_name .. "/" .. model_name) or provider_name
+
   local nvime_label = " nvime.nvim "
   local version_label = " " .. version.label() .. " "
   local sep = "  "
-  local visible = nvime_label .. sep .. version_label .. sep .. provider_name .. sep .. lane .. sep .. status_text
+  local visible = nvime_label .. sep .. version_label .. sep .. provider_display .. sep .. lane .. sep .. status_text
   local visible_width = vim.fn.strdisplaywidth(visible)
 
   local panel = state.panels.selection
@@ -1447,7 +1465,7 @@ function M.winbar_text()
     .. "%#"
     .. provider_hl
     .. "#"
-    .. provider_name
+    .. provider_display
     .. "%*"
     .. sep
     .. "%#NvimeMuted#"
@@ -1665,11 +1683,19 @@ end
 function M.agent_run_opts(session_id, provider_name)
   local session = M.get_session(session_id)
   local resume_id = session and session.provider_sessions and session.provider_sessions[provider_name] or nil
+  local cumulative_key = provider_name .. "_cumulative_usage"
+  local prev_cumulative = session and session[cumulative_key] or nil
   return {
     persist_session = true,
     resume_session_id = resume_id,
+    previous_cumulative_usage = prev_cumulative,
     on_session_id = function(provider_session_id)
       M.mark_provider_session(session_id, provider_name, provider_session_id)
+    end,
+    on_cumulative_usage = function(cumulative)
+      if session and cumulative then
+        session[cumulative_key] = cumulative
+      end
     end,
   }
 end

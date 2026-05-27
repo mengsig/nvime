@@ -5,9 +5,12 @@ M.defaults = {
   providers = {
     claude = {
       cmd = "claude",
+      models = { "opus", "sonnet", "haiku" },
     },
     codex = {
       cmd = "codex",
+      models = { "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark" },
+      reasoning_effort = nil,
     },
   },
   ui = {
@@ -424,6 +427,14 @@ local function validate_provider(warnings, name, value)
     local child = path .. "." .. tostring(key)
     if key == "cmd" then
       validate_leaf(warnings, child, item, "string")
+    elseif key == "model" then
+      validate_leaf(warnings, child, item, "string")
+    elseif key == "models" then
+      if type(item) ~= "table" then
+        validate_leaf(warnings, child, item, "table")
+      end
+    elseif key == "reasoning_effort" then
+      validate_leaf(warnings, child, item, { "string", "nil" })
     else
       warn(warnings, "unknown nvime config key: " .. child)
     end
