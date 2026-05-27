@@ -2277,21 +2277,16 @@ function M.execute_step(plan_id, step_id, opts)
 
   require("nvime.edit").start({
     selection = selection,
-    intent = intent,
+    prefill = intent,
     line1 = selection.line1,
     line2 = selection.line2,
     range = 2,
     provider = opts.provider,
-    -- Skip the question-shaped reroute: a plan step always wants the patch
-    -- worker, even if the intent or plan-context block contains words like
-    -- "review", "verify", "check", or "?".
     force_edit = true,
     on_resolved = on_resolved,
     on_run_failed = on_run_failed,
     devils_advocate = devils_advocate,
     plan_continuity = plan_continuity,
-    -- Plan linkage: surfaces in the attribution ledger so every accepted
-    -- block reports which plan + step authored it.
     plan_id = plan.id,
     plan_step_id = step.id,
   })

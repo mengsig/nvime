@@ -885,6 +885,7 @@ function M.start(opts)
   end
 
   if not intent or intent == "" then
+    local prefill = opts.prefill
     selection_state.prompt({
       provider = provider,
       mode = "edit",
@@ -892,9 +893,21 @@ function M.start(opts)
       session_id = opts.session_id,
       new_session = opts.new_session,
       on_submit = function(input, selected_provider, lane)
-        submit_edit(selection, provider, input, selected_provider, selection_state.active_session_id(), lane)
+        run_edit(selection, input, selected_provider or provider, {
+          session_id = selection_state.active_session_id(),
+          lane = lane,
+          on_resolved = opts.on_resolved,
+          on_run_failed = opts.on_run_failed,
+          devils_advocate = opts.devils_advocate,
+          plan_continuity = opts.plan_continuity,
+          plan_id = opts.plan_id,
+          plan_step_id = opts.plan_step_id,
+        })
       end,
     })
+    if prefill and prefill ~= "" then
+      selection_state.insert_prompt(prefill)
+    end
     return
   end
 
