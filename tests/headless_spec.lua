@@ -3023,6 +3023,26 @@ end
     assert(cl1 == 30 and cl2 == 40 and cn == nil, "no anchor + no symbols clamps recorded")
   end
 
+  -- reanchor confidence levels (drive the execute_step uncertainty gate)
+  do
+    local lines = { "alpha", "beta", "moved target", "delta", "epsilon", "zeta" }
+    local _, _, _, c_exact = plan._reanchor_range(lines, 3, 4, "moved target")
+    assert_eq(c_exact, "exact", "reanchor confidence: anchor at recorded line -> exact")
+    local _, _, _, c_reloc = plan._reanchor_range(lines, 5, 6, "moved target")
+    assert_eq(c_reloc, "relocated", "reanchor confidence: single relocation -> relocated")
+    local amb = { "x", "dup", "y", "dup", "z" }
+    local a1, _, anotice, c_amb = plan._reanchor_range(amb, 5, 5, "dup")
+    assert_eq(c_amb, "ambiguous", "reanchor confidence: multiple matches -> ambiguous")
+    assert_eq(a1, 4, "reanchor: ambiguous picks the nearest match to recorded")
+    assert(anotice and anotice:find("ambiguous", 1, true), "reanchor: ambiguous emits a notice")
+    local big = {}
+    for i = 1, 50 do
+      big[i] = "filler " .. i
+    end
+    local _, _, _, c_stale = plan._reanchor_range(big, 10, 12, "this anchor is nowhere", "no symbols here")
+    assert_eq(c_stale, "stale", "reanchor confidence: nothing matched -> stale")
+  end
+
   -- intent symbol extraction picks up backtick-quoted ids
   assert(type(plan._extract_intent_symbols) == "function", "plan: _extract_intent_symbols exported")
   do
@@ -3034,6 +3054,56 @@ end
     end
     assert(seen.mark_conflict and seen.block_force_applied, "extracted backtick refs")
     assert(seen.start_line and seen.end_line, "extracted multi-word backtick refs")
+  end
+
+  -- Live range-rebasing (plan-step drift fix): build_line_map maps old->new
+  -- line numbers across an edit, and rebase_pending_ranges shifts the ranges
+  -- of not-yet-done steps in the edited file so later steps stay anchored.
+  assert(type(plan._build_line_map) == "function", "plan: _build_line_map exposed")
+  assert(type(plan._rebase_pending_ranges) == "function", "plan: _rebase_pending_ranges exposed")
+  do
+    local old = { "a", "b", "c", "d", "e" }
+    local map_ins = plan._build_line_map(old, { "a", "x", "y", "b", "c", "d", "e" })
+    assert_eq(map_ins(1), 1, "rebase: line before insertion unchanged")
+    assert_eq(map_ins(2), 4, "rebase: line after insertion shifts down by 2")
+    assert_eq(map_ins(5), 7, "rebase: last line shifts by inserted count")
+    local map_del = plan._build_line_map(old, { "a", "d", "e" })
+    assert_eq(map_del(1), 1, "rebase: pre-deletion line unchanged")
+    assert_eq(map_del(4), 2, "rebase: post-deletion line shifts up by 2")
+  end
+  do
+    local rebase_dir = tmp .. "/rebase-plans"
+    vim.fn.mkdir(rebase_dir, "p")
+    local old_plan_dir = require("nvime.state").config.plan.dir
+    require("nvime.state").config.plan.dir = rebase_dir
+    local p = {
+      version = 1,
+      id = "0001-rebase",
+      title = "Rebase",
+      why = "t",
+      created_at = os.time(),
+      updated_at = os.time(),
+      files_estimated = {},
+      acceptance = {},
+      steps = {
+        { id = 1, intent = "x", file = "a.lua", range = { line1 = 1, line2 = 3 }, depends_on = {}, tests = {}, status = "done" },
+        { id = 2, intent = "x", file = "a.lua", range = { line1 = 10, line2 = 12 }, depends_on = {}, tests = {}, status = "pending" },
+        { id = 3, intent = "x", file = "b.lua", range = { line1 = 10, line2 = 12 }, depends_on = {}, tests = {}, status = "pending" },
+      },
+    }
+    local oldf, newf = {}, { "n1", "n2", "n3", "n4", "n5" }
+    for i = 1, 20 do
+      oldf[i] = "l" .. i
+      newf[#newf + 1] = "l" .. i
+    end
+    -- step 1 (current/done) prepended 5 lines to a.lua
+    plan._rebase_pending_ranges(p, "a.lua", oldf, newf, 1)
+    assert_eq(p.steps[2].range.line1, 15, "rebase: pending step in same file shifts +5")
+    assert_eq(p.steps[2].range.line2, 17, "rebase: pending step end shifts +5")
+    assert_eq(p.steps[3].range.line1, 10, "rebase: step in a different file is untouched")
+    require("nvime.state").config.plan.dir = old_plan_dir
+    require("nvime.state").plan.loaded = false
+    require("nvime.state").plan.plans = nil
   end
 
   -- test runner auto-detection (cargo / zig / go / py / npm / etc.)

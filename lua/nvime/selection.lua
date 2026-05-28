@@ -1,59 +1,35 @@
-local audit = require("nvime.audit")
-local buffer_guard = require("nvime.buffer_guard")
-local git = require("nvime.git")
-local progress = require("nvime.progress")
+-- nvime.selection
+--
+-- Ask/edit/discuss panel for a highlighted code range. The scratch-buffer
+-- panel mechanism (persistence, window, input guard, spinner, streaming
+-- append, session list surface) lives in nvime.panel; this module supplies
+-- the selection-specific policy (sessions keyed by file+range, ask/edit/
+-- discuss modes, last_ask handoff, choose_session) and the bespoke
+-- prompt/submit flow.
+
+local panel = require("nvime.panel")
 local prompts = require("nvime.prompts")
-local provider_api = require("nvime.provider")
-local render = require("nvime.render")
-local spinner = require("nvime.spinner")
 local state = require("nvime.state")
-local ui = require("nvime.ui")
-local version = require("nvime.version")
 
 local M = {}
 
-local scroll_ns = vim.api.nvim_create_namespace("nvime.selection")
-local input_ns = vim.api.nvim_create_namespace("nvime.selection.input")
-local focus_group = vim.api.nvim_create_augroup("nvime.selection.focus", { clear = false })
+-- Forward refs: the panel instance and its internal helper table. Assigned
+-- right after panel.create() returns, before any policy/module function runs.
+local P, ctx
 
-local INPUT_PROMPT_LINE = 1
-local sessions_loaded = false
-local save_pending = false
-local SESSION_VERSION = 1
-
-local function sessions_config()
-  return (state.config or {}).sessions or {}
+local function mode()
+  return (state.selection and state.selection.mode) or "selection"
 end
 
-local function sessions_enabled()
-  return not state.disabled and sessions_config().enabled ~= false
-end
-
-local function sessions_path()
-  local cfg = sessions_config()
-  if cfg.path and cfg.path ~= "" then
-    return vim.fn.fnamemodify(cfg.path, ":p")
+local function selection_key(selection)
+  if not selection then
+    return nil
   end
-
-  local root = git.root()
-  if root then
-    return root .. "/.nvime/selection-sessions.json"
-  end
-
-  return vim.fn.stdpath("state") .. "/nvime/selection-sessions.json"
-end
-
-local function notify_persist_error(err)
-  vim.schedule(function()
-    vim.notify("nvime could not persist sessions: " .. tostring(err), vim.log.levels.WARN)
-  end)
-end
-
-local function persisted_lines(session)
-  if session.bufnr and vim.api.nvim_buf_is_valid(session.bufnr) then
-    return vim.api.nvim_buf_get_lines(session.bufnr, 0, -1, false)
-  end
-  return session.lines or {}
+  return table.concat({
+    selection.path or "",
+    tostring(selection.line1 or ""),
+    tostring(selection.line2 or ""),
+  }, ":")
 end
 
 local function persisted_selection(selection)
@@ -73,298 +49,35 @@ local function persisted_last_ask(last_ask)
   return out
 end
 
-local function serializable_session(session)
+local function same_file(left, right)
+  return left and right and left.path ~= nil and left.path == right.path
+end
+
+function M.snapshot(selection)
   return {
-    id = session.id,
-    key = session.key,
-    title = session.title,
-    selection = persisted_selection(session.selection),
-    provider = session.provider,
-    mode = session.mode,
-    input_start = session.input_start,
-    provider_sessions = session.provider_sessions or {},
-    last_ask = persisted_last_ask(session.last_ask),
-    lines = persisted_lines(session),
-    created_at = session.created_at,
-    updated_at = session.updated_at,
+    bufnr = selection.bufnr,
+    path = selection.path,
+    line1 = selection.line1,
+    line2 = selection.line2,
+    source = selection.source,
   }
 end
 
-local function public_session(session)
-  local out = serializable_session(session)
-  out.busy = session.busy == true
-  out.progress = session.progress
-  return out
-end
-
-local function save_sessions_now()
-  if not sessions_enabled() then
-    return
+function M.same_range(left, right)
+  if not left or not right then
+    return false
   end
-  -- Refuse to write when load_sessions has never run. See chat.lua for
-  -- the same guard — without it, a run that opens nvime but never opens
-  -- the selection panel will overwrite the on-disk file with the empty
-  -- in-memory default at VimLeavePre, silently destroying prior selections.
-  if not sessions_loaded then
-    return
-  end
-  local sessions = state.selection and state.selection.sessions or {}
-  local max_sessions = tonumber(sessions_config().max) or 100
-  local out = {}
-  local sorted = {}
-  for index, _ in ipairs(sessions) do
-    sorted[#sorted + 1] = index
-  end
-  table.sort(sorted, function(left, right)
-    return ((sessions[left] or {}).updated_at or 0) > ((sessions[right] or {}).updated_at or 0)
-  end)
-  for index, session_index in ipairs(sorted) do
-    if index > max_sessions then
-      break
-    end
-    local session = sessions[session_index]
-    out[#out + 1] = serializable_session(session)
-  end
-
-  local path = sessions_path()
-  vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
-  local fd, err = io.open(path, "w")
-  if not fd then
-    notify_persist_error(err)
-    return
-  end
-  local ok, write_err = pcall(function()
-    local encoded = vim.json.encode({
-      version = SESSION_VERSION,
-      next_session_id = state.selection.next_session_id or 1,
-      sessions = out,
-    })
-    local wrote, err1 = fd:write(encoded)
-    if not wrote then
-      error(err1 or "write failed")
-    end
-    wrote, err1 = fd:write("\n")
-    if not wrote then
-      error(err1 or "write failed")
-    end
-  end)
-  local close_ok, closed, close_err = pcall(function()
-    return fd:close()
-  end)
-  if not ok then
-    notify_persist_error(write_err)
-  elseif not close_ok then
-    notify_persist_error(closed)
-  elseif not closed then
-    notify_persist_error(close_err)
-  end
-end
-
-local function schedule_save_sessions()
-  if not sessions_enabled() or save_pending then
-    return
-  end
-  save_pending = true
-  vim.defer_fn(function()
-    save_pending = false
-    save_sessions_now()
-  end, 150)
-end
-
-local function migrate_sessions(decoded, path)
-  local version_value = tonumber(decoded.version or 1)
-  if version_value > SESSION_VERSION then
-    vim.notify("nvime selection sessions were written by a newer nvime version: " .. path, vim.log.levels.WARN)
-    return nil
-  end
-  if type(decoded.sessions) ~= "table" then
-    return nil
-  end
-  decoded.version = SESSION_VERSION
-  return decoded
-end
-
-local function load_sessions()
-  if sessions_loaded then
-    return
-  end
-  sessions_loaded = true
-  if not sessions_enabled() then
-    return
-  end
-
-  local path = sessions_path()
-  if vim.fn.filereadable(path) ~= 1 then
-    return
-  end
-  local ok, raw = pcall(vim.fn.readfile, path)
-  if not ok or not raw or #raw == 0 then
-    return
-  end
-  local decoded_ok, decoded = pcall(vim.json.decode, table.concat(raw, "\n"))
-  if not decoded_ok or type(decoded) ~= "table" or type(decoded.sessions) ~= "table" then
-    return
-  end
-  decoded = migrate_sessions(decoded, path)
-  if not decoded then
-    return
-  end
-
-  state.selection.sessions = {}
-  local max_id = 0
-  for _, item in ipairs(decoded.sessions) do
-    if type(item) == "table" and item.id and item.selection then
-      item.id = tonumber(item.id)
-      if item.id then
-        if type(item.selection) == "table" then
-          item.selection.bufnr = nil
-        end
-        if type(item.last_ask) == "table" and type(item.last_ask.selection) == "table" then
-          item.last_ask.selection.bufnr = nil
-        end
-        item.provider_sessions = type(item.provider_sessions) == "table" and item.provider_sessions or {}
-        item.lines = type(item.lines) == "table" and item.lines or nil
-        item.pending_input = nil
-        item.busy = false
-        item.cancelled = false
-        item.process = nil
-        item.input_active = false
-        item.bufnr = nil
-        max_id = math.max(max_id, item.id)
-        state.selection.sessions[#state.selection.sessions + 1] = item
-      end
-    end
-  end
-  state.selection.next_session_id = math.max(tonumber(decoded.next_session_id) or 1, max_id + 1)
-end
-
-local function provider()
-  return (state.selection and state.selection.provider) or (state.config and state.config.provider) or "claude"
-end
-
-local function mode()
-  return (state.selection and state.selection.mode) or "selection"
-end
-
-local function prompt_prefix()
-  return "[" .. provider() .. " " .. mode() .. "]$ "
-end
-
-local function line_count(bufnr)
-  return vim.api.nvim_buf_line_count(bufnr)
-end
-
-local function prompt_end_col(panel)
-  if not panel or not panel.input_bufnr or not vim.api.nvim_buf_is_valid(panel.input_bufnr) then
-    return #prompt_prefix()
-  end
-  local lnum = panel.input_start or 1
-  local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, lnum, false)[1] or ""
-  return #line
-end
-
-local function find_buffer_by_name(name)
-  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == name then
-      return bufnr
-    end
-  end
-  return nil
-end
-
-local function set_scratch_options(bufnr, filetype)
-  vim.bo[bufnr].buftype = "nofile"
-  vim.bo[bufnr].bufhidden = "hide"
-  vim.bo[bufnr].swapfile = false
-  vim.bo[bufnr].filetype = filetype or "nvime"
-end
-
-local function ensure_named_buffer(name, filetype)
-  local bufnr = find_buffer_by_name(name)
-  if not bufnr then
-    bufnr = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_name(bufnr, name)
-  end
-  set_scratch_options(bufnr, filetype)
-  return bufnr
-end
-
-local function now()
-  return os.time()
-end
-
-local function selection_key(selection)
-  if not selection then
-    return nil
-  end
-  return table.concat({
-    selection.path or "",
-    tostring(selection.line1 or ""),
-    tostring(selection.line2 or ""),
-  }, ":")
-end
-
-local function session_buffer_name(session)
-  return "nvime://selection/" .. tostring(session.id)
-end
-
-local function ensure_sessions()
-  load_sessions()
-  state.selection.sessions = state.selection.sessions or {}
-  state.selection.next_session_id = state.selection.next_session_id or 1
-  return state.selection.sessions
-end
-
-local function touch_session(session)
-  if session then
-    session.updated_at = now()
-    schedule_save_sessions()
-  end
-end
-
-local function ensure_session_buffer(session)
-  if not session then
-    return nil
-  end
-  if not session.bufnr or not vim.api.nvim_buf_is_valid(session.bufnr) then
-    session.bufnr = ensure_named_buffer(session_buffer_name(session), "nvime")
-    if session.lines and #session.lines > 0 then
-      local modifiable = vim.bo[session.bufnr].modifiable
-      local readonly = vim.bo[session.bufnr].readonly
-      vim.bo[session.bufnr].readonly = false
-      vim.bo[session.bufnr].modifiable = true
-      vim.api.nvim_buf_set_lines(session.bufnr, 0, -1, false, session.lines)
-      vim.bo[session.bufnr].modifiable = modifiable
-      vim.bo[session.bufnr].readonly = readonly
-    end
-  else
-    set_scratch_options(session.bufnr, "nvime")
-  end
-  return session.bufnr
+  return left.path == right.path
+    and tonumber(left.line1) == tonumber(right.line1)
+    and tonumber(left.line2) == tonumber(right.line2)
 end
 
 local function create_session(selection, key)
-  local sessions = ensure_sessions()
-  local id = state.selection.next_session_id
-  state.selection.next_session_id = id + 1
-  local session = {
-    id = id,
+  return ctx.new_session({
     key = key or selection_key(selection),
     selection = M.snapshot(selection),
-    provider = provider(),
     mode = "selection",
-    input_start = nil,
-    input_active = false,
-    pending_input = nil,
-    busy = false,
-    provider_sessions = {},
-    created_at = now(),
-    updated_at = now(),
-  }
-  ensure_session_buffer(session)
-  table.insert(sessions, session)
-  schedule_save_sessions()
-  return session
+  })
 end
 
 local function session_for_selection(selection, opts)
@@ -374,880 +87,199 @@ local function session_for_selection(selection, opts)
   end
   local key = selection_key(selection)
   if not opts.new_session then
-    for _, session in ipairs(ensure_sessions()) do
+    for _, session in ipairs(ctx.ensure_sessions()) do
       if session.key == key then
         session.selection = M.snapshot(selection)
         session.provider_sessions = session.provider_sessions or {}
-        touch_session(session)
+        ctx.touch_session(session)
         return session
       end
     end
   end
-
   return create_session(selection, key)
 end
 
-local function active_session()
-  return state.selection and state.selection.active_session_id and M.get_session(state.selection.active_session_id)
-end
+-- ---------------------------------------------------------------------------
+-- policy
+-- ---------------------------------------------------------------------------
+local policy = {
+  kind = "selection",
+  state_key = "selection",
+  ns_prefix = "nvime.selection",
+  augroup_name = "nvime.selection.focus",
+  guard_key = "nvime_selection_guard_attached",
+  module_name = "nvime.selection",
+  input_buffer_name = "nvime://selection-input",
+  buffer_name_prefix = "nvime://selection/",
+  footer = " i input | ? prompts | <CR> send on prompt | p provider | m model | q close ",
+  zindex = 52,
+  provider_scope = "selection",
+  enter_input_method = "focus_input",
+  persist_filename = "selection-sessions.json",
+  persist_error_label = "sessions",
+  newer_version_label = "nvime selection sessions were written by a newer nvime version:",
+  seed_fresh_buffer = true,
 
-local function sync_active_panel_to_session()
-  local panel = state.panels.selection
-  local session = active_session()
-  if not panel or not session then
-    return
-  end
-  if panel.session_id ~= session.id then
-    return
-  end
-  session.input_start = panel.input_start
-  session.input_active = panel.input_active == true
-  session.bufnr = panel.bufnr or session.bufnr
-end
+  provider = function()
+    return (state.selection and state.selection.provider) or (state.config and state.config.provider) or "claude"
+  end,
 
-local function panel_for_session(session)
-  local panel = state.panels.selection
-  if panel and session and panel.session_id == session.id then
-    return panel
-  end
-  return {
-    bufnr = session and session.bufnr,
-    input_bufnr = session and session.bufnr,
-    input_start = session and session.input_start,
-    input_active = false,
-  }
-end
+  prompt_prefix = function(c)
+    return "[" .. c.provider() .. " " .. mode() .. "]$ "
+  end,
 
-local function delete_named_buffer(name)
-  local bufnr = find_buffer_by_name(name)
-  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
-    pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-  end
-end
+  serialize_session = function(session, persisted_lines)
+    return {
+      id = session.id,
+      key = session.key,
+      title = session.title,
+      selection = persisted_selection(session.selection),
+      provider = session.provider,
+      mode = session.mode,
+      input_start = session.input_start,
+      provider_sessions = session.provider_sessions or {},
+      last_ask = persisted_last_ask(session.last_ask),
+      lines = persisted_lines(session),
+      created_at = session.created_at,
+      updated_at = session.updated_at,
+    }
+  end,
 
-local function set_locked(bufnr, locked)
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    return
-  end
-  vim.bo[bufnr].readonly = locked
-  vim.bo[bufnr].modifiable = not locked
-end
+  item_is_valid = function(item)
+    return item.selection ~= nil
+  end,
 
-local function with_writable(bufnr, fn, after, sync_panel)
-  local modifiable = vim.bo[bufnr].modifiable
-  local readonly = vim.bo[bufnr].readonly
-  local ok, result = pcall(function()
-    return buffer_guard.suspend(bufnr, function()
-      vim.bo[bufnr].readonly = false
-      vim.bo[bufnr].modifiable = true
-      return fn()
-    end)
-  end)
-  vim.bo[bufnr].modifiable = modifiable
-  vim.bo[bufnr].readonly = readonly
-  if not ok then
-    error(result)
-  end
-  if after then
-    after(bufnr)
-  end
-  buffer_guard.sync(bufnr, sync_panel or state.panels.selection)
-  return result
-end
-
-local function dimensions()
-  local cfg = (state.config or {}).ui or {}
-  local columns = vim.o.columns
-  local lines = vim.o.lines
-  local width = cfg.width or math.floor(columns * (cfg.float_width or 0.82))
-  local height = cfg.height or math.floor(lines * (cfg.float_height or 0.72))
-
-  if type(cfg.float_width) == "number" and cfg.float_width > 0 and cfg.float_width <= 1 then
-    width = math.floor(columns * cfg.float_width)
-  end
-  if type(cfg.float_height) == "number" and cfg.float_height > 0 and cfg.float_height <= 1 then
-    height = math.floor(lines * cfg.float_height)
-  end
-
-  width = math.max(56, math.min(width, columns - 4))
-  height = math.max(16, math.min(height, lines - 4))
-
-  local row = math.floor((lines - height) / 2 - 1)
-  local col = math.floor((columns - width) / 2)
-
-  return {
-    width = width,
-    height = height,
-    row = math.max(0, row),
-    col = math.max(0, col),
-    border = cfg.border or "rounded",
-  }
-end
-
-local function title()
-  return "nvime.nvim"
-end
-
-local function scroll_config()
-  local dim = dimensions()
-  local footer = " i input | ? prompts | <CR> send on prompt | p provider | m model | q close "
-  return {
-    relative = "editor",
-    width = dim.width,
-    height = dim.height,
-    row = dim.row,
-    col = dim.col,
-    style = "minimal",
-    border = dim.border,
-    title = " " .. title() .. " ",
-    title_pos = "center",
-    footer = footer,
-    footer_pos = "center",
-    zindex = 52,
-  }
-end
-
-local function configure_scrollback_window(winid)
-  vim.wo[winid].wrap = true
-  vim.wo[winid].number = false
-  vim.wo[winid].relativenumber = false
-  vim.wo[winid].signcolumn = "no"
-  vim.wo[winid].cursorline = false
-  vim.wo[winid].spell = false
-  vim.wo[winid].winblend = 0
-  vim.wo[winid].winhighlight =
-    "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted,WinBar:NvimeNormal"
-  vim.wo[winid].winbar = "%{%v:lua.require'nvime.selection'.winbar_text()%}"
-end
-
-local function extract_prompt_text(line)
-  line = line or ""
-  local modern = line:match("^%[[^%]]+%]%$%s*(.*)$")
-  if modern then
-    return modern
-  end
-  return vim.trim(line)
-end
-
-local function current_input_text()
-  local panel = state.panels.selection
-  local bufnr = panel and panel.bufnr
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    return ""
-  end
-  local plnum = (panel.input_start or line_count(bufnr)) + INPUT_PROMPT_LINE - 1
-  local total = line_count(bufnr)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, plnum - 1, total, false)
-  if not lines or #lines == 0 then
-    return ""
-  end
-  lines[1] = extract_prompt_text(lines[1])
-  return table.concat(lines, "\n")
-end
-
-local function prompt_has_submit_text(panel)
-  if not panel or not panel.input_bufnr or not vim.api.nvim_buf_is_valid(panel.input_bufnr) then
-    return false
-  end
-  if not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
-    return false
-  end
-  local lnum = panel.input_start or 1
-  local ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
-  if not ok or cursor[1] < lnum then
-    return false
-  end
-  local all_lines = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, -1, false)
-  if #all_lines == 0 then
-    return false
-  end
-  all_lines[1] = extract_prompt_text(all_lines[1])
-  return vim.trim(table.concat(all_lines, "\n")) ~= ""
-end
-
-local function decorate_scrollback(bufnr)
-  render.scrollback(bufnr, scroll_ns)
-end
-
-local function decorate_input(bufnr)
-  local panel = state.panels.selection
-  if not panel or not panel.input_start then
-    return
-  end
-  local busy_status = nil
-  local session = active_session()
-  if session and session.busy then
-    local provider_name = session.provider or "agent"
-    local detail = progress.compact(session.progress or "")
-    detail = detail:gsub("^" .. vim.pesc(provider_name) .. "%s*", "")
-    if detail == "" then
-      detail = "working"
+  normalize_item = function(item)
+    if type(item.selection) == "table" then
+      item.selection.bufnr = nil
     end
-    busy_status = render.spinner_text() .. "  " .. detail
-  end
-  render.input(bufnr, input_ns, prompt_prefix(), panel.input_start, { busy_status = busy_status })
-end
+    if type(item.last_ask) == "table" and type(item.last_ask.selection) == "table" then
+      item.last_ask.selection.bufnr = nil
+    end
+    item.provider_sessions = type(item.provider_sessions) == "table" and item.provider_sessions or {}
+    item.lines = type(item.lines) == "table" and item.lines or nil
+    item.pending_input = nil
+  end,
 
-local function refresh_header(bufnr)
-  decorate_scrollback(bufnr)
-end
+  on_set_busy = function(value)
+    state.selection.busy = value
+  end,
 
-local function save_window_view(winid)
-  if not winid or not vim.api.nvim_win_is_valid(winid) then
-    return nil
-  end
-  local ok, view = pcall(vim.api.nvim_win_call, winid, vim.fn.winsaveview)
-  return ok and view or nil
-end
-
-local function restore_window_view(winid, view)
-  if not view or not winid or not vim.api.nvim_win_is_valid(winid) then
-    return
-  end
-  pcall(vim.api.nvim_win_call, winid, function()
-    vim.fn.winrestview(view)
-  end)
-end
-
-local function view_is_at_bottom(panel)
-  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
-    return false
-  end
-  local view = save_window_view(panel.winid)
-  if not view then
-    return false
-  end
-  local height = vim.api.nvim_win_get_height(panel.winid)
-  return (view.topline or 1) + height >= line_count(panel.bufnr)
-end
-
-local function cursor_is_on_prompt(panel)
-  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
-    return false
-  end
-  local ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
-  if not ok then
-    return false
-  end
-  return cursor[1] >= (panel.input_start or line_count(panel.bufnr))
-end
-
-local function should_auto_scroll(panel)
-  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
-    return false
-  end
-  if panel.input_active == true then
-    return true
-  end
-  return view_is_at_bottom(panel) and cursor_is_on_prompt(panel)
-end
-
-local function reset_input(text, opts)
-  opts = opts or {}
-  local panel = state.panels.selection
-  local bufnr = panel and panel.bufnr
-  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
-    return
-  end
-  local follow = opts.force_follow == true or should_auto_scroll(panel)
-  local view = follow and nil or save_window_view(panel.winid)
-  with_writable(bufnr, function()
-    local start = panel.input_start
-    local count = line_count(bufnr)
-    if not start or start < 1 or start > count then
-      local existing = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-      local fresh = count == 1 and existing[1] == ""
-      if fresh then
-        -- M.append assumes there are at least 2 blank lines above the prompt;
-        -- seed the fresh buffer with that headroom so streaming appends merge cleanly.
-        local text_lines = vim.split(text or "", "\n", { plain = true })
-        local seed = { "", "", prompt_prefix() .. (text_lines[1] or "") }
-        for i = 2, #text_lines do
-          seed[#seed + 1] = text_lines[i]
-        end
-        vim.api.nvim_buf_set_lines(bufnr, 0, count, false, seed)
-        panel.input_start = 3
-        return
+  decorate_input = function(bufnr, c)
+    local p = c.panel()
+    if not p or not p.input_start then
+      return
+    end
+    local busy_status = nil
+    local session = c.active_session()
+    if session and session.busy then
+      local provider_name = session.provider or "agent"
+      local detail = c.progress.compact(session.progress or "")
+      detail = detail:gsub("^" .. vim.pesc(provider_name) .. "%s*", "")
+      if detail == "" then
+        detail = "working"
       end
-      start = count + 1
+      busy_status = c.render.spinner_text() .. "  " .. detail
     end
-    local text_lines = vim.split(text or "", "\n", { plain = true })
-    local new_lines = { prompt_prefix() .. (text_lines[1] or "") }
-    for i = 2, #text_lines do
-      new_lines[#new_lines + 1] = text_lines[i]
-    end
-    vim.api.nvim_buf_set_lines(bufnr, start - 1, count, false, new_lines)
-    panel.input_start = start
-  end, decorate_input)
-  if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
-    if follow then
-      local prompt_lnum = panel.input_start
-      pcall(vim.api.nvim_win_set_cursor, panel.winid, { prompt_lnum, #prompt_prefix() })
-      pcall(vim.api.nvim_win_call, panel.winid, function()
-        vim.fn.winrestview({ topline = math.max(1, prompt_lnum - vim.api.nvim_win_get_height(panel.winid) + 2) })
-      end)
+    c.render.input(bufnr, c.input_ns, c.prompt_prefix(), p.input_start, { busy_status = busy_status })
+  end,
+
+  resolve_session = function(opts, c)
+    local session = nil
+    if opts.session_id then
+      session = c.get_session(opts.session_id)
+    elseif opts.selection then
+      session = session_for_selection(opts.selection, { new_session = opts.new_session == true })
     else
-      restore_window_view(panel.winid, view)
+      session = c.active_session()
     end
-  end
-end
 
-local function scroll_to_bottom()
-  local panel = state.panels.selection
-  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
-    return
-  end
-  local target = math.max(1, (panel.input_start or line_count(panel.bufnr)))
-  local col = 0
-  if panel.input_active then
-    local ok, cursor = pcall(vim.api.nvim_win_get_cursor, panel.winid)
-    if ok then
-      col = cursor[2]
+    if not session then
+      vim.notify("No nvime selection discussion is open", vim.log.levels.INFO)
+      return nil
     end
-  end
-  vim.api.nvim_win_set_cursor(panel.winid, { target, col })
-end
 
-local function open_or_configure_window(bufnr, winid, config, configure, enter)
-  if winid and vim.api.nvim_win_is_valid(winid) then
-    vim.api.nvim_win_set_buf(winid, bufnr)
-    vim.api.nvim_win_set_config(winid, config)
-    configure(winid)
-    if enter then
-      vim.api.nvim_set_current_win(winid)
+    session.provider_sessions = session.provider_sessions or {}
+    session.provider = opts.provider or session.provider or (state.config and state.config.provider) or "claude"
+    session.mode = opts.mode or session.mode or "selection"
+    if opts.selection then
+      session.selection = M.snapshot(opts.selection)
+      session.key = selection_key(opts.selection)
     end
-    return winid
-  end
-  local next_winid = vim.api.nvim_open_win(bufnr, enter == true, config)
-  configure(next_winid)
-  return next_winid
-end
+    c.touch_session(session)
 
-local function close_panel()
-  local panel = state.panels.selection
-  if not panel then
-    return
-  end
-  local seen = {}
-  for _, key in ipairs({ "input_winid", "winid" }) do
-    local winid = panel[key]
-    if winid and not seen[winid] and vim.api.nvim_win_is_valid(winid) then
-      seen[winid] = true
-      pcall(vim.api.nvim_win_close, winid, true)
-    end
-  end
-end
-
-local function panel_is_open(session_id)
-  local panel = state.panels.selection
-  return panel
-    and panel.winid
-    and vim.api.nvim_win_is_valid(panel.winid)
-    and (not session_id or panel.session_id == session_id)
-end
-
-local function completion_behavior()
-  local ui = (state.config or {}).ui or {}
-  if ui.completion == "open" or ui.completion == "popup" then
-    return "open"
-  end
-  return "notify"
-end
-
-local function notify_finished(lane, session_id, code)
-  if panel_is_open(session_id) then
-    return
-  end
-  local session = session_id and M.get_session(session_id) or active_session()
-  if session then
+    state.selection.active_session_id = session.id
     state.last_session = { kind = "selection", id = session.id }
-  end
-  if completion_behavior() == "open" then
-    M.open_session(session_id)
-    return
-  end
-  local level = code == 0 and vim.log.levels.INFO or vim.log.levels.WARN
-  local status = code == 0 and "finished" or ("failed with code " .. tostring(code))
-  vim.notify(
-    "nvime " .. tostring(lane or "selection") .. " " .. status .. ". Reopen with :NvimeLast or <leader>nn.",
-    level
-  )
-end
+    state.selection.mode = session.mode
+    state.selection.provider = session.provider
+    state.selection.active_selection = session.selection
+    state.selection.pending_input = session.pending_input
+    return session
+  end,
 
-function M.close()
-  close_panel()
-end
+  cancel_message = function(session)
+    return "\n[nvime] " .. (session.mode or "selection") .. " cancelled.\n"
+  end,
 
-local function in_input_window(panel)
-  return panel
-    and panel.input_active == true
-    and panel.winid
-    and vim.api.nvim_win_is_valid(panel.winid)
-    and vim.api.nvim_get_current_win() == panel.winid
-end
+  cancel_audit_extra = function(session)
+    return { mode = session.mode }
+  end,
 
-local function focus_scrollback()
-  local panel = state.panels.selection
-  if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
-    panel.input_active = false
-    set_locked(panel.bufnr, true)
-    vim.api.nvim_set_current_win(panel.winid)
-  end
-end
+  finished_label = function(_, lane)
+    return lane or "selection"
+  end,
 
-local function prompt_lnum(panel)
-  return panel.input_start or 1
-end
+  winbar_lane = function(session)
+    return (session and session.mode) or mode()
+  end,
 
-local function attach_focus_lock(bufnr)
-  pcall(vim.api.nvim_clear_autocmds, { group = focus_group, buffer = bufnr })
-  vim.api.nvim_create_autocmd("WinEnter", {
-    group = focus_group,
-    buffer = bufnr,
-    callback = function()
-      local panel = state.panels.selection
-      if not panel or panel.bufnr ~= bufnr then
-        return
-      end
-      panel.input_active = false
-      set_locked(bufnr, true)
-    end,
-  })
-end
+  winbar_provider = function(session, provider_name)
+    local model_name = (session and session.model) or (state.selection and state.selection.model)
+    return model_name and (provider_name .. "/" .. model_name) or provider_name
+  end,
 
-local function attach_input_guard(bufnr)
-  buffer_guard.attach({
-    bufnr = bufnr,
-    key = "nvime_selection_guard_attached",
-    panel = function()
-      return state.panels.selection
-    end,
-    prompt_lnum = prompt_lnum,
-    prompt_prefix = prompt_prefix,
-    in_input_window = in_input_window,
-    set_locked = set_locked,
-    decorate = function(target)
-      decorate_scrollback(target)
-      decorate_input(target)
-    end,
-  })
-end
+  on_delete_active = function()
+    state.selection.pending_input = nil
+  end,
 
-local function attach_panel(bufnr)
-  local opts = { buffer = bufnr, silent = true }
-  vim.keymap.set("n", "<CR>", function()
-    if in_input_window(state.panels.selection) or prompt_has_submit_text(state.panels.selection) then
-      require("nvime.selection").submit_current()
-    else
-      require("nvime.selection").focus_input()
-    end
-  end, opts)
-  vim.keymap.set("n", "i", function()
-    require("nvime.selection").focus_input({ preserve_cursor = true })
-  end, opts)
-  vim.keymap.set("n", "I", function()
-    require("nvime.selection").focus_input()
-  end, opts)
-  vim.keymap.set("n", "a", function()
-    require("nvime.selection").focus_input({ preserve_cursor = true, after = true })
-  end, opts)
-  vim.keymap.set("n", "A", function()
-    require("nvime.selection").focus_input({ cursor = "eol", preserve_cursor = true })
-  end, opts)
-  vim.keymap.set("n", "o", function()
-    require("nvime.selection").focus_input({ cursor = "end" })
-  end, opts)
-  vim.keymap.set("n", "O", function()
-    require("nvime.selection").focus_input({ cursor = "end" })
-  end, opts)
-  vim.keymap.set("n", "p", function()
-    provider_api.cycle({ scope = "selection" })
-  end, opts)
-  vim.keymap.set("n", "<Tab>", function()
-    provider_api.cycle({ scope = "selection" })
-  end, opts)
-  vim.keymap.set("n", "P", function()
-    provider_api.choose({ scope = "selection" })
-  end, opts)
-  vim.keymap.set("n", "m", function()
-    provider_api.cycle_model({ scope = "selection" })
-  end, opts)
-  vim.keymap.set("n", "M", function()
-    provider_api.choose_model({ scope = "selection" })
-  end, opts)
-  vim.keymap.set("n", "?", function()
-    require("nvime.selection").choose_prompt()
-  end, opts)
-  vim.keymap.set("n", "<C-c>", function()
-    require("nvime.selection").cancel_active()
-  end, opts)
-  vim.keymap.set("i", "<CR>", function()
-    vim.cmd.stopinsert()
-  end, opts)
-  vim.keymap.set("i", "<C-c>", function()
-    vim.cmd.stopinsert()
-    require("nvime.selection").cancel_active()
-  end, opts)
-  local function insert_newline()
-    local panel = state.panels.selection
-    if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
-      return
-    end
-    local winid = panel.winid
-    if not winid or not vim.api.nvim_win_is_valid(winid) then
-      return
-    end
-    local row, col = unpack(vim.api.nvim_win_get_cursor(winid))
-    if row < (panel.input_start or 1) then
-      return
-    end
-    buffer_guard.suspend(panel.bufnr, function()
-      vim.api.nvim_buf_set_text(panel.bufnr, row - 1, col, row - 1, col, { "", "" })
-    end)
-    buffer_guard.sync(panel.bufnr, panel)
-    pcall(vim.api.nvim_win_set_cursor, winid, { row + 1, 0 })
-    decorate_input(panel.bufnr)
-  end
-  vim.keymap.set("i", "<C-j>", insert_newline, opts)
-  vim.keymap.set("i", "<S-CR>", insert_newline, opts)
-  vim.keymap.set("i", "<C-CR>", insert_newline, opts)
-  vim.keymap.set("i", "<C-U>", function()
-    local panel = state.panels.selection
-    if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
-      return
-    end
-    local lnum = prompt_lnum(panel)
-    local prefix = prompt_prefix()
-    buffer_guard.suspend(panel.bufnr, function()
-      vim.api.nvim_buf_set_lines(panel.bufnr, lnum - 1, -1, false, { prefix })
-    end)
-    buffer_guard.sync(panel.bufnr, panel)
-    if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
-      pcall(vim.api.nvim_win_set_cursor, panel.winid, { lnum, #prefix })
-    end
-  end, opts)
-  vim.keymap.set("n", "<Esc>", function()
-    focus_scrollback()
-  end, opts)
-  vim.keymap.set("n", "q", close_panel, opts)
-end
+  reset_extra_state = function(store)
+    store.pending_input = nil
+  end,
+}
 
-function M.open(opts)
-  opts = opts or {}
-  ui.ensure_highlights()
-  delete_named_buffer("nvime://selection-input")
-  sync_active_panel_to_session()
+P = panel.create(policy)
+ctx = P.ctx
 
-  local session = nil
-  if opts.session_id then
-    session = M.get_session(opts.session_id)
-  elseif opts.selection then
-    session = session_for_selection(opts.selection, { new_session = opts.new_session == true })
-  else
-    session = active_session()
-  end
+-- ---------------------------------------------------------------------------
+-- shared surface
+-- ---------------------------------------------------------------------------
+M.open = P.open
+M.refresh = P.refresh
+M.close = P.close
+M.set_busy = P.set_busy
+M.set_progress = P.set_progress
+M.append = P.append
+M.cancel_session = P.cancel_session
+M.cancel_active = P.cancel_active
+M.cancel_all = P.cancel_all
+M.attach_process = P.attach_process
+M.clear_process = P.clear_process
+M.sessions = P.sessions
+M.session_count = P.session_count
+M.save_sessions = P.save_sessions
+M.flush_sessions = P.flush_sessions
+M.reload_sessions = P.reload_sessions
+M.sessions_path = P.sessions_path
+M.is_open = P.is_open
+M.active_session_id = P.active_session_id
+M.get_session = P.get_session
+M.rename_session = P.rename_session
+M.delete_sessions = P.delete_sessions
+M.winbar_text = P.winbar_text
 
-  if not session then
-    vim.notify("No nvime selection discussion is open", vim.log.levels.INFO)
-    return nil
-  end
-
-  session.provider_sessions = session.provider_sessions or {}
-  session.provider = opts.provider or session.provider or (state.config and state.config.provider) or "claude"
-  session.mode = opts.mode or session.mode or "selection"
-  if opts.selection then
-    session.selection = M.snapshot(opts.selection)
-    session.key = selection_key(opts.selection)
-  end
-  touch_session(session)
-
-  state.selection.active_session_id = session.id
-  state.last_session = { kind = "selection", id = session.id }
-  state.selection.mode = session.mode
-  state.selection.provider = session.provider
-  state.selection.active_selection = session.selection
-  state.selection.pending_input = session.pending_input
-
-  local panel = state.panels.selection or {}
-  local was_open = panel.winid and vim.api.nvim_win_is_valid(panel.winid)
-  if panel.input_winid and panel.input_winid ~= panel.winid and vim.api.nvim_win_is_valid(panel.input_winid) then
-    pcall(vim.api.nvim_win_close, panel.input_winid, true)
-  end
-  local scroll_buf = ensure_session_buffer(session)
-
-  local scroll_win =
-    open_or_configure_window(scroll_buf, panel.winid, scroll_config(), configure_scrollback_window, true)
-
-  state.panels.selection = {
-    bufnr = scroll_buf,
-    winid = scroll_win,
-    input_bufnr = scroll_buf,
-    input_winid = scroll_win,
-    input_start = session.input_start,
-    input_active = session.input_active == true,
-    session_id = session.id,
-  }
-
-  attach_panel(scroll_buf)
-  attach_focus_lock(scroll_buf)
-  attach_input_guard(scroll_buf)
-  refresh_header(scroll_buf)
-  reset_input(current_input_text(), { force_follow = not was_open })
-  if not state.panels.selection.input_active then
-    set_locked(scroll_buf, true)
-  end
-
-  if opts.focus_input then
-    M.focus_input()
-  end
-
-  return scroll_buf
-end
-
-function M.refresh()
-  local panel = state.panels.selection
-  if not panel then
-    return
-  end
-  if panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
-    vim.api.nvim_win_set_config(panel.winid, scroll_config())
-    configure_scrollback_window(panel.winid)
-  end
-  refresh_header(panel.bufnr)
-  reset_input(current_input_text())
-  if not panel.input_active then
-    set_locked(panel.bufnr, true)
-  end
-  sync_active_panel_to_session()
-end
-
-local spinner_timer = nil
-
-local function stop_spinner_timer()
-  if spinner_timer then
-    spinner_timer:stop()
-    spinner_timer:close()
-    spinner_timer = nil
-  end
-end
-
-local function refresh_input_indicator()
-  local panel = state.panels.selection
-  if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
-    return
-  end
-  decorate_input(panel.bufnr)
-end
-
-local function ensure_spinner_timer()
-  if spinner_timer then
-    return
-  end
-  local uv = vim.uv or vim.loop
-  if not uv or not uv.new_timer then
-    return
-  end
-  spinner_timer = uv.new_timer()
-  spinner_timer:start(120, 120, function()
-    vim.schedule(function()
-      local session = active_session()
-      local panel = state.panels.selection
-      local open = panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid)
-      if not session or not session.busy or not open then
-        stop_spinner_timer()
-        refresh_input_indicator()
-        return
-      end
-      refresh_input_indicator()
-    end)
-  end)
-end
-
-function M.set_busy(value, session_id)
-  local session = session_id and M.get_session(session_id) or active_session()
-  if session then
-    session.busy = value == true
-    if not session.busy then
-      session.progress = nil
-    else
-      ensure_spinner_timer()
-    end
-    touch_session(session)
-  end
-  state.selection.busy = value == true
-  if not session_id or (state.selection and state.selection.active_session_id == session_id) then
-    refresh_input_indicator()
-  end
-  spinner.update()
-end
-
-function M.set_progress(text, session_id)
-  if vim.in_fast_event and vim.in_fast_event() then
-    vim.schedule(function()
-      M.set_progress(text, session_id)
-    end)
-    return
-  end
-  local compact = progress.compact(text)
-  if compact == "" then
-    return
-  end
-  local session = session_id and M.get_session(session_id) or active_session()
-  if not session then
-    return
-  end
-  session.progress = compact
-  touch_session(session)
-  if state.selection and state.selection.active_session_id == session.id then
-    refresh_input_indicator()
-  end
-  spinner.update()
-end
-
-local function clear_session_process(session, handle)
-  if not session then
-    return
-  end
-  if not handle or session.process == handle then
-    session.process = nil
-    state.running["selection:" .. tostring(session.id)] = nil
-  end
-end
-
-local function remember_session_process(session, handle, meta)
-  if not session or not handle then
-    return
-  end
-  session.process = handle
-  state.running["selection:" .. tostring(session.id)] = vim.tbl_extend("force", {
-    kind = "selection",
-    id = session.id,
-    handle = handle,
-  }, meta or {})
-end
-
-local function kill_process(handle)
-  if not handle or type(handle.kill) ~= "function" then
-    return false
-  end
-  local ok = pcall(handle.kill, handle, "sigterm")
-  if not ok then
-    ok = pcall(handle.kill, handle, 15)
-  end
-  return ok
-end
-
-function M.attach_process(session_id, handle, meta)
-  local session = session_id and M.get_session(session_id) or active_session()
-  remember_session_process(session, handle, meta)
-end
-
-function M.clear_process(session_id, handle)
-  local session = session_id and M.get_session(session_id) or active_session()
-  clear_session_process(session, handle)
-end
-
-function M.cancel_session(session_id)
-  local session = session_id and M.get_session(session_id) or active_session()
-  if not session or not session.busy then
-    return false
-  end
-  session.cancelled = true
-  local handle = session.process
-  if handle then
-    session.cancelled_handles = session.cancelled_handles or {}
-    session.cancelled_handles[handle] = true
-  end
-  clear_session_process(session, handle)
-  kill_process(handle)
-  session.busy = false
-  session.progress = nil
-  touch_session(session)
-  audit.write({
-    event = "agent_cancelled",
-    kind = "selection",
-    session_id = session.id,
-    mode = session.mode,
-  })
-  M.append("\n[nvime] " .. (session.mode or "selection") .. " cancelled.\n", session.id)
-  if state.selection.active_session_id == session.id then
-    refresh_input_indicator()
-  end
-  spinner.update()
-  return true
-end
-
-function M.cancel_active()
-  return M.cancel_session(state.selection and state.selection.active_session_id)
-end
-
-function M.cancel_all()
-  local count = 0
-  for _, session in ipairs(ensure_sessions()) do
-    if M.cancel_session(session.id) then
-      count = count + 1
-    end
-  end
-  return count
-end
-
-function M.append(text, session_id)
-  if not text or text == "" then
-    return
-  end
-  local session = session_id and M.get_session(session_id) or active_session()
-  if not session then
-    return
-  end
-
-  vim.schedule(function()
-    local bufnr = ensure_session_buffer(session)
-    local panel = panel_for_session(session)
-    if not bufnr then
-      return
-    end
-    if not vim.api.nvim_buf_is_valid(bufnr) then
-      return
-    end
-    local follow = should_auto_scroll(panel)
-    local view = follow and nil or save_window_view(panel.winid)
-    with_writable(bufnr, function()
-      local parts = vim.split(text, "\n", { plain = true })
-      local input_start = panel.input_start or session.input_start or (line_count(bufnr) + 1)
-      local target = math.max(0, input_start - 2)
-      local current = vim.api.nvim_buf_get_lines(bufnr, target, target + 1, false)[1] or ""
-      vim.api.nvim_buf_set_lines(bufnr, target, target + 1, false, { current .. parts[1] })
-      if #parts > 1 then
-        local rest = {}
-        for i = 2, #parts do
-          rest[#rest + 1] = parts[i]
-        end
-        vim.api.nvim_buf_set_lines(bufnr, target + 1, target + 1, false, rest)
-        panel.input_start = input_start + #rest
-        session.input_start = panel.input_start
-      end
-      touch_session(session)
-    end, decorate_scrollback, panel)
-    if not panel.input_active then
-      set_locked(bufnr, true)
-    end
-    local active_panel = state.panels.selection
-    if
-      state.selection
-      and state.selection.active_session_id == session.id
-      and active_panel
-      and active_panel.session_id == session.id
-    then
-      active_panel.input_start = session.input_start
-      if follow then
-        scroll_to_bottom()
-      else
-        restore_window_view(panel.winid, view)
-      end
-    end
-  end)
-end
-
+-- ---------------------------------------------------------------------------
+-- selection-specific surface
+-- ---------------------------------------------------------------------------
 function M.append_user(provider_name, lane, text, session_id)
   M.append("\n\n[" .. provider_name .. " " .. lane .. "]$ " .. text .. "\n\n", session_id)
 end
@@ -1256,20 +288,45 @@ function M.append_response_header(provider_name, lane, session_id)
   M.append("[" .. provider_name .. " " .. lane .. " response]\n\n", session_id)
 end
 
+function M.notify_finished(lane, session_id, code)
+  local session = session_id and ctx.get_session(session_id) or ctx.active_session()
+  ctx.notify_finished(session, code or 0, lane)
+end
+
+function M.matching_sessions(selection)
+  local key = selection_key(selection)
+  local matches = {}
+  if not key then
+    return matches
+  end
+  for _, session in ipairs(ctx.ensure_sessions()) do
+    if session.key == key then
+      matches[#matches + 1] = session
+    end
+  end
+  table.sort(matches, function(left, right)
+    if (left.updated_at or 0) == (right.updated_at or 0) then
+      return (left.id or 0) > (right.id or 0)
+    end
+    return (left.updated_at or 0) > (right.updated_at or 0)
+  end)
+  return matches
+end
+
 function M.prompt(opts)
   opts = opts or {}
-  local session = opts.session_id and M.get_session(opts.session_id) or nil
+  local session = opts.session_id and ctx.get_session(opts.session_id) or nil
   if not session and opts.selection then
     session = session_for_selection(opts.selection, { new_session = opts.new_session == true })
   end
   if not session then
-    session = active_session()
+    session = ctx.active_session()
   end
   if not session then
     vim.notify("No nvime selection discussion is open", vim.log.levels.INFO)
     return
   end
-  local next_provider = opts.provider or session.provider or provider()
+  local next_provider = opts.provider or session.provider or ctx.provider()
   local next_mode = opts.mode or session.mode or mode()
   local focus_input = opts.focus_input == true
   local open_panel = opts.open ~= false
@@ -1286,7 +343,7 @@ function M.prompt(opts)
     session.selection = M.snapshot(opts.selection)
     session.key = selection_key(opts.selection)
   end
-  touch_session(session)
+  ctx.touch_session(session)
 
   if not open_panel then
     return
@@ -1303,19 +360,19 @@ function M.prompt(opts)
     session_id = session.id,
     focus_input = focus_input,
   })
-  reset_input("")
+  ctx.reset_input("")
 end
 
 function M.insert_prompt(text)
   text = vim.trim(text or "")
   M.open()
-  reset_input(text, { force_follow = true })
+  ctx.reset_input(text, { force_follow = true })
 end
 
 function M.choose_prompt()
   prompts.choose("selection", function(text, lane)
     if lane and lane ~= "" then
-      local session = active_session()
+      local session = ctx.active_session()
       if session then
         session.pending_lane = lane
       end
@@ -1329,38 +386,38 @@ function M.focus_input(opts)
   opts = opts or {}
   local saved_cursor
   if opts.preserve_cursor then
-    local panel = state.panels.selection
-    if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
-      local ok, cur = pcall(vim.api.nvim_win_get_cursor, panel.winid)
+    local p = ctx.panel()
+    if p and p.winid and vim.api.nvim_win_is_valid(p.winid) then
+      local ok, cur = pcall(vim.api.nvim_win_get_cursor, p.winid)
       if ok then
         saved_cursor = cur
       end
     end
   end
   M.open()
-  local panel = state.panels.selection
-  if not panel or not panel.winid or not vim.api.nvim_win_is_valid(panel.winid) then
+  local p = ctx.panel()
+  if not p or not p.winid or not vim.api.nvim_win_is_valid(p.winid) then
     return
   end
-  panel.input_active = true
-  set_locked(panel.input_bufnr, false)
-  vim.api.nvim_set_current_win(panel.winid)
-  local lnum = prompt_lnum(panel)
-  local prefix_col = #prompt_prefix()
-  local end_col = prompt_end_col(panel)
+  p.input_active = true
+  ctx.set_locked(p.input_bufnr, false)
+  vim.api.nvim_set_current_win(p.winid)
+  local lnum = ctx.prompt_lnum(p)
+  local prefix_col = #ctx.prompt_prefix()
+  local end_col = ctx.prompt_end_col(p)
   if saved_cursor then
     if saved_cursor[1] >= lnum and (saved_cursor[1] > lnum or saved_cursor[2] >= prefix_col) then
       if opts.cursor == "eol" then
-        local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, saved_cursor[1] - 1, saved_cursor[1], false)[1] or ""
-        pcall(vim.api.nvim_win_set_cursor, panel.winid, { saved_cursor[1], #line })
+        local line = vim.api.nvim_buf_get_lines(p.input_bufnr, saved_cursor[1] - 1, saved_cursor[1], false)[1] or ""
+        pcall(vim.api.nvim_win_set_cursor, p.winid, { saved_cursor[1], #line })
         pcall(vim.cmd, "startinsert!")
       elseif opts.after then
-        local line = vim.api.nvim_buf_get_lines(panel.input_bufnr, saved_cursor[1] - 1, saved_cursor[1], false)[1] or ""
+        local line = vim.api.nvim_buf_get_lines(p.input_bufnr, saved_cursor[1] - 1, saved_cursor[1], false)[1] or ""
         local col = math.min(saved_cursor[2] + 1, #line)
-        pcall(vim.api.nvim_win_set_cursor, panel.winid, { saved_cursor[1], col })
+        pcall(vim.api.nvim_win_set_cursor, p.winid, { saved_cursor[1], col })
         pcall(vim.cmd, col >= #line and "startinsert!" or "startinsert")
       else
-        pcall(vim.api.nvim_win_set_cursor, panel.winid, saved_cursor)
+        pcall(vim.api.nvim_win_set_cursor, p.winid, saved_cursor)
         pcall(vim.cmd, "startinsert")
       end
       return
@@ -1369,30 +426,30 @@ function M.focus_input(opts)
   local append = opts.cursor == "end" or opts.cursor == "eol"
   local empty_prompt = end_col <= prefix_col
   local col = (append or empty_prompt) and math.max(0, end_col - 1) or prefix_col
-  pcall(vim.api.nvim_win_set_cursor, panel.winid, { lnum, col })
-  pcall(vim.api.nvim_win_call, panel.winid, function()
-    vim.fn.winrestview({ topline = math.max(1, lnum - vim.api.nvim_win_get_height(panel.winid) + 2) })
+  pcall(vim.api.nvim_win_set_cursor, p.winid, { lnum, col })
+  pcall(vim.api.nvim_win_call, p.winid, function()
+    vim.fn.winrestview({ topline = math.max(1, lnum - vim.api.nvim_win_get_height(p.winid) + 2) })
   end)
   pcall(vim.cmd, (append or empty_prompt) and "startinsert!" or "startinsert")
 end
 
 function M.submit_current()
-  local session = active_session()
+  local session = ctx.active_session()
   local pending = (session and session.pending_input) or state.selection.pending_input
   if not pending or type(pending.on_submit) ~= "function" then
     M.focus_input()
     return
   end
 
-  local panel = state.panels.selection
-  local lnum = prompt_lnum(panel)
-  local total = line_count(panel.input_bufnr)
-  local lines = vim.api.nvim_buf_get_lines(panel.input_bufnr, lnum - 1, total, false)
+  local p = ctx.panel()
+  local lnum = ctx.prompt_lnum(p)
+  local total = ctx.line_count(p.input_bufnr)
+  local lines = vim.api.nvim_buf_get_lines(p.input_bufnr, lnum - 1, total, false)
   if lines and #lines > 0 then
-    lines[1] = extract_prompt_text(lines[1])
+    lines[1] = ctx.extract_prompt_text(lines[1])
   end
   local text = vim.trim(table.concat(lines or {}, "\n"))
-  reset_input("")
+  ctx.reset_input("")
   if text == "" then
     M.focus_input()
     return
@@ -1403,233 +460,16 @@ function M.submit_current()
   if session then
     session.pending_input = nil
     session.pending_lane = nil
-    touch_session(session)
+    ctx.touch_session(session)
   end
   state.selection.pending_input = nil
   state.selection.pending_lane = nil
   on_submit(text, selected_provider, lane)
 end
 
-function M.same_range(left, right)
-  if not left or not right then
-    return false
-  end
-  return left.path == right.path
-    and tonumber(left.line1) == tonumber(right.line1)
-    and tonumber(left.line2) == tonumber(right.line2)
-end
-
-local function same_file(left, right)
-  return left and right and left.path ~= nil and left.path == right.path
-end
-
-function M.snapshot(selection)
-  return {
-    bufnr = selection.bufnr,
-    path = selection.path,
-    line1 = selection.line1,
-    line2 = selection.line2,
-    source = selection.source,
-  }
-end
-
-function M.get_session(id)
-  if not id then
-    return nil
-  end
-  for _, session in ipairs(ensure_sessions()) do
-    if session.id == id then
-      return session
-    end
-  end
-  return nil
-end
-
-function M.matching_sessions(selection)
-  local key = selection_key(selection)
-  local matches = {}
-  if not key then
-    return matches
-  end
-  for _, session in ipairs(ensure_sessions()) do
-    if session.key == key then
-      matches[#matches + 1] = session
-    end
-  end
-  table.sort(matches, function(left, right)
-    if (left.updated_at or 0) == (right.updated_at or 0) then
-      return (left.id or 0) > (right.id or 0)
-    end
-    return (left.updated_at or 0) > (right.updated_at or 0)
-  end)
-  return matches
-end
-
-function M.active_session_id()
-  return state.selection and state.selection.active_session_id
-end
-
-function M.is_open(session_id)
-  return panel_is_open(session_id)
-end
-
-function M.notify_finished(lane, session_id, code)
-  notify_finished(lane, session_id, code or 0)
-end
-
-function M.winbar_text()
-  ui.ensure_highlights()
-  local session = active_session()
-  local provider_name = (session and session.provider) or provider()
-  local lane = (session and session.mode) or mode()
-  local provider_hl = provider_name == "claude" and "NvimeProviderClaude" or "NvimeProviderCodex"
-  local busy = session and session.busy
-  local status_hl = busy and "NvimeStatusRunning" or "NvimeStatusIdle"
-  local status_text = busy and (render.spinner_text() .. " running") or (ui.icon("idle") .. " idle")
-
-  local model_name = (session and session.model) or (state.selection and state.selection.model)
-  local provider_display = model_name and (provider_name .. "/" .. model_name) or provider_name
-
-  local nvime_label = " nvime.nvim "
-  local version_label = " " .. version.label() .. " "
-  local sep = "  "
-  local visible = nvime_label .. sep .. version_label .. sep .. provider_display .. sep .. lane .. sep .. status_text
-  local visible_width = vim.fn.strdisplaywidth(visible)
-
-  local panel = state.panels.selection
-  local win_width = vim.o.columns
-  if panel and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
-    win_width = vim.api.nvim_win_get_width(panel.winid)
-  end
-  local pad = math.max(0, math.floor((win_width - visible_width) / 2))
-
-  return string.rep(" ", pad)
-    .. "%#NvimeHeaderBlock#"
-    .. nvime_label
-    .. "%*"
-    .. sep
-    .. "%#NvimeHeaderBlockSecondary#"
-    .. version_label
-    .. "%*"
-    .. sep
-    .. "%#"
-    .. provider_hl
-    .. "#"
-    .. provider_display
-    .. "%*"
-    .. sep
-    .. "%#NvimeMuted#"
-    .. lane
-    .. "%*"
-    .. sep
-    .. "%#"
-    .. status_hl
-    .. "#"
-    .. status_text
-    .. "%*"
-end
-
-function M.sessions()
-  local items = {}
-  for _, session in ipairs(ensure_sessions()) do
-    items[#items + 1] = public_session(session)
-  end
-  table.sort(items, function(left, right)
-    if (left.updated_at or 0) == (right.updated_at or 0) then
-      return (left.id or 0) > (right.id or 0)
-    end
-    return (left.updated_at or 0) > (right.updated_at or 0)
-  end)
-  return items
-end
-
-function M.session_count()
-  return #ensure_sessions()
-end
-
-function M.save_sessions()
-  M.flush_sessions()
-end
-
-function M.flush_sessions()
-  save_pending = false
-  save_sessions_now()
-end
-
-function M.reload_sessions()
-  sessions_loaded = false
-  state.selection.sessions = {}
-  state.selection.next_session_id = 1
-  state.selection.active_session_id = nil
-  state.selection.pending_input = nil
-  load_sessions()
-  return state.selection.sessions
-end
-
-function M.sessions_path()
-  return sessions_path()
-end
-
-function M.rename_session(id, title)
-  local session = M.get_session(id)
-  if not session then
-    return false
-  end
-  title = vim.trim(title or "")
-  if title == "" then
-    return false
-  end
-  session.title = title
-  touch_session(session)
-  save_sessions_now()
-  return true
-end
-
-function M.delete_sessions(ids)
-  if not ids or #ids == 0 then
-    return 0
-  end
-  local remove = {}
-  for _, id in ipairs(ids) do
-    remove[tonumber(id)] = true
-  end
-
-  local kept = {}
-  local deleted = 0
-  for _, session in ipairs(ensure_sessions()) do
-    if remove[tonumber(session.id)] then
-      deleted = deleted + 1
-      if session.bufnr and vim.api.nvim_buf_is_valid(session.bufnr) then
-        pcall(vim.api.nvim_buf_delete, session.bufnr, { force = true })
-      else
-        delete_named_buffer(session_buffer_name(session))
-      end
-      if state.selection.active_session_id == session.id then
-        state.selection.active_session_id = nil
-        state.selection.pending_input = nil
-        local panel = state.panels.selection
-        if panel and panel.session_id == session.id and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
-          pcall(vim.api.nvim_win_close, panel.winid, true)
-        end
-        state.panels.selection = nil
-      end
-      if state.last_session and state.last_session.kind == "selection" and state.last_session.id == session.id then
-        state.last_session = nil
-      end
-    else
-      kept[#kept + 1] = session
-    end
-  end
-  state.selection.sessions = kept
-  if deleted > 0 then
-    save_sessions_now()
-  end
-  return deleted
-end
-
 function M.open_session(id, opts)
   opts = opts or {}
-  local session = M.get_session(id)
+  local session = ctx.get_session(id)
   if not session then
     vim.notify("nvime discussion no longer exists", vim.log.levels.WARN)
     return nil
@@ -1662,7 +502,7 @@ end
 
 function M.choose_session(selection, opts, callback)
   opts = opts or {}
-  local provider_name = opts.provider or provider()
+  local provider_name = opts.provider or ctx.provider()
   local sessions = M.sessions()
   if #sessions == 0 then
     callback({ new_session = true })
@@ -1721,17 +561,17 @@ function M.mark_provider_session(session_id, provider_name, provider_session_id)
   if not provider_session_id or provider_session_id == "" then
     return
   end
-  local session = M.get_session(session_id)
+  local session = ctx.get_session(session_id)
   if not session then
     return
   end
   session.provider_sessions = session.provider_sessions or {}
   session.provider_sessions[provider_name] = provider_session_id
-  touch_session(session)
+  ctx.touch_session(session)
 end
 
 function M.agent_run_opts(session_id, provider_name)
-  local session = M.get_session(session_id)
+  local session = ctx.get_session(session_id)
   local resume_id = session and session.provider_sessions and session.provider_sessions[provider_name] or nil
   local cumulative_key = provider_name .. "_cumulative_usage"
   local prev_cumulative = session and session[cumulative_key] or nil
@@ -1751,17 +591,17 @@ function M.agent_run_opts(session_id, provider_name)
 end
 
 function M.mark_last_ask(session_id, ask)
-  local session = M.get_session(session_id)
+  local session = ctx.get_session(session_id)
   if session then
     session.last_ask = ask
-    touch_session(session)
+    ctx.touch_session(session)
   end
   state.selection.last_ask = ask
 end
 
 function M.last_ask_for(selection)
   if selection then
-    for _, session in ipairs(ensure_sessions()) do
+    for _, session in ipairs(ctx.ensure_sessions()) do
       if session.last_ask and M.same_range(selection, session.selection) then
         return session.last_ask
       end

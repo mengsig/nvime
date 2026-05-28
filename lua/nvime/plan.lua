@@ -1253,27 +1253,85 @@ end
 --      authored before range_anchor existed, where line numbers may be
 --      off by hundreds of lines).
 --   4. Last resort: clamp the recorded range as-is, with a notice.
-local function reanchor_range(buf_lines, recorded_line1, recorded_line2, anchor, intent)
+-- Returns (line1, line2, notice, confidence). confidence is one of:
+--   "exact"     anchor matched at the recorded line — trust it.
+--   "relocated" anchor matched at exactly one OTHER place — drift corrected.
+--   "symbol"    located via tree-sitter symbol / intent-symbol search.
+--   "ambiguous" anchor matched MULTIPLE places — best guess, low confidence.
+--   "stale"     nothing matched — recorded range used as-is, low confidence.
+-- `opts.bufnr` (optional) enables the tree-sitter enclosing-symbol fallback.
+local function reanchor_range(buf_lines, recorded_line1, recorded_line2, anchor, intent, opts)
+  opts = opts or {}
   local total = #buf_lines
-  local function clamp_recorded(notice)
+  local function clamp_recorded(notice, confidence)
     local l1 = math.max(1, math.min(recorded_line1 or 1, total))
     local l2 = math.max(l1, math.min(recorded_line2 or l1, total))
-    return l1, l2, notice
+    return l1, l2, notice, confidence or "stale"
+  end
+
+  local function capped_span(found)
+    local span = (recorded_line2 or recorded_line1 or found) - (recorded_line1 or found)
+    span = math.max(span, 0)
+    -- Cap the span at 40 lines so a wildly drifted range doesn't ship a huge
+    -- unfocused selection to the patch worker.
+    if span > 40 then
+      span = 40
+    end
+    return span
+  end
+
+  -- Tree-sitter enclosing-symbol fallback: if the intent names a symbol that
+  -- tree-sitter can locate UNIQUELY in the current buffer, use that node's
+  -- range. More robust than line matching when the file was restructured.
+  local function ts_fallback(reason)
+    if not opts.bufnr then
+      return nil
+    end
+    local symbols = extract_intent_symbols(intent or "")
+    if #symbols == 0 then
+      return nil
+    end
+    local ok, nodes = pcall(function()
+      return require("nvime.treesitter").walk_symbols(opts.bufnr)
+    end)
+    if not ok or type(nodes) ~= "table" then
+      return nil
+    end
+    local want = {}
+    for _, s in ipairs(symbols) do
+      want[s] = true
+    end
+    local match, count = nil, 0
+    for _, node in ipairs(nodes) do
+      if node.name and want[node.name] then
+        count = count + 1
+        match = match or node
+      end
+    end
+    if match and count == 1 then
+      local notice = string.format(
+        "step range drifted (%s): tree-sitter located `%s` at lines %d-%d (recorded was %d-%d)",
+        reason,
+        match.name,
+        match.line_start,
+        match.line_end,
+        recorded_line1 or -1,
+        recorded_line2 or -1
+      )
+      return math.max(1, match.line_start), math.min(total, match.line_end), notice, "symbol"
+    end
+    return nil
   end
 
   local function symbol_fallback(reason)
+    local t1, t2, tnotice, tconf = ts_fallback(reason)
+    if t1 then
+      return t1, t2, tnotice, tconf
+    end
     local symbols = extract_intent_symbols(intent or "")
     local found, score = search_by_symbols(buf_lines, symbols)
     if found and score >= 1 then
-      local span = (recorded_line2 or recorded_line1 or found) - (recorded_line1 or found)
-      span = math.max(span, 0)
-      -- Cap the span at 40 lines so a wildly drifted range doesn't ship a
-      -- huge unfocused selection to the patch worker.
-      if span > 40 then
-        span = 40
-      end
-      local new_l1 = found
-      local new_l2 = math.min(total, found + span)
+      local span = capped_span(found)
       local notice = string.format(
         "step range drifted (%s): symbols matched line %d (recorded was %d-%d)",
         reason,
@@ -1281,17 +1339,17 @@ local function reanchor_range(buf_lines, recorded_line1, recorded_line2, anchor,
         recorded_line1 or -1,
         recorded_line2 or -1
       )
-      return new_l1, new_l2, notice
+      return found, math.min(total, found + span), notice, "symbol"
     end
     return nil
   end
 
   if not anchor or anchor == "" then
-    local fl1, fl2, fnotice = symbol_fallback("no range_anchor")
+    local fl1, fl2, fnotice, fconf = symbol_fallback("no range_anchor")
     if fl1 then
-      return fl1, fl2, fnotice
+      return fl1, fl2, fnotice, fconf
     end
-    return clamp_recorded(nil)
+    return clamp_recorded(nil, "stale")
   end
 
   local anchor_lines = vim.split(anchor, "\n", { plain = true })
@@ -1299,11 +1357,11 @@ local function reanchor_range(buf_lines, recorded_line1, recorded_line2, anchor,
     table.remove(anchor_lines)
   end
   if #anchor_lines == 0 then
-    local fl1, fl2, fnotice = symbol_fallback("empty range_anchor")
+    local fl1, fl2, fnotice, fconf = symbol_fallback("empty range_anchor")
     if fl1 then
-      return fl1, fl2, fnotice
+      return fl1, fl2, fnotice, fconf
     end
-    return clamp_recorded(nil)
+    return clamp_recorded(nil, "stale")
   end
 
   local function matches_at(start)
@@ -1320,37 +1378,130 @@ local function reanchor_range(buf_lines, recorded_line1, recorded_line2, anchor,
 
   if recorded_line1 and matches_at(recorded_line1) then
     local span = (recorded_line2 or recorded_line1) - recorded_line1
-    return recorded_line1, math.min(total, recorded_line1 + span), nil
+    return recorded_line1, math.min(total, recorded_line1 + span), nil, "exact"
   end
 
-  local best = nil
+  -- Collect every match so we can tell a clean relocation from an ambiguous one.
+  local matches = {}
   for start = 1, total - #anchor_lines + 1 do
     if matches_at(start) then
-      if not best or math.abs(start - (recorded_line1 or 1)) < math.abs(best - (recorded_line1 or 1)) then
+      matches[#matches + 1] = start
+    end
+  end
+  if #matches > 0 then
+    local best = matches[1]
+    for _, start in ipairs(matches) do
+      if math.abs(start - (recorded_line1 or 1)) < math.abs(best - (recorded_line1 or 1)) then
         best = start
       end
     end
-  end
-  if best then
     local span = (recorded_line2 or recorded_line1 or best) - (recorded_line1 or best)
     local new_line2 = math.min(total, best + math.max(0, span))
-    local notice = nil
-    if best ~= recorded_line1 then
-      notice = string.format("step range drifted: anchor was at line %d, now at line %d", recorded_line1 or -1, best)
+    if #matches == 1 then
+      local notice = nil
+      if best ~= recorded_line1 then
+        notice = string.format("step range drifted: anchor was at line %d, now at line %d", recorded_line1 or -1, best)
+      end
+      return best, new_line2, notice, "relocated"
     end
-    return best, new_line2, notice
+    local notice = string.format(
+      "step anchor is ambiguous: %d matches; using the nearest at line %d (recorded was %d)",
+      #matches,
+      best,
+      recorded_line1 or -1
+    )
+    return best, new_line2, notice, "ambiguous"
   end
 
-  -- Anchor exists but didn't match; try symbols before giving up.
-  local fl1, fl2, fnotice = symbol_fallback("range_anchor not found in file")
+  -- Anchor exists but didn't match; try symbols/tree-sitter before giving up.
+  local fl1, fl2, fnotice, fconf = symbol_fallback("range_anchor not found in file")
   if fl1 then
-    return fl1, fl2, fnotice
+    return fl1, fl2, fnotice, fconf
   end
-  return clamp_recorded("step anchor not found in file; using recorded range as-is")
+  return clamp_recorded("step anchor not found in file; using recorded range as-is", "stale")
 end
 
 M._reanchor_range = reanchor_range -- exposed for tests
 M._extract_intent_symbols = extract_intent_symbols
+
+-- Build an old-line -> new-line map from two versions of a file using
+-- vim.diff hunk indices. Lines before any change map to themselves; lines
+-- after a change shift by the net (added - removed); lines that fall inside a
+-- changed region anchor to the new region's start (best effort).
+local function build_line_map(old_lines, new_lines)
+  local a = table.concat(old_lines or {}, "\n")
+  local b = table.concat(new_lines or {}, "\n")
+  local ok, hunks = pcall(vim.diff, a, b, { result_type = "indices" })
+  if not ok or type(hunks) ~= "table" then
+    hunks = {}
+  end
+  return function(line)
+    if not line then
+      return line
+    end
+    local delta = 0
+    for _, h in ipairs(hunks) do
+      local sa, ca, sb, cb = h[1], h[2], h[3], h[4]
+      if ca == 0 then
+        -- Pure insertion after old line `sa`: lines below it shift down.
+        if line > sa then
+          delta = delta + cb
+        end
+      else
+        local old_end = sa + ca - 1
+        if line > old_end then
+          delta = delta + (cb - ca)
+        elseif line >= sa then
+          -- Inside the changed region — anchor to the new region start.
+          return math.max(1, sb)
+        end
+      end
+    end
+    return line + delta
+  end
+end
+
+-- Live range-rebasing: after a step's accepted edit changes `file` from
+-- `old_lines` to `new_lines`, shift the recorded line range of every other
+-- not-yet-done step targeting the same file so later steps stay anchored to
+-- the right lines instead of drifting and failing. Symmetric — rollback calls
+-- it with old/new swapped to undo the shift.
+local function rebase_pending_ranges(plan, file, old_lines, new_lines, current_step_id)
+  if not plan or not file or not old_lines or not new_lines then
+    return false
+  end
+  local map = build_line_map(old_lines, new_lines)
+  local new_total = math.max(1, #new_lines)
+  local changed = false
+  for _, s in ipairs(plan.steps or {}) do
+    if s.id ~= current_step_id and s.file == file and type(s.range) == "table" and step_status(s) ~= "done" then
+      local l1 = tonumber(s.range.line1 or s.range[1])
+      local l2 = tonumber(s.range.line2 or s.range[2])
+      if l1 and l2 then
+        local n1 = math.max(1, math.min(map(l1), new_total))
+        local n2 = math.max(n1, math.min(map(l2), new_total))
+        if n1 ~= l1 or n2 ~= l2 then
+          s.range.line1 = n1
+          s.range.line2 = n2
+          if s.range[1] ~= nil then
+            s.range[1] = n1
+          end
+          if s.range[2] ~= nil then
+            s.range[2] = n2
+          end
+          changed = true
+        end
+      end
+    end
+  end
+  if changed then
+    persist_plan(plan)
+  end
+  return changed
+end
+
+M._build_line_map = build_line_map -- exposed for tests
+M._rebase_pending_ranges = rebase_pending_ranges
 
 local function open_step_target(plan, step)
   local file = step.file
@@ -1374,6 +1525,7 @@ local function open_step_target(plan, step)
   local bufnr = vim.api.nvim_get_current_buf()
   local total_lines = math.max(1, vim.api.nvim_buf_line_count(bufnr))
   local line1, line2
+  local anchor_confidence, anchor_notice = "exact", nil
   if range == "new" or range == nil then
     line1, line2 = 1, total_lines
   elseif type(range) == "table" then
@@ -1384,10 +1536,10 @@ local function open_step_target(plan, step)
     -- anchoring, the patch worker refuses because the recorded range no
     -- longer covers the target content.
     local buf_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-    local notice
-    line1, line2, notice = reanchor_range(buf_lines, recorded_l1, recorded_l2, step.range_anchor, step.intent)
-    if notice then
-      vim.notify("nvime plan: " .. notice, vim.log.levels.INFO)
+    line1, line2, anchor_notice, anchor_confidence =
+      reanchor_range(buf_lines, recorded_l1, recorded_l2, step.range_anchor, step.intent, { bufnr = bufnr })
+    if anchor_notice then
+      vim.notify("nvime plan: " .. anchor_notice, vim.log.levels.INFO)
     end
   else
     line1, line2 = 1, total_lines
@@ -1405,6 +1557,9 @@ local function open_step_target(plan, step)
       -- without this the build_prompt path crashes with "concatenate field
       -- 'source' (a nil value)".
       source = "plan-step",
+      -- Drift-resolution metadata; execute_step gates on low confidence.
+      anchor_confidence = anchor_confidence or "exact",
+      anchor_notice = anchor_notice,
     }
 end
 
@@ -2020,6 +2175,40 @@ function M.execute_step(plan_id, step_id, opts)
     return false
   end
 
+  -- Confidence gate: when the target could not be located confidently (anchor
+  -- ambiguous, or lost to drift and clamped to the stale recorded range), stop
+  -- and let the user decide instead of silently editing the wrong lines and
+  -- failing later. Skipped in headless / non-interactive runs, which proceed
+  -- with the best guess (preserving prior behavior).
+  local interactive = #vim.api.nvim_list_uis() > 0 and vim.env.NVIME_NONINTERACTIVE ~= "1"
+  local confidence = selection.anchor_confidence
+  if interactive and not opts.assume_yes and (confidence == "ambiguous" or confidence == "stale") then
+    local choice = vim.fn.confirm(
+      string.format(
+        "nvime plan: step %s target is uncertain — %s.\nProceed with the best guess (lines %d-%d), edit the range, or cancel?",
+        tostring(step.id),
+        selection.anchor_notice or ("low confidence (" .. tostring(confidence) .. ")"),
+        selection.line1,
+        selection.line2
+      ),
+      "&Proceed\n&Edit range\n&Cancel",
+      1
+    )
+    if choice == 2 then
+      local default = string.format("%d,%d", selection.line1, selection.line2)
+      local raw = vim.fn.input("nvime plan: line range for step " .. tostring(step.id) .. " (line1,line2): ", default)
+      local a, b = tostring(raw):match("^%s*(%d+)%s*[,%s]%s*(%d+)%s*$")
+      if a and b then
+        selection.line1 = clamp_int(a, 1)
+        selection.line2 = math.max(selection.line1, clamp_int(b, selection.line1))
+        pcall(vim.api.nvim_win_set_cursor, 0, { selection.line1, 0 })
+      end
+    elseif choice ~= 1 then
+      vim.notify("nvime plan: step " .. tostring(step.id) .. " cancelled (uncertain target)", vim.log.levels.WARN)
+      return false
+    end
+  end
+
   local cfg = plan_config()
   if cfg.auto_in_progress ~= false then
     set_step_status(plan_id, step.id, "in_progress")
@@ -2056,6 +2245,7 @@ function M.execute_step(plan_id, step_id, opts)
       vim.notify("nvime plan: cannot rollback — original snapshot unavailable", vim.log.levels.ERROR)
       return false
     end
+    local post_lines = vim.api.nvim_buf_get_lines(target_bufnr, 0, -1, false)
     vim.api.nvim_buf_set_lines(target_bufnr, 0, -1, false, original_lines)
     -- :write the buffer if it has a real file; suppress autocmds so other
     -- plugins don't reformat the rolled-back content.
@@ -2071,6 +2261,9 @@ function M.execute_step(plan_id, step_id, opts)
       file = summary.path,
     })
     vim.notify("nvime plan: step " .. tostring(step.id) .. " rolled back to pre-step content", vim.log.levels.WARN)
+    -- Undo the live range-rebase applied when this step was accepted: the file
+    -- is back to its pre-step content, so pending ranges must shift back too.
+    rebase_pending_ranges(M.get(plan.id) or plan, summary.path or step.file, post_lines, original_lines, step.id)
     return true
   end
 
@@ -2092,6 +2285,13 @@ function M.execute_step(plan_id, step_id, opts)
         end
       end)
       return
+    end
+    -- The file just changed under us (accepted > 0). Rebase the recorded line
+    -- ranges of the remaining not-yet-done steps in this same file so they
+    -- stay anchored as we walk the plan, instead of drifting and failing later.
+    if summary.target_bufnr and vim.api.nvim_buf_is_valid(summary.target_bufnr) and summary.original_lines then
+      local post_lines = vim.api.nvim_buf_get_lines(summary.target_bufnr, 0, -1, false)
+      rebase_pending_ranges(M.get(plan.id) or plan, step.file, summary.original_lines, post_lines, step.id)
     end
     local tests = step.tests or {}
     -- Count force-accepts in this resolution so the changelog flags them.
@@ -2650,6 +2850,10 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "  anchor at execute time and re-anchors the range to wherever the content has",
   "  drifted to. Without an anchor, line drift can push the target out of the",
   "  declared range and the patch worker will refuse the step.",
+  "  Pick an anchor that is UNIQUE in the file: prefer a signature, declaration, or",
+  "  distinctive line over a generic one like `end`, `}`, `return`, or a blank line.",
+  "  If the first line is not unique, include enough following lines (up to 3) that",
+  "  the anchor block appears exactly once — ambiguous anchors force nvime to guess.",
   "  Example:",
   '    "range": { "line1": 627, "line2": 632 },',
   '    "range_anchor": "      detail = table.concat(detail, \\" \\")",',
