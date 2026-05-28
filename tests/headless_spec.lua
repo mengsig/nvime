@@ -757,8 +757,12 @@ assert(
   "claude selection lane disallows destructive git verbs"
 )
 assert(
-  first_native_claude:find("Bash(sudo:*)", 1, true) and first_native_claude:find("Bash(dd:*)", 1, true),
-  "claude selection lane disallows destructive shell binaries"
+  first_native_claude:find("Bash(rm -rf:*)", 1, true),
+  "claude selection lane disallows recursive force-delete of the working tree"
+)
+assert(
+  not first_native_claude:find("Bash(sudo:*)", 1, true) and not first_native_claude:find("Bash(dd:*)", 1, true),
+  "claude selection lane does not pretend to be a system sandbox (no mkfs/dd/sudo blocklist)"
 )
 assert(not first_native_claude:find("Bash(git diff", 1, true), "claude selection lane keeps git diff readable")
 assert(not first_native_claude:find("Bash(git add", 1, true), "claude selection lane keeps git add allowed")
@@ -3104,6 +3108,19 @@ end
     vim.cmd("edit " .. tmp .. "/stale_target.lua")
     plan.execute_step("0001-stale", 1)
 
+    -- The executor now prefills the edit prompt and waits for the user to
+    -- submit (the <C-R> → edit → <C-R> flow); it no longer auto-runs the
+    -- agent. Drive that submit so the stubbed run fires and the stale-resume
+    -- self-recovery path clears the bad id.
+    assert(
+      vim.wait(1000, function()
+        local pending = require("nvime.state").selection.pending_input
+        return pending ~= nil and type(pending.on_submit) == "function"
+      end, 20),
+      "execute_step arms the prefilled edit prompt"
+    )
+    require("nvime.selection").submit_current()
+
     vim.wait(500, function()
       state.plan.loaded = false
       state.plan.plans = nil
@@ -3960,7 +3977,9 @@ end)(); -- ---------------------------------------------------------------------
     {"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":1500,"output_tokens":40,"reasoning_output_tokens":120}}
   ]])
   local codex_sample = usage.parse_codex(codex_decoded)
-  assert_eq(codex_sample.input, 2000, "usage: codex input parsed")
+  -- Codex reports input_tokens as the TOTAL (cached + fresh). parse_codex
+  -- subtracts cached so input + cache_read never double-counts: 2000 - 1500 = 500.
+  assert_eq(codex_sample.input, 500, "usage: codex fresh input = input_tokens - cached")
   assert_eq(codex_sample.cache_read, 1500, "usage: codex cached input mapped to cache_read")
   assert_eq(codex_sample.reasoning, 120, "usage: codex reasoning parsed")
 

@@ -860,6 +860,20 @@ function M.start(opts)
       return
     end
 
+    -- Question-shaped intents are read-only by nature; route them to the
+    -- ask lane instead of producing a patch. `force_edit` (plan executor)
+    -- skips this so plan-context headers can't trip the heuristic.
+    if not force_edit and looks_like_question(intent) then
+      require("nvime.ask").start({
+        selection = selection,
+        provider = proceed_provider,
+        question = intent,
+        session_id = session_opts.session_id,
+        new_session = session_opts.new_session,
+      })
+      return
+    end
+
     -- Intent linter. Vague prompts get a confirmation; questionable
     -- prompts get a notice and proceed. The plan executor (force_edit)
     -- prefixes a structured plan-context header that may itself look
@@ -908,6 +922,17 @@ function M.start(opts)
     if prefill and prefill ~= "" then
       selection_state.insert_prompt(prefill)
     end
+    return
+  end
+
+  if not force_edit and looks_like_question(intent) then
+    require("nvime.ask").start({
+      selection = selection,
+      provider = provider,
+      question = intent,
+      session_id = opts.session_id,
+      new_session = opts.new_session,
+    })
     return
   end
 

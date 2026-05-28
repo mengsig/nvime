@@ -1,10 +1,17 @@
 -- nvime.shellguard
 --
--- Defense-in-depth guard for the agents' Bash surface. Materializes a
+-- Editor-discipline guard for the agents' Bash surface. Materializes a
 -- directory of POSIX shell wrappers under stdpath('cache')/nvime/shellguard/bin
 -- and prepends it to PATH for spawned agents. Wrappers reject destructive
 -- subcommands/flags before re-exec'ing the real binary via NVIME_GUARD_REAL_PATH
 -- (which strips the guard dir back out of PATH so the wrappers don't recurse).
+--
+-- Scope is deliberately narrow and matches the project's contract: prevent an
+-- agent from mutating the repo/working tree behind your back (git history,
+-- recursive force-deletes). It is NOT a security sandbox — it does not police
+-- system binaries like mkfs/dd/sudo. The README is explicit that nvime cannot
+-- stop a renamed binary, an external terminal, or a hostile plugin, so a PATH
+-- shim over those tools would be theater, not protection.
 
 local M = {}
 
@@ -41,33 +48,6 @@ local BLOCKED_GIT = {
   "symbolic-ref",
   "fast-import",
   "fast-export",
-}
-
-local BLOCKED_BIN = {
-  "dd",
-  "sudo",
-  "doas",
-  "mkfs",
-  "mkfs.ext2",
-  "mkfs.ext3",
-  "mkfs.ext4",
-  "mkfs.xfs",
-  "mkfs.btrfs",
-  "mkfs.fat",
-  "mkfs.vfat",
-  "mkfs.ntfs",
-  "shred",
-  "wipefs",
-  "fdisk",
-  "sfdisk",
-  "parted",
-  "mkswap",
-  "swapon",
-  "swapoff",
-  "halt",
-  "poweroff",
-  "reboot",
-  "shutdown",
 }
 
 local BRANCH_DELETE_FLAGS = { "-d", "-D", "--delete" }
@@ -159,13 +139,6 @@ fi
 PATH="${NVIME_GUARD_REAL_PATH:-$PATH}" exec rm "$@"
 ]==]
 
--- One shared blocker; symlinked under each name in BLOCKED_BIN. The
--- wrapper reports its invocation name via $0 / basename.
-local BLOCKED_BIN_WRAPPER = [==[#!/usr/bin/env bash
-printf 'nvime shellguard blocked: %s\n' "$(basename "$0")" >&2
-exit 126
-]==]
-
 local cached_dir
 local cached_real_path
 local cached_base_env
@@ -218,17 +191,6 @@ local function ensure_scripts(dir)
   local git_body = (GIT_WRAPPER:gsub("__BLOCKED__", quoted_git_blocklist()))
   write_script(dir .. "/git", git_body)
   write_script(dir .. "/rm", RM_WRAPPER)
-  local blocker = dir .. "/__nvime_blocked"
-  write_script(blocker, BLOCKED_BIN_WRAPPER)
-  for _, bin in ipairs(BLOCKED_BIN) do
-    local link = dir .. "/" .. bin
-    pcall(uv.fs_unlink, link)
-    local ok = pcall(uv.fs_symlink, blocker, link)
-    if not ok then
-      -- Fall back to a plain copy if symlinking is unavailable on this fs.
-      write_script(link, BLOCKED_BIN_WRAPPER)
-    end
-  end
 end
 
 local function compute_real_path()
@@ -269,9 +231,6 @@ local function build_disallow_patterns()
   end
   for _, sub in ipairs(STASH_DESTRUCTIVE) do
     patterns[#patterns + 1] = "Bash(git stash " .. sub .. ":*)"
-  end
-  for _, bin in ipairs(BLOCKED_BIN) do
-    patterns[#patterns + 1] = "Bash(" .. bin .. ":*)"
   end
   for _, shape in ipairs({ "rm -rf", "rm -fr", "rm -Rf", "rm -fR" }) do
     patterns[#patterns + 1] = "Bash(" .. shape .. ":*)"
