@@ -2383,28 +2383,84 @@ function M.execute_step(plan_id, step_id, opts)
               set_step_status(plan.id, step.id, "pending")
             end
           else
+            -- Surface the acceptance criteria with a per-check ✓/✗ so the user
+            -- sees WHAT was required and WHY it failed — not a bare "exit 1".
+            -- A single compound check is already known-failed (don't re-run a
+            -- possibly-slow suite); multiple checks get re-run individually to
+            -- pinpoint the culprit.
+            local criteria = {}
+            if #tests == 1 then
+              criteria[1] = "  ✗ " .. tests[1]
+            else
+              for _, t in ipairs(tests) do
+                local r = vim.system({ "sh", "-lc", t }, { cwd = cwd, text = true }):wait()
+                criteria[#criteria + 1] = (r.code == 0 and "  ✓ " or "  ✗ ") .. t
+              end
+            end
+            local why = tail ~= "" and tail or "(silent checks — e.g. grep -q — produced no output)"
+            local criteria_text = table.concat(criteria, "\n")
+
             local choice = vim.fn.confirm(
               "nvime plan: step "
                 .. tostring(step.id)
-                .. " tests FAILED (exit "
+                .. " checks FAILED (exit "
                 .. tostring(result.code)
-                .. "). Output:\n"
-                .. (tail ~= "" and tail or "(no output)")
-                .. "\n\nWhat next?",
-              "&Rollback\n&Blocked\n&Pending\n&Cancel",
-              1
+                .. ").\n\nAcceptance criteria:\n"
+                .. criteria_text
+                .. "\n\nWhy:\n"
+                .. why
+                .. "\n\nFix this?",
+              "&Fix with agent\n&Ignore (mark done)\n&Revert\n&Cancel",
+              4
             )
             if choice == 1 then
+              -- Hand the failure back to the patch agent on this step's range.
+              local fix_intent = table.concat({
+                "Plan step " .. tostring(step.id) .. "'s change was applied but its acceptance checks FAILED. Fix it.",
+                "",
+                "Acceptance checks (shell; each must exit 0):",
+                criteria_text,
+                "",
+                "Exit code: " .. tostring(result.code),
+                "Captured output:",
+                why,
+                "",
+                "Adjust the code in this step's range so every acceptance check passes."
+                  .. " Keep the change minimal and focused; do not touch unrelated lines.",
+              }, "\n")
+              vim.notify(
+                "nvime plan: handing step " .. tostring(step.id) .. " back to the agent to fix…",
+                vim.log.levels.INFO
+              )
+              M.execute_step(plan.id, step.id, { intent_override = fix_intent, force = true })
+            elseif choice == 2 then
+              -- Ignore: the user judges the check wrong/irrelevant. Keep the work
+              -- and mark done, but record that the checks failed (changelog flags it).
+              set_step_status(plan.id, step.id, "done", {
+                provider = summary.provider,
+                rationale = summary.rationale,
+                verdict = summary.verdict,
+                verdict_pending = summary.verdict == nil,
+                accepted = summary.accepted,
+                total = summary.total,
+                forced = forced_count,
+                tests_cmd = cmd,
+                tests_pass = false,
+                tests_tail = tail,
+              })
+              vim.notify(
+                "nvime plan: step " .. tostring(step.id) .. " marked done despite failing checks (ignored)",
+                vim.log.levels.WARN
+              )
+            elseif choice == 3 then
               if rollback_step(summary) then
                 set_step_status(plan.id, step.id, "pending")
               else
                 set_step_status(plan.id, step.id, "blocked")
               end
-            elseif choice == 2 then
-              set_step_status(plan.id, step.id, "blocked")
-            elseif choice == 3 then
-              set_step_status(plan.id, step.id, "pending")
             end
+            -- choice 4 (Cancel) / 0: leave the step as-is; the user decides later
+            -- from the plan view.
           end
         end)
       end)

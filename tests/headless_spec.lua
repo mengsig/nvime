@@ -4073,7 +4073,7 @@ end)(); -- ---------------------------------------------------------------------
     {"type":"result","subtype":"success","is_error":false,"session_id":"abc",
      "total_cost_usd":0.5,"usage":{"input_tokens":100,"output_tokens":50,
        "cache_creation_input_tokens":1000,"cache_read_input_tokens":250},
-     "modelUsage":{"claude-opus-4-7":{"costUSD":0.49},"claude-haiku-4-5":{"costUSD":0.01}}}
+     "modelUsage":{"claude-opus-4-8":{"costUSD":0.49},"claude-haiku-4-5":{"costUSD":0.01}}}
   ]])
   local claude_sample = usage.parse_claude(claude_decoded)
   assert_eq(claude_sample.input, 100, "usage: claude input parsed")
