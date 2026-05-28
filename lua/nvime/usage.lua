@@ -89,8 +89,8 @@ local function merged_rates()
     cached_sorted_keys[#cached_sorted_keys + 1] = k
   end
   -- Longest first so prefixes don't shadow more-specific keys (e.g.
-  -- "claude-opus-4-7[1m]" should win over "claude-opus-4-7" when both
-  -- match a future model id like "claude-opus-4-7[1m]-20260101").
+  -- "claude-opus-4-8[1m]" should win over "claude-opus-4-8" when both
+  -- match a future model id like "claude-opus-4-8[1m]-20260101").
   table.sort(cached_sorted_keys, function(a, b)
     return #a > #b
   end)

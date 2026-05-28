@@ -1501,7 +1501,7 @@ assert(
   "ask output float closes when an inline diff opens"
 )
 require("nvime.diff").reject_all()
-require("nvime.state").config["providers"].claude.cmd = old_claude_cmd;
+require("nvime.state").config["providers"].claude.cmd = old_claude_cmd
 
 do
   local diff = require("nvime.diff")
@@ -2390,13 +2390,18 @@ vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "delta",
 })
 local iterative_undo_target = vim.api.nvim_get_current_buf()
-require("nvime.diff").start_session({
-  bufnr = iterative_undo_target,
-  line1 = 1,
-  line2 = 4,
-  path = "iterative-undo.lua",
-  source = "test",
-}, "--- a/iterative-undo.lua\n+++ b/iterative-undo.lua\n@@ -1,4 +1,4 @@\n-alpha\n+ALPHA\n bravo\n-charlie\n+CHARLIE\n delta", "claude", "")
+require("nvime.diff").start_session(
+  {
+    bufnr = iterative_undo_target,
+    line1 = 1,
+    line2 = 4,
+    path = "iterative-undo.lua",
+    source = "test",
+  },
+  "--- a/iterative-undo.lua\n+++ b/iterative-undo.lua\n@@ -1,4 +1,4 @@\n-alpha\n+ALPHA\n bravo\n-charlie\n+CHARLIE\n delta",
+  "claude",
+  ""
+)
 vim.api.nvim_win_set_cursor(0, { 1, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ga", true, false, true), "xt", false)
 assert(
@@ -2421,13 +2426,18 @@ vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "three",
 })
 local iterative_group_undo_target = vim.api.nvim_get_current_buf()
-require("nvime.diff").start_session({
-  bufnr = iterative_group_undo_target,
-  line1 = 1,
-  line2 = 3,
-  path = "iterative-group-undo.lua",
-  source = "test",
-}, "--- a/iterative-group-undo.lua\n+++ b/iterative-group-undo.lua\n@@ -1,3 +1,3 @@\n-one\n-two\n-three\n+ONE\n+TWO\n+THREE", "claude", "")
+require("nvime.diff").start_session(
+  {
+    bufnr = iterative_group_undo_target,
+    line1 = 1,
+    line2 = 3,
+    path = "iterative-group-undo.lua",
+    source = "test",
+  },
+  "--- a/iterative-group-undo.lua\n+++ b/iterative-group-undo.lua\n@@ -1,3 +1,3 @@\n-one\n-two\n-three\n+ONE\n+TWO\n+THREE",
+  "claude",
+  ""
+)
 vim.api.nvim_win_set_cursor(0, { 2, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ga", true, false, true), "xt", false)
 assert(
@@ -2458,7 +2468,8 @@ do
     "    return username",
   })
   local cookie_repeat_target = vim.api.nvim_get_current_buf()
-  local cookie_repeat_diff = "--- a/cookie-repeat.py\n+++ b/cookie-repeat.py\n@@ -1,8 +1,8 @@\n def parse_cookie(ts, username):\n     try:\n+        return None\n         timestamp = int(ts)\n     except ValueError:\n-        return None\n     if time.time() - timestamp > COOKIE_MAX_AGE:\n         return None\n     return username"
+  local cookie_repeat_diff =
+    "--- a/cookie-repeat.py\n+++ b/cookie-repeat.py\n@@ -1,8 +1,8 @@\n def parse_cookie(ts, username):\n     try:\n+        return None\n         timestamp = int(ts)\n     except ValueError:\n-        return None\n     if time.time() - timestamp > COOKIE_MAX_AGE:\n         return None\n     return username"
   require("nvime.diff").start_session({
     bufnr = cookie_repeat_target,
     line1 = 1,
@@ -2497,13 +2508,18 @@ vim.api.nvim_buf_set_lines(0, 0, -1, false, {
   "delta",
 })
 local iterative_redo_target = vim.api.nvim_get_current_buf()
-require("nvime.diff").start_session({
-  bufnr = iterative_redo_target,
-  line1 = 1,
-  line2 = 4,
-  path = "iterative-redo.lua",
-  source = "test",
-}, "--- a/iterative-redo.lua\n+++ b/iterative-redo.lua\n@@ -1,4 +1,4 @@\n-alpha\n+ALPHA\n bravo\n-charlie\n+CHARLIE\n delta", "claude", "")
+require("nvime.diff").start_session(
+  {
+    bufnr = iterative_redo_target,
+    line1 = 1,
+    line2 = 4,
+    path = "iterative-redo.lua",
+    source = "test",
+  },
+  "--- a/iterative-redo.lua\n+++ b/iterative-redo.lua\n@@ -1,4 +1,4 @@\n-alpha\n+ALPHA\n bravo\n-charlie\n+CHARLIE\n delta",
+  "claude",
+  ""
+)
 vim.api.nvim_win_set_cursor(0, { 1, 0 })
 vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("ga", true, false, true), "xt", false)
 assert(
@@ -3086,9 +3102,33 @@ end
       files_estimated = {},
       acceptance = {},
       steps = {
-        { id = 1, intent = "x", file = "a.lua", range = { line1 = 1, line2 = 3 }, depends_on = {}, tests = {}, status = "done" },
-        { id = 2, intent = "x", file = "a.lua", range = { line1 = 10, line2 = 12 }, depends_on = {}, tests = {}, status = "pending" },
-        { id = 3, intent = "x", file = "b.lua", range = { line1 = 10, line2 = 12 }, depends_on = {}, tests = {}, status = "pending" },
+        {
+          id = 1,
+          intent = "x",
+          file = "a.lua",
+          range = { line1 = 1, line2 = 3 },
+          depends_on = {},
+          tests = {},
+          status = "done",
+        },
+        {
+          id = 2,
+          intent = "x",
+          file = "a.lua",
+          range = { line1 = 10, line2 = 12 },
+          depends_on = {},
+          tests = {},
+          status = "pending",
+        },
+        {
+          id = 3,
+          intent = "x",
+          file = "b.lua",
+          range = { line1 = 10, line2 = 12 },
+          depends_on = {},
+          tests = {},
+          status = "pending",
+        },
       },
     }
     local oldf, newf = {}, { "n1", "n2", "n3", "n4", "n5" }
@@ -4041,7 +4081,7 @@ end)(); -- ---------------------------------------------------------------------
   assert_eq(claude_sample.cache_creation, 1000, "usage: claude cache_creation parsed")
   assert_eq(claude_sample.cache_read, 250, "usage: claude cache_read parsed")
   assert_eq(claude_sample.cost_usd, 0.5, "usage: claude cost taken from total_cost_usd")
-  assert_eq(claude_sample.model, "claude-opus-4-7", "usage: claude model picked by highest cost")
+  assert_eq(claude_sample.model, "claude-opus-4-8", "usage: claude model picked by highest cost")
 
   local codex_decoded = vim.json.decode([[
     {"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":1500,"output_tokens":40,"reasoning_output_tokens":120}}
@@ -4510,7 +4550,10 @@ end)();
 
   -- Unit: glob_to_pattern + path_matches_any
   assert(verify._path_matches_any("src/foo.py", { "*.py" }), "glob matches simple extension")
-  assert(verify._path_matches_any("a/b/c.py", { "*.py" }), "extension glob is path-tolerant by stripping the leading dir match")
+  assert(
+    verify._path_matches_any("a/b/c.py", { "*.py" }),
+    "extension glob is path-tolerant by stripping the leading dir match"
+  )
   assert(not verify._path_matches_any("src/foo.go", { "*.py" }), "wrong-extension glob does not match")
   assert(verify._path_matches_any("migrations/0001_init.sql", { "migrations/**" }), "dir-glob matches nested file")
   assert(verify._path_matches_any("a/b/secrets/key.pem", { "**/secrets/**" }), "double-star prefix matches nested dir")
@@ -4552,7 +4595,10 @@ end)();
   local clean_verify = clean_result.session.verify
   assert(clean_verify, "verify-clean: session.verify set")
   assert(not clean_verify.parse_error, "verify-clean: clean lua has no parse error")
-  assert(clean_verify.status == "ok" or clean_verify.status == "pending", "verify-clean: status ok or pending while externals run")
+  assert(
+    clean_verify.status == "ok" or clean_verify.status == "pending",
+    "verify-clean: status ok or pending while externals run"
+  )
 
   -- Synthetic parse-error path: inject a fake parse_error directly so the
   -- gate logic is exercised without relying on a syntactically broken lua
@@ -4774,13 +4820,13 @@ end)();
   local policy_path = policy_rules.path()
   vim.fn.mkdir(vim.fn.fnamemodify(policy_path, ":h"), "p")
   vim.fn.writefile({
-    '{',
+    "{",
     '  "version": 1,',
     '  "rules": [',
     '    { "match": "**/*.py", "max_changed_lines": 5, "allow_lanes": ["edit"] },',
     '    { "match": "fixed.py", "require_human": true }',
-    '  ]',
-    '}',
+    "  ]",
+    "}",
   }, policy_path)
 
   local py_small = policy_rules.evaluate("src/foo.py", "edit", { changed_lines = 3 })
@@ -4798,28 +4844,36 @@ end)();
   -- require_rationale_typed_by_user: the matched rule asks for a one-line
   -- justification at accept time, attached to the attribution entry.
   vim.fn.writefile({
-    '{',
+    "{",
     '  "version": 1,',
     '  "rules": [',
     '    { "match": "rationale-required.lua", "require_rationale_typed_by_user": true }',
-    '  ]',
-    '}',
+    "  ]",
+    "}",
   }, policy_path)
   local rationale_eval = policy_rules.evaluate("rationale-required.lua", "accept")
-  assert(rationale_eval.require_rationale_typed_by_user, "policy: require_rationale_typed_by_user surfaced in evaluate result")
+  assert(
+    rationale_eval.require_rationale_typed_by_user,
+    "policy: require_rationale_typed_by_user surfaced in evaluate result"
+  )
 
   local rationale_buf = vim.api.nvim_create_buf(true, false)
   vim.api.nvim_buf_set_name(rationale_buf, tmp .. "/rationale-required.lua")
   vim.api.nvim_buf_set_lines(rationale_buf, 0, -1, false, { "local x = 1" })
   vim.api.nvim_set_current_buf(rationale_buf)
   local rationale_diff = require("nvime.diff")
-  rationale_diff.start_session({
-    bufnr = rationale_buf,
-    line1 = 1,
-    line2 = 1,
-    path = "rationale-required.lua",
-    source = "test",
-  }, "RATIONALE: test\nNVIME_DIFF\n```diff\n--- a/rationale-required.lua\n+++ b/rationale-required.lua\n@@ -1,1 +1,1 @@\n-local x = 1\n+local x = 2\n```", "claude", "rationale-required")
+  rationale_diff.start_session(
+    {
+      bufnr = rationale_buf,
+      line1 = 1,
+      line2 = 1,
+      path = "rationale-required.lua",
+      source = "test",
+    },
+    "RATIONALE: test\nNVIME_DIFF\n```diff\n--- a/rationale-required.lua\n+++ b/rationale-required.lua\n@@ -1,1 +1,1 @@\n-local x = 1\n+local x = 2\n```",
+    "claude",
+    "rationale-required"
+  )
 
   -- Without a typed rationale (non-interactive), accept refuses.
   vim.env.NVIME_NONINTERACTIVE = "1"
@@ -4872,8 +4926,7 @@ end)();
 
   -- Questionable: enough words but no concrete pair
   local questionable = intent.classify("does this look right to you")
-  assert(questionable.verdict == "vague" or questionable.verdict == "questionable",
-    "review-shaped intent is not ok")
+  assert(questionable.verdict == "vague" or questionable.verdict == "questionable", "review-shaped intent is not ok")
 
   -- Ok: concrete verb + concrete object
   local ok_intent = intent.classify("rename foo() to bar() in users.py because the spec changed")
@@ -4960,8 +5013,7 @@ end)();
   assert(ok_install, "hooks: install succeeds (" .. tostring(install_err) .. ")")
   local status_after = hooks.status()
   assert(status_after.installed == true, "hooks: status reports installed=true")
-  assert(vim.fn.filereadable(repo .. "/.git/hooks/prepare-commit-msg") == 1,
-    "hooks: prepare-commit-msg file exists")
+  assert(vim.fn.filereadable(repo .. "/.git/hooks/prepare-commit-msg") == 1, "hooks: prepare-commit-msg file exists")
 
   -- Reinstall is idempotent
   local ok_reinstall = hooks.install()
@@ -4973,8 +5025,10 @@ end)();
   vim.fn.writefile({ "#!/usr/bin/env sh", "echo user-hook" }, repo .. "/.git/hooks/prepare-commit-msg")
   local ok_chain = hooks.install()
   assert(ok_chain, "hooks: install chains over a pre-existing hook")
-  assert(vim.fn.filereadable(repo .. "/.git/hooks/prepare-commit-msg.nvime-prev") == 1,
-    "hooks: previous hook moved aside")
+  assert(
+    vim.fn.filereadable(repo .. "/.git/hooks/prepare-commit-msg.nvime-prev") == 1,
+    "hooks: previous hook moved aside"
+  )
   local chain_status = hooks.status()
   assert(chain_status.chained == true, "hooks: status reports chained=true")
 
