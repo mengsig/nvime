@@ -37,8 +37,8 @@ local DEFAULT_MAX_DAYS = 90
 -- for Anthropic 5m and 2x for 1h. We store a single cache_creation rate per
 -- model for simplicity; users can override in config.
 local DEFAULT_RATES = {
-  ["claude-opus-4-7"] = { input = 15.0, output = 75.0, cache_read = 1.5, cache_creation = 18.75 },
-  ["claude-opus-4-7[1m]"] = { input = 15.0, output = 75.0, cache_read = 1.5, cache_creation = 18.75 },
+  ["claude-opus-4-8"] = { input = 15.0, output = 75.0, cache_read = 1.5, cache_creation = 18.75 },
+  ["claude-opus-4-8[1m]"] = { input = 15.0, output = 75.0, cache_read = 1.5, cache_creation = 18.75 },
   ["claude-sonnet-4-6"] = { input = 3.0, output = 15.0, cache_read = 0.3, cache_creation = 3.75 },
   ["claude-haiku-4-5"] = { input = 1.0, output = 5.0, cache_read = 0.1, cache_creation = 1.25 },
   ["claude-haiku-4-5-20251001"] = { input = 1.0, output = 5.0, cache_read = 0.1, cache_creation = 1.25 },
@@ -324,7 +324,7 @@ function M.record(opts)
   if state.disabled then
     return nil
   end
-  if (usage_config().enabled == false) then
+  if usage_config().enabled == false then
     return nil
   end
   opts = opts or {}
@@ -505,7 +505,7 @@ function M.open_panel()
     width = width,
     height = height,
     style = "minimal",
-    border = (((state.config or {}).ui or {}).border) or "rounded",
+    border = ((state.config or {}).ui or {}).border or "rounded",
     title = " nvime usage ",
     title_pos = "center",
     footer = " q close · r reset · cwd: " .. (((vim.uv or vim.loop).cwd()) or "") .. " ",
@@ -514,7 +514,8 @@ function M.open_panel()
   })
   vim.wo[winid].wrap = false
   vim.wo[winid].cursorline = false
-  vim.wo[winid].winhighlight = "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted"
+  vim.wo[winid].winhighlight =
+    "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted"
 
   panel_state.winid = winid
   panel_state.bufnr = bufnr
@@ -560,12 +561,7 @@ function M.run_summary(sample)
       fmt_usd(sample.cost_usd)
     )
   end
-  return string.format(
-    "↑%s out · ↓%s ctx · %s",
-    fmt_tokens(out),
-    fmt_tokens(new),
-    fmt_usd(sample.cost_usd)
-  )
+  return string.format("↑%s out · ↓%s ctx · %s", fmt_tokens(out), fmt_tokens(new), fmt_usd(sample.cost_usd))
 end
 
 return M
