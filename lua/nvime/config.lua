@@ -257,11 +257,13 @@ M.defaults = {
       blame = "b",
       usage = "u",
       quick_fix = "f",
+      send = "s",
     },
     visual = {
       edit = "e",
       ask = "q",
       quick_fix = "f",
+      send = "s",
     },
   },
   prompts = {

@@ -95,6 +95,18 @@ COMMANDS                                                        *nvime-commands*
         has been used in the current Neovim process, it opens the most recently
         updated persisted chat or selection discussion.
 
+                                                        *:NvimeSend*
+:NvimeSend
+:'<,'>NvimeSend
+        Stage the current file as an @path reference in the last-opened
+        conversation (the same target |:NvimeLast| / <leader>nn reopens),
+        appending to whatever is already in its input. In a netrw buffer it
+        sends the marked files, or the entry under the cursor when none are
+        marked. With a range (visual <leader>ns) it appends the highlighted
+        line span, e.g. `@lua/nvime/chat.lua (lines 10-25)`. References stay
+        cheap because the chat replays its full transcript every turn; the
+        agent reads the exact lines on demand.
+
                                                         *:NvimeAsk*
 :'<,'>NvimeAsk [claude|codex] {question}
 :NvimeAsk [claude|codex] {question}
@@ -328,6 +340,11 @@ Default keymaps use <leader>n:
         <leader>nd     discuss active inline diff state
         <leader>nv     open active diff review workspace
         <leader>nn     reopen last used nvime conversation
+        <leader>ns     send current file (or netrw marked files / entry under
+                       cursor) as an @path reference into that same conversation
+        visual <leader>ns
+                       send the highlighted line range, e.g.
+                       @path (lines 10-25)
         <leader>np     choose Claude or Codex
         <leader>nP     open the plan picker
 

@@ -1020,6 +1020,18 @@ function M.create(policy)
     end
   end
 
+  -- Flush a targeted repaint of a single window. Used after timer-driven
+  -- extmark updates, which otherwise don't reach the screen until some other
+  -- event (e.g. cursor movement) triggers a redraw.
+  local function force_redraw(winid)
+    if not winid or not vim.api.nvim_win_is_valid(winid) then
+      return
+    end
+    if vim.api.nvim__redraw then
+      pcall(vim.api.nvim__redraw, { win = winid, flush = true })
+    end
+  end
+
   refresh_input_indicator = function()
     local panel = state.panels[state_key]
     if not panel or not panel.bufnr or not vim.api.nvim_buf_is_valid(panel.bufnr) then
@@ -1045,9 +1057,15 @@ function M.create(policy)
         if not session or not session.busy or not open then
           stop_spinner_timer()
           refresh_input_indicator()
+          force_redraw(panel and panel.winid)
           return
         end
         refresh_input_indicator()
+        -- The status spinner lives in virt_lines extmarks. Unlike buffer-line
+        -- edits, extmark changes from a timer tick don't force a screen flush,
+        -- so the frame looks frozen until the next cursor move. Nudge the panel
+        -- window to repaint each tick.
+        force_redraw(panel.winid)
       end)
     end)
   end

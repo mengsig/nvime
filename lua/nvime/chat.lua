@@ -651,6 +651,26 @@ function M.insert_prompt(text)
   M.prompt({ cursor = "end" })
 end
 
+-- Append `text` to whatever is already staged in a chat's input, preserving
+-- the user's in-progress prompt. `session_id` targets a specific session (used
+-- by nvime.send to reach the last-opened conversation); omit to use the active
+-- one. Used by <leader>ns to stack @path references without clobbering it.
+function M.append_prompt(text, session_id)
+  text = vim.trim(text or "")
+  if text == "" then
+    return
+  end
+  if session_id and ctx.get_session(session_id) then
+    M.open_session(session_id)
+  else
+    M.open()
+  end
+  local existing = vim.trim(ctx.current_input_text() or "")
+  local combined = existing ~= "" and (existing .. "\n" .. text) or text
+  ctx.reset_input(combined, { force_follow = true })
+  M.prompt({ cursor = "end" })
+end
+
 function M.choose_prompt()
   prompts.choose("general", function(text)
     M.insert_prompt(text)

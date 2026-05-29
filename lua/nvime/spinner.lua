@@ -188,6 +188,13 @@ function M.update()
       hl_group = "NvimeMuted",
     })
   end
+
+  -- Timer-driven extmark/highlight updates don't force a screen flush on their
+  -- own, so the float can look frozen until the next redraw-triggering event.
+  -- Repaint the spinner window explicitly each tick.
+  if vim.api.nvim__redraw and panel.winid and vim.api.nvim_win_is_valid(panel.winid) then
+    pcall(vim.api.nvim__redraw, { win = panel.winid, flush = true })
+  end
 end
 
 function M.close()

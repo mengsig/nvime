@@ -73,17 +73,33 @@ local function visual_quick_fix()
   })
 end
 
-function M.open_last()
+local function visual_send()
+  vim.cmd.normal({ args = { "\27" }, bang = true })
+  local line1 = vim.fn.line("'<")
+  local line2 = vim.fn.line("'>")
+  if line1 > line2 then
+    line1, line2 = line2, line1
+  end
+  require("nvime.send").send_visual({
+    line1 = line1,
+    line2 = line2,
+  })
+end
+
+-- Resolve the most-recently-opened conversation across both lanes, mirroring
+-- what `state.last_session` records (panel.lua sets it on every open). Falls
+-- back to the newest session by `updated_at` when there's no live last_session.
+-- Returns { kind = "chat"|"selection", id = N } or nil. Shared by open_last
+-- (<leader>nn) and send (<leader>ns) so the two always agree on the target.
+function M.resolve_last()
   local chat = require("nvime.chat")
   local selection = require("nvime.selection")
   local last = state.last_session
   if last and last.kind == "chat" and chat.get_session(last.id) then
-    chat.open_session(last.id)
-    return
+    return { kind = "chat", id = last.id }
   end
   if last and last.kind == "selection" and selection.get_session(last.id) then
-    selection.open_session(last.id)
-    return
+    return { kind = "selection", id = last.id }
   end
 
   local latest = nil
@@ -101,12 +117,22 @@ function M.open_last()
     end
   end
 
-  if latest_kind == "chat" then
-    chat.open_session(latest.id)
-  elseif latest_kind == "selection" then
-    selection.open_session(latest.id)
-  else
+  if latest_kind then
+    return { kind = latest_kind, id = latest.id }
+  end
+  return nil
+end
+
+function M.open_last()
+  local target = M.resolve_last()
+  if not target then
     vim.notify("No nvime conversation to reopen", vim.log.levels.INFO)
+    return
+  end
+  if target.kind == "chat" then
+    require("nvime.chat").open_session(target.id)
+  else
+    require("nvime.selection").open_session(target.id)
   end
 end
 
@@ -195,9 +221,13 @@ local function install_keymaps()
   set_keymap("n", prefix .. (normal.quick_fix or "f"), function()
     require("nvime.edit").quick_fix()
   end, "nvime quick fix at cursor")
+  set_keymap("n", prefix .. (normal.send or "s"), function()
+    require("nvime.send").send()
+  end, "nvime send file(s) to chat")
   set_keymap("x", prefix .. (visual.edit or "e"), visual_edit, "nvime edit visual selection")
   set_keymap("x", prefix .. (visual.ask or "q"), visual_ask, "nvime ask about visual selection")
   set_keymap("x", prefix .. (visual.quick_fix or "f"), visual_quick_fix, "nvime quick fix visual selection")
+  set_keymap("x", prefix .. (visual.send or "s"), visual_send, "nvime send selection to chat")
 end
 
 local function parse_provider(args)
@@ -338,6 +368,18 @@ function M.setup(opts)
     nargs = "*",
     range = true,
     desc = "Ask the read-only nvime side agent about a selection or current function",
+  })
+
+  vim.api.nvim_create_user_command("NvimeSend", function(args)
+    local send = require("nvime.send")
+    if args.range and args.range > 0 then
+      send.send_visual({ line1 = args.line1, line2 = args.line2 })
+    else
+      send.send()
+    end
+  end, {
+    range = true,
+    desc = "Stage the current file (or netrw selection, or highlighted lines) as an @reference in the last chat",
   })
 
   vim.api.nvim_create_user_command("NvimeChat", function()

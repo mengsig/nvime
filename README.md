@@ -255,11 +255,13 @@ require("nvime").setup({
       blame = "b",
       usage = "u",
       quick_fix = "f",
+      send = "s",
     },
     visual = {
       edit = "e",
       ask = "q",
       quick_fix = "f",
+      send = "s",
     },
   },
   prompts = {
@@ -309,6 +311,10 @@ require("nvime").setup({
   review is already running, `<leader>nr` opens the picker instead of stacking a
   duplicate prompt onto the live session.
 - `:NvimeLast` reopens the last used general chat or Ask/Edit discussion.
+- `:NvimeSend` stages the current file as an `@path` reference in the last-opened
+  conversation. In netrw it sends the marked files (or the entry under the
+  cursor); with a range (`:'<,'>NvimeSend`) it appends the highlighted line span,
+  e.g. `@lua/nvime/chat.lua (lines 10-25)`.
 - `:NvimeAsk [claude|codex] <question>` asks the read-only side agent about the visual range or current function.
 - `:'<,'>NvimeEdit [claude|codex] <intent>` asks for a reviewed edit for the visual range.
 - `:NvimeEdit [claude|codex] <intent>` uses the Tree-sitter function at the cursor.
@@ -434,6 +440,9 @@ Inside the chat window:
 - `<leader>nu`: open the token + cost usage dashboard
 - `<leader>nf`: quick fix at cursor
 - visual `<leader>nf`: quick fix visual selection
+- `<leader>ns`: send the current file (or netrw marked files / entry under the
+  cursor) as an `@path` reference into the last-opened conversation
+- visual `<leader>ns`: send the highlighted line range, e.g. `@path (lines 10-25)`
 
 Use `NvimeAsk` for questions such as "does this look right?" or "what does
 this do?". Use `NvimeEdit` only when you want a concrete patch. If the edit
