@@ -106,10 +106,11 @@ local function window_config(mode)
   local panel = state.panels.chats or {}
   mode = mode or (panel.mode == "dashboard" and "dashboard" or panel.mode)
   local dim = dimensions(mode)
-  local footer = " 1-9 open | <CR> open | n new | R rename | dd delete | r refresh | ? help | q close "
+  local footer = " <CR> open · n new · R rename · dd delete · r refresh · ? help · q close "
   if mode == "dashboard" then
-    footer = " (1)-(5) tabs | <CR> open | n new | a ask | e edit | R rename | dd delete | r refresh | ? help | q close "
+    footer = " <CR> open · n new · a ask · e edit · R rename · dd delete · ? help · q close "
   end
+  local brand = ui.icon("brand")
   return {
     relative = "editor",
     width = dim.width,
@@ -118,7 +119,7 @@ local function window_config(mode)
     col = dim.col,
     style = "minimal",
     border = dim.border,
-    title = mode == "dashboard" and " nvime.nvim " or " nvime command center ",
+    title = mode == "dashboard" and (" " .. brand .. "  nvime · command center ") or (" " .. brand .. "  nvime "),
     title_pos = "center",
     footer = footer,
     footer_pos = "center",
@@ -127,15 +128,10 @@ local function window_config(mode)
 end
 
 local function configure_window(winid)
-  vim.wo[winid].wrap = false
-  vim.wo[winid].number = false
-  vim.wo[winid].relativenumber = false
-  vim.wo[winid].signcolumn = "no"
-  vim.wo[winid].cursorline = true
-  vim.wo[winid].spell = false
-  vim.wo[winid].winblend = 0
-  vim.wo[winid].winhighlight =
-    "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted,CursorLine:NvimeCursorLine"
+  -- Shared panel chrome (wrap off so dashboard rows don't reflow; cursorline on
+  -- so the selected row is obvious). The empty signcolumn pads the left edge
+  -- without shifting buffer columns, so render()'s absolute extmarks are safe.
+  ui.configure_panel_window(winid, { wrap = false, cursorline = true })
 end
 
 local function close_backdrop()
@@ -380,57 +376,52 @@ local function add_mark(marks, row, start_col, end_col, hl_group)
   }
 end
 
-local function centered_prefix(text, width)
-  return string.rep(" ", math.max(0, math.floor((width - #text) / 2)))
-end
-
-local function add_centered_blocks(lines, marks, parts, width)
-  local text = ""
-  for _, part in ipairs(parts) do
-    text = text .. part[1]
-  end
-  local prefix = centered_prefix(text, width)
-  local row = #lines + 1
-  lines[row] = prefix .. text
-  local offset = #prefix
-  for _, part in ipairs(parts) do
-    local value = part[1]
-    add_mark(marks, row, offset, offset + #value, part[2])
-    offset = offset + #value
-  end
-  return row
-end
-
-local function add_centered_text(lines, marks, text, width, hl_group)
-  local row = #lines + 1
-  local prefix = centered_prefix(text, width)
-  lines[row] = prefix .. text
-  if hl_group then
-    add_mark(marks, row, #prefix, #prefix + #text, hl_group)
-  end
-  return row
-end
-
 local function dashboard_tab()
   local panel = state.panels.chats or {}
   return panel.tab or "all"
 end
 
+local function add_rule(lines, marks, width)
+  local row = #lines + 1
+  local rule = string.rep("─", math.max(8, width - 1))
+  lines[row] = rule
+  add_mark(marks, row, 0, #rule, "NvimeRule")
+  return row
+end
+
+-- A left-aligned application title bar: brand mark + name on the left, version
+-- chip pushed to the right edge, an optional context subtitle, then a full
+-- width hairline. Reads like a real app header instead of centered terminal
+-- text. Padding is computed in display cells (Nerd glyphs aren't 1 byte) while
+-- extmark columns use byte offsets.
 local function add_branded_header(lines, marks, subtitle)
   local width = render_width()
-  add_centered_blocks(lines, marks, {
-    { " nvime.nvim ", "NvimeHeaderBlock" },
-    { " " .. version.label() .. " ", "NvimeHeaderBlockSecondary" },
-  }, width)
-  add_centered_blocks(lines, marks, {
-    { "press ", "NvimeMuted" },
-    { " ? ", "NvimeKey" },
-    { " for help", "NvimeMuted" },
-  }, width)
+  local brand = ui.icon("brand")
+  local name = brand .. "  nvime"
+  local ver = " " .. version.label() .. " "
+  local gap = math.max(2, width - vim.fn.strdisplaywidth(name) - vim.fn.strdisplaywidth(ver) - 1)
+  local row = #lines + 1
+  local line = name .. string.rep(" ", gap) .. ver
+  lines[row] = line
+  add_mark(marks, row, 0, #brand, "NvimeSection") -- brand glyph (cyan)
+  add_mark(marks, row, #brand, #name, "NvimeHeader") -- "  nvime" (bright)
+  add_mark(marks, row, #name + gap, #line, "NvimeBadgeMuted") -- version chip
   if subtitle and subtitle ~= "" then
-    add_centered_text(lines, marks, subtitle, width, "NvimeMuted")
+    local sub_row = #lines + 1
+    lines[sub_row] = subtitle
+    add_mark(marks, sub_row, 0, #subtitle, "NvimeMuted")
   end
+  add_rule(lines, marks, width)
 end
+
+-- Leading glyph per dashboard section header (keyed by the section label).
+local SECTION_ICONS = {
+  ["Actions"] = "brand",
+  ["General Conversations"] = "chat",
+  ["Selection Discussions"] = "selection",
+  ["Keymaps"] = "key",
+  ["Panels"] = "review",
+}
 
 local function add_dashboard_tabs(lines, marks)
   local active = dashboard_tab()
@@ -836,10 +827,25 @@ local function render(bufnr)
     })
   end
   for _, row in ipairs(section_rows) do
+    local label = lines[row] or ""
+    -- Full-width subtle band so each section reads as a card header, plus an
+    -- inline leading icon. The band is a line bg; the cyan label fg is layered
+    -- on top, and the count mark / icon ride alongside.
     vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
-      end_col = #(lines[row] or ""),
+      line_hl_group = "NvimeSectionBand",
+    })
+    vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
+      end_col = #label,
       hl_group = row == 1 and "NvimeHeader" or "NvimeSection",
     })
+    local icon_name = SECTION_ICONS[vim.trim(label)]
+    local icon = icon_name and ui.icon(icon_name) or ""
+    if icon ~= "" then
+      vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
+        virt_text = { { icon .. "  ", "NvimeSection" } },
+        virt_text_pos = "inline",
+      })
+    end
   end
   for _, mark in ipairs(count_marks) do
     vim.api.nvim_buf_set_extmark(bufnr, ns, mark.row - 1, #(lines[mark.row] or ""), {

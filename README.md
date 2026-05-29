@@ -110,6 +110,7 @@ require("nvime").setup({
     border = "rounded",
     backdrop = 60, -- false disables the dimmed dashboard backdrop
     completion = "notify", -- "notify" or "open" when a hidden agent finishes
+    nerd_font = true, -- Nerd Font glyphs (set false for geometric Unicode only)
     ascii_icons = false, -- set true for terminals without glyph support
     icons = {}, -- optional per-icon overrides
     spinner_frames = nil, -- optional custom frame list for running agents
@@ -302,8 +303,11 @@ require("nvime").setup({
   selection discussions, running state, tabs, and action rows.
 - `:NvimeChat` opens the picker for general chat/review conversations.
 - `:NvimeChats [chat|ask|edit]` opens the picker for general chat or highlighted-code Ask/Edit discussions.
-- `:NvimeReview [claude|codex] [prompt]` runs a review/docs session and includes
-  the current worktree diff by default.
+- `:NvimeReview [claude|codex] [prompt]` opens a review/docs session and *stages*
+  the prompt in the input — edit it, then `<CR>` to send. Append `!`
+  (`:NvimeReview!`) to launch immediately with the current worktree diff. If a
+  review is already running, `<leader>nr` opens the picker instead of stacking a
+  duplicate prompt onto the live session.
 - `:NvimeLast` reopens the last used general chat or Ask/Edit discussion.
 - `:NvimeAsk [claude|codex] <question>` asks the read-only side agent about the visual range or current function.
 - `:'<,'>NvimeEdit [claude|codex] <intent>` asks for a reviewed edit for the visual range.
@@ -413,7 +417,8 @@ Inside the chat window:
 
 - `<leader>n<Space>`: open the dashboard command center
 - `<leader>nc`: open the general chat conversation picker
-- `<leader>nr`: run review/docs
+- `<leader>nr`: stage a review/docs prompt (edit, then `<CR>` to send; opens the
+  picker if a review is already running)
 - `<leader>nq`: open the highlighted-code discussions picker
 - visual `<leader>nq`: ask about selected code
 - `<leader>ne`: open the highlighted-code discussions picker

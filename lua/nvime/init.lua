@@ -307,10 +307,13 @@ function M.setup(opts)
   end)
 
   vim.api.nvim_create_user_command("NvimeReview", function(args)
-    require("nvime.review").start(command_opts(args))
+    local opts = command_opts(args)
+    opts.submit = args.bang -- `:NvimeReview!` launches immediately; bare stages the prompt
+    require("nvime.review").start(opts)
   end, {
     nargs = "*",
-    desc = "Run an nvime review/docs lane through Claude or Codex",
+    bang = true,
+    desc = "Stage an nvime review/docs prompt (append ! to launch immediately)",
   })
 
   vim.api.nvim_create_user_command("Nvime", function()

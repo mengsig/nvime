@@ -132,7 +132,7 @@ local dashboard_panel = require("nvime.state").panels.chats
 assert(dashboard_panel and vim.api.nvim_win_is_valid(dashboard_panel.winid), "Nvime opens the command center")
 assert(dashboard_panel.mode == "dashboard", "Nvime command center uses dashboard mode")
 local dashboard_lines = table.concat(vim.api.nvim_buf_get_lines(dashboard_panel.bufnr, 0, -1, false), "\n")
-assert(dashboard_lines:find("nvime.nvim", 1, true), "dashboard has branded heading")
+assert(dashboard_lines:find("nvime", 1, true), "dashboard has branded heading")
 assert(dashboard_lines:find("(1) All", 1, true), "dashboard exposes Mason-style tabs")
 assert(dashboard_lines:find("Actions", 1, true), "dashboard exposes action rows")
 assert(
@@ -4022,18 +4022,18 @@ end)();
   assert(has_hl_at(tests_row, "NvimePlanMetaLabel"), "plan view: tests label gets NvimePlanMetaLabel")
   assert(has_hl_at(notes_row, "NvimePlanMetaLabel"), "plan view: notes label gets NvimePlanMetaLabel")
 
-  -- Section heading marker is dimmed separately from the heading body.
+  -- Section heading: an icon-led "WHY" row carrying the heading highlight.
   local why_heading_row = nil
   for i, line in ipairs(lines) do
-    if line:find("▎ WHY", 1, true) then
+    if line:find("WHY%s*$") then
       why_heading_row = i - 1
       break
     end
   end
   assert(why_heading_row, "plan view: WHY section heading present")
   assert(
-    has_hl_at(why_heading_row, "NvimePlanHeadingMarker"),
-    "plan view: WHY heading marker gets NvimePlanHeadingMarker"
+    has_hl_at(why_heading_row, "NvimePlanHeading"),
+    "plan view: WHY heading row gets NvimePlanHeading"
   )
 
   -- Step file/range row separates the path from the L<n>-<m> label.

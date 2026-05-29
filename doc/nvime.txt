@@ -80,10 +80,14 @@ COMMANDS                                                        *nvime-commands*
         conversation.
 
                                                         *:NvimeReview*
-:NvimeReview [claude|codex] [prompt]
-        Run a review/docs lane. The agent may inspect context, run shell
-        commands when configured, and write Markdown documentation files. nvime
-        does not apply source/config edits from this lane.
+:NvimeReview[!] [claude|codex] [prompt]
+        Open a review/docs lane and stage the prompt in the input, ready to
+        edit and send with <CR> — nothing runs until you confirm. Append ! to
+        launch immediately (and include the current worktree diff). If a review
+        is already running, the command opens the picker instead of injecting a
+        duplicate prompt into the live session. The agent may inspect context,
+        run shell commands when configured, and write Markdown documentation
+        files; nvime does not apply source/config edits from this lane.
 
                                                         *:NvimeLast*
 :NvimeLast
@@ -313,7 +317,7 @@ Default keymaps use <leader>n:
         <leader>n<Space>
                        open dashboard command center
         <leader>nc     open general chat conversation picker
-        <leader>nr     run review/docs
+        <leader>nr     stage a review/docs prompt (<CR> to send)
         <leader>nq     ask picker: new current-function session or old chat
         visual <leader>nq
                        ask about selected range
@@ -407,6 +411,7 @@ Common options:
             layout = "float",
             side = "right",
             completion = "notify",
+            nerd_font = true,
             ascii_icons = false,
             icons = {},
             spinner_frames = nil,

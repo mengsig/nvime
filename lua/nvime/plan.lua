@@ -584,15 +584,20 @@ local function progress_bar(plan, width)
     blocked = math.max(0, width - done - active)
   end
   local pending = math.max(0, width - done - active - blocked)
+  -- Solid blocks for everything that has happened (done / active / blocked);
+  -- colour alone separates the segments, which reads cleaner than mixing
+  -- block shades (█▓▒) that look like dithering. The remaining track stays a
+  -- light ░ so the bar's full width — and thus overall progress — is legible.
   local segments = {}
-  if done > 0 then
-    segments[#segments + 1] = { string.rep("█", done), "NvimePlanProgressFill" }
-  end
-  if active > 0 then
-    segments[#segments + 1] = { string.rep("▓", active), "NvimePlanProgressActive" }
-  end
-  if blocked > 0 then
-    segments[#segments + 1] = { string.rep("▒", blocked), "NvimePlanStepBlocked" }
+  local filled = {
+    { done, "NvimePlanProgressFill" },
+    { active, "NvimePlanProgressActive" },
+    { blocked, "NvimePlanStepBlocked" },
+  }
+  for _, seg in ipairs(filled) do
+    if seg[1] > 0 then
+      segments[#segments + 1] = { string.rep("█", seg[1]), seg[2] }
+    end
   end
   if pending > 0 then
     segments[#segments + 1] = { string.rep("░", pending), "NvimePlanProgressTrack" }
@@ -611,6 +616,15 @@ local function pad_right(text, width)
     return text
   end
   return text .. string.rep(" ", width - visible)
+end
+
+-- Lead marker for a heading row: the named icon followed by `pad` trailing
+-- spaces, or the "▎ " bar fallback when icons are disabled (ui.icon → ""). One
+-- place for the glyph-or-bar rule so the plan/picker headers and section
+-- headings can't drift apart.
+local function glyph_or_bar(name, pad)
+  local icon = ui.icon(name)
+  return icon ~= "" and (icon .. pad) or "▎ "
 end
 
 -- Forward declarations needed by render_plan and friends. Defined later in
@@ -691,15 +705,12 @@ local function render_plan_lines(plan)
     push("  " .. string.rep("─", 76), "NvimePlanRule")
   end
 
-  -- Section heading like "  ▎ WHY". Dim the leading "▎ " marker so the
-  -- text reads as the header, mirroring how render.scrollback dims the
-  -- `#` markers on H1..H6. Indent prefix is preserved as-is.
-  local function push_section(label, prefix)
-    prefix = prefix or "  "
-    local marker = "▎ "
-    local row = push(prefix .. marker .. label, "NvimePlanHeading")
-    mark_range(row, #prefix, #prefix + #marker, "NvimePlanHeadingMarker", 250)
-    return row
+  -- Section heading like "   WHY", led by a Nerd Font section glyph (falls
+  -- back to the "▎" bar glyph when icons are disabled). The whole row carries
+  -- the heading colour so the icon reads as part of the section marker.
+  local SECTION_ICONS = { WHY = "ask", ACCEPTANCE = "success", FILES = "folder", STEPS = "list" }
+  local function push_section(label)
+    return push("  " .. glyph_or_bar(SECTION_ICONS[label] or "review", "  ") .. label, "NvimePlanHeading")
   end
 
   local title = plan.title or plan.id or "(unnamed plan)"
@@ -709,15 +720,14 @@ local function render_plan_lines(plan)
   local updated_label = updated and ui.relative_time(updated) or "new"
 
   push_blank()
-  -- Header line: "  ▎  PLAN  0001-audit-prune                           v0.3.0  •  updated 5m"
+  -- Header line: " 󰚩  PLAN  0001-audit-prune " led by the brand glyph, with the
+  -- id rendered as a badge chip.
+  local brand_glyph = glyph_or_bar("brand", " ")
   local id_label = " " .. (plan.id or "?") .. " "
-  local label = "  ▎  PLAN " .. id_label
-  local row = push(label, "NvimePlanHeading")
-  -- Dim the leading "  ▎  " gutter glyph so the eye reads the PLAN word
-  -- as the headline, matching push_section() on later headings.
-  mark_range(row, 2, 5, "NvimePlanHeadingMarker", 250)
-  -- Color the id segment as a badge
-  local prefix = "  ▎  PLAN "
+  local prefix = "  " .. brand_glyph .. " PLAN "
+  local row = push(prefix .. id_label, "NvimePlanHeading")
+  -- Accent the brand glyph (cyan), then the id chip as a badge.
+  mark_range(row, 2, 2 + #brand_glyph, "NvimeSection", 250)
   mark_range(row, #prefix, #prefix + #id_label, "NvimePlanBadgeKey")
   -- Title line
   push("  " .. title, "NvimePlanIntent")
@@ -888,20 +898,15 @@ local function render_plan_lines(plan)
 end
 
 local function configure_window(winid)
-  vim.wo[winid].wrap = true
-  vim.wo[winid].number = false
-  vim.wo[winid].relativenumber = false
-  vim.wo[winid].signcolumn = "no"
-  vim.wo[winid].cursorline = true
-  vim.wo[winid].spell = false
-  vim.wo[winid].winblend = 0
-  vim.wo[winid].winhighlight =
-    "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted,CursorLine:NvimeCursorLine"
+  -- Shared panel chrome (wrap on for long plan prose; cursorline on for the
+  -- selected step/row; signcolumn pads the left edge into a card).
+  ui.configure_panel_window(winid, { wrap = true, cursorline = true })
 end
 
 local function open_plan_window(bufnr, title)
   local existing = state.panels.plan
   local dim = dimensions()
+  local brand = ui.icon("brand")
   local config = {
     relative = "editor",
     width = dim.width,
@@ -910,9 +915,9 @@ local function open_plan_window(bufnr, title)
     col = dim.col,
     style = "minimal",
     border = dim.border,
-    title = " " .. title .. " ",
+    title = " " .. brand .. "  " .. title .. " ",
     title_pos = "center",
-    footer = " <CR> exec  gx done  ]s/[s nav  gd discuss  gr replan  q close ",
+    footer = " <CR> exec · gx done · ]s/[s nav · gd discuss · gr replan · q close ",
     footer_pos = "center",
     zindex = 54,
     focusable = true,
@@ -3367,7 +3372,9 @@ refresh_picker = function()
   end
 
   push("")
-  push("  ▎  PLANS ", "NvimePlanHeading")
+  local brand_glyph = glyph_or_bar("brand", " ")
+  local header_row = push("  " .. brand_glyph .. " PLANS ", "NvimePlanHeading")
+  mark_range(header_row, 2, 2 + #brand_glyph, "NvimeSection")
   push(string.format("  %d plan(s) in %s", #plans, plans_dir()), "NvimePlanWhy")
   push("  " .. string.rep("─", 76), "NvimePlanRule")
   push("")
@@ -3597,6 +3604,7 @@ end
 function M.picker()
   local bufnr = picker_buffer()
   local dim = dimensions()
+  local brand = ui.icon("brand")
   local config = {
     relative = "editor",
     width = dim.width,
@@ -3605,9 +3613,9 @@ function M.picker()
     col = dim.col,
     style = "minimal",
     border = dim.border,
-    title = " nvime plans ",
+    title = " " .. brand .. "  nvime plans ",
     title_pos = "center",
-    footer = " <CR> open  n new  R refine  dd delete  r refresh  q close ",
+    footer = " <CR> open · n new · R refine · dd delete · r refresh · q close ",
     footer_pos = "center",
     zindex = 54,
     focusable = true,

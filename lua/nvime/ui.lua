@@ -4,11 +4,45 @@ local M = {}
 
 local highlight_pending = false
 
-local ICONS = {
+-- Three icon tiers, selected by config (see M.icon):
+--   1. NERD_ICONS  — Nerd Font glyphs (default). The state-of-the-art look;
+--      every glyph is a stable FontAwesome-4 codepoint (U+F0xx–U+F1xx) that
+--      Nerd Fonts have carried unchanged across v2/v3, so no tofu on a real
+--      Nerd Font.
+--   2. UNICODE_ICONS — geometric Unicode (ui.nerd_font = false). Works in any
+--      terminal with decent Unicode coverage, no Nerd Font required.
+--   3. ASCII_ICONS — pure ASCII (ui.ascii_icons = true). The last-resort
+--      fallback for minimal terminals.
+-- Nerd Font glyphs are written as \u{...} escapes, not literal bytes: the
+-- codepoints live in the Private Use Area and several tools mangle raw PUA
+-- bytes. The escapes are plain ASCII in source and decode to the real glyph at
+-- runtime (LuaJIT). Every codepoint is a stable FontAwesome-4 mapping.
+local NERD_ICONS = {
+  active = "\u{f111}", -- filled circle (busy)
+  idle = "\u{f10c}", -- hollow circle
+  success = "\u{f00c}", -- check
+  pending = "\u{f192}", -- dot-circle (in progress)
+  error = "\u{f00d}", -- times
+  warning = "\u{f071}", -- warning triangle
+  chat = "\u{f075}", -- comment
+  selection = "\u{f121}", -- code range
+  ask = "\u{f059}", -- question circle
+  edit = "\u{f040}", -- pencil
+  review = "\u{f06e}", -- eye
+  resume = "\u{f021}", -- refresh
+  local_session = "\u{f015}", -- home (local, not resumed)
+  new = "\u{f067}", -- plus
+  key = "\u{f054}", -- chevron (key hint pointer)
+  brand = "\u{f0e7}", -- bolt — the nvime mark
+  folder = "\u{f07b}", -- folder (files)
+  list = "\u{f03a}", -- list (steps)
+}
+
+local UNICODE_ICONS = {
   active = "●",
   idle = "○",
   success = "✓",
-  pending = "…",
+  pending = "◐",
   error = "✕",
   warning = "!",
   chat = "◈",
@@ -20,6 +54,9 @@ local ICONS = {
   local_session = "•",
   new = "+",
   key = "›",
+  brand = "◆",
+  folder = "▸",
+  list = "≡",
 }
 
 local ASCII_ICONS = {
@@ -38,63 +75,105 @@ local ASCII_ICONS = {
   local_session = ".",
   new = "+",
   key = ">",
+  brand = "*",
+  folder = ">",
+  list = "=",
+}
+
+-- nvime palette. A single cohesive dark scheme (Tokyo-Night-Moon lineage):
+-- a cool blue-tinted base with depth, harmonised accents tuned for legibility
+-- against the panel background, and a clear semantic role for every hue. All
+-- decoration groups below map through this table so the look stays consistent
+-- across the dashboard, plan, diff, and chat surfaces — and so retuning is a
+-- one-line change instead of a hex-hunt across the file.
+local C = {
+  -- Surfaces (deepest → most elevated)
+  backdrop = "#15161e", -- dim layer behind floats
+  bg = "#1a1b26", -- normal panel background
+  bg_input = "#1e2030", -- input / code surfaces (slightly raised)
+  bg_band = "#222436", -- heading band, badge-muted, raised chips
+  bg_cursor = "#2f334d", -- cursor line / selected row
+
+  -- Structure
+  border = "#545c7e", -- float border (soft but legible)
+  rule = "#2d3149", -- dividers / horizontal rules
+  faint = "#3b4261", -- markers, punctuation, faint glyphs
+
+  -- Text
+  fg = "#c8d3f5", -- primary body text
+  fg_bright = "#e4e9f7", -- emphasis / bright body (strong, intent)
+  fg_dim = "#a9b1d6", -- secondary text
+  muted = "#828bb8", -- meta / muted labels
+  comment = "#636da6", -- ghost text / urls / deep mute
+
+  -- Accents
+  blue = "#82aaff",
+  cyan = "#86e1fc",
+  teal = "#4fd6be",
+  green = "#c3e88d",
+  yellow = "#ffc777",
+  orange = "#ff966c",
+  red = "#ff757f",
+  magenta = "#c099ff",
+
+  -- Accent washes (saturated fg over a tinted bg)
+  add_bg = "#22332b",
+  del_bg = "#3a2230",
+  hunk_bg = "#2d3149",
+  warn_bg = "#332b18",
 }
 
 local function define_highlights()
-  vim.api.nvim_set_hl(0, "NvimeNormal", { bg = "#0b0d12", fg = "#d7dde8", default = true })
-  vim.api.nvim_set_hl(0, "NvimeBackdrop", { bg = "#000000", default = true })
-  vim.api.nvim_set_hl(0, "NvimeBorder", { fg = "#8b919e", default = true })
-  vim.api.nvim_set_hl(0, "NvimeTitle", { fg = "#dca561", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeSubtitle", { fg = "#a8b4c7", default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputNormal", { bg = "#101319", fg = "#d7dde8", default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputBorder", { fg = "#8b919e", default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputStatus", { fg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputPrompt", { fg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeInputGhost", { fg = "#566075", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeHeader", { fg = "#d7dde8", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeHeaderBlock", { fg = "#222222", bg = "#dca561", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeHeaderBlockSecondary", { fg = "#10141d", bg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeSection", { fg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeHighlightBlock", { fg = "#10141d", bg = "#56b6c2", default = true })
-  vim.api.nvim_set_hl(0, "NvimeHighlightBlockBold", { fg = "#10141d", bg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMutedBlock", { fg = "#10141d", bg = "#888888", default = true })
-  vim.api.nvim_set_hl(0, "NvimeMutedBlockBold", { fg = "#10141d", bg = "#888888", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeTabActive", { fg = "#56b6c2", bold = true, underline = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeTabInactive", { fg = "#6f7a92", default = true })
-  vim.api.nvim_set_hl(0, "NvimeTabFaint", { fg = "#424b5e", default = true })
-  vim.api.nvim_set_hl(0, "NvimeStatus", { fg = "#8bdc7c", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeStatusIdle", { fg = "#6f7a92", default = true })
-  vim.api.nvim_set_hl(0, "NvimeStatusRunning", { fg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeStatusSuccess", { fg = "#8bdc7c", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeStatusWarn", { fg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeStatusError", { fg = "#ff6b7a", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeHelp", { fg = "#56b6c2", default = true })
-  vim.api.nvim_set_hl(0, "NvimeKey", { fg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeRule", { fg = "#2f3540", default = true })
-  vim.api.nvim_set_hl(0, "NvimeMuted", { fg = "#6f7a92", default = true })
-  vim.api.nvim_set_hl(0, "NvimeFaint", { fg = "#424b5e", default = true })
-  vim.api.nvim_set_hl(0, "NvimePrompt", { fg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeUserText", { fg = "#d7dde8", default = true })
-  vim.api.nvim_set_hl(0, "NvimeAgent", { fg = "#c8d26a", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeExit", { fg = "#6f7a92", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownHeading", { fg = "#7be0ed", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeNormal", { bg = C.bg, fg = C.fg, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBackdrop", { bg = C.backdrop, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBorder", { fg = C.border, default = true })
+  vim.api.nvim_set_hl(0, "NvimeTitle", { fg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeSubtitle", { fg = C.fg_dim, default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputNormal", { bg = C.bg_input, fg = C.fg, default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputBorder", { fg = C.border, default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputStatus", { fg = C.cyan, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputPrompt", { fg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeInputGhost", { fg = C.comment, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHeader", { fg = C.fg, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHeaderBlock", { fg = C.bg, bg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHeaderBlockSecondary", { fg = C.bg, bg = C.cyan, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeSection", { fg = C.cyan, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeSectionBand", { bg = C.bg_band, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHighlightBlock", { fg = C.bg, bg = C.cyan, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHighlightBlockBold", { fg = C.bg, bg = C.cyan, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMutedBlock", { fg = C.bg, bg = C.muted, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMutedBlockBold", { fg = C.bg, bg = C.muted, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeTabActive", { fg = C.cyan, bold = true, underline = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeTabInactive", { fg = C.muted, default = true })
+  vim.api.nvim_set_hl(0, "NvimeTabFaint", { fg = C.faint, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatus", { fg = C.green, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusIdle", { fg = C.muted, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusRunning", { fg = C.blue, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusSuccess", { fg = C.green, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusWarn", { fg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeStatusError", { fg = C.red, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeHelp", { fg = C.cyan, default = true })
+  vim.api.nvim_set_hl(0, "NvimeKey", { fg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRule", { fg = C.rule, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMuted", { fg = C.muted, default = true })
+  vim.api.nvim_set_hl(0, "NvimeFaint", { fg = C.faint, default = true })
+  vim.api.nvim_set_hl(0, "NvimePrompt", { fg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeUserText", { fg = C.fg, default = true })
+  vim.api.nvim_set_hl(0, "NvimeAgent", { fg = C.teal, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeExit", { fg = C.muted, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownHeading", { fg = C.cyan, bold = true, default = true })
   -- Heading hierarchy: H1 brightest + bold, H2/H3 saturated, H4+ italic.
   -- Markers (`#`, `##`, …) stay visible — we color them muted so structure is
-  -- legible without hiding any text. Each heading also gets a subtle
-  -- background tint so the line stands out from surrounding prose without
-  -- needing an explicit blank line above it.
-  -- Headings use foreground hue + bold for differentiation. We dropped
-  -- per-level coloured backgrounds because, combined with the rule line
-  -- and the inline-span chips on the same row, the panel looked busy.
-  -- A single shared subtle bg on H1/H2/H3 still gives the heading row
-  -- its own band without injecting hue.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH1", { fg = "#ffd07a", bg = "#141821", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH2", { fg = "#7be0ed", bg = "#141821", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH3", { fg = "#9ef0d8", bg = "#141821", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH4", { fg = "#c0c8d8", bold = true, italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH5", { fg = "#a8b4c7", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownH6", { fg = "#8b919e", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownHeadingMarker", { fg = "#3f4858", default = true })
+  -- legible without hiding any text. H1/H2/H3 share a single subtle band so
+  -- the heading row gets its own register without injecting per-level hue
+  -- backgrounds (which read as busy next to the rule line and inline chips).
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH1", { fg = C.yellow, bg = C.bg_band, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH2", { fg = C.cyan, bg = C.bg_band, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH3", { fg = C.teal, bg = C.bg_band, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH4", { fg = C.fg_dim, bold = true, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH5", { fg = C.muted, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownH6", { fg = C.comment, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownHeadingMarker", { fg = C.faint, default = true })
   -- Strong / emphasis / inline-code show up MANY times per agent reply.
   -- If each one carries a saturated colour, the panel reads as visual
   -- chaos — every other word is a different highlight. Keep them subtle:
@@ -108,77 +187,76 @@ local function define_highlights()
   -- groups; users who really want a custom look can `:hi NvimeMarkdown*`
   -- after setup() returns and our ColorScheme autocmd preserves it via
   -- the same definition cycle.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = "#e9eef6", bold = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = "#b8c0d0", italic = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownStrike", { fg = "#6f7a92", strikethrough = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownStrong", { fg = C.fg_bright, bold = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownEmphasis", { fg = C.fg_dim, italic = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownStrike", { fg = C.muted, strikethrough = true })
   -- Inline code: foreground-only signal (no chip background) so we can't
   -- conflict with a colorscheme that defines a red bg, with hardware
-  -- rendering our dark-navy as muddy red, or with overlays. fg + italic
-  -- reads as code; italic differentiates from emphasis-italic by colour.
-  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = "#9bb3d4", italic = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownLinkText", { fg = "#7be0ed", underline = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownLinkUrl", { fg = "#566075", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeMarkdownPunct", { fg = "#3f4858", default = true })
+  -- rendering our dark-navy as muddy red, or with overlays. teal + italic
+  -- reads as code and stays distinct from emphasis-italic (dim) and
+  -- links (cyan + underline) by both hue and decoration.
+  vim.api.nvim_set_hl(0, "NvimeMarkdownInlineCode", { fg = C.teal, italic = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownLinkText", { fg = C.cyan, underline = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownLinkUrl", { fg = C.comment, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeMarkdownPunct", { fg = C.faint, default = true })
   -- Bullets / numbered list markers: muted accent so they delineate
   -- structure without competing with the content. Saturated bright was
   -- overwhelming when every list item lit up.
-  vim.api.nvim_set_hl(0, "NvimeBullet", { fg = "#7c8aa6", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeBulletNumber", { fg = "#7c8aa6", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeQuote", { fg = "#c099ff", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeQuoteGutter", { fg = "#9b73e0", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeCodeFence", { fg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeCodeLang", { fg = "#dca561", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeCode", { fg = "#ccd6e3", bg = "#11151d", default = true })
+  vim.api.nvim_set_hl(0, "NvimeBullet", { fg = C.muted, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBulletNumber", { fg = C.muted, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeQuote", { fg = C.magenta, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeQuoteGutter", { fg = C.magenta, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeCodeFence", { fg = C.teal, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeCodeLang", { fg = C.yellow, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeCode", { fg = C.fg_dim, bg = C.bg_input, default = true })
   -- Diff add / delete backgrounds need to be unambiguously green / red:
   -- the user reads them at a glance to tell additions from deletions.
-  -- Earlier values (#16231b / #28191f) were so dim and desaturated that
-  -- on many displays they read as plain gray, making accept/reject
-  -- decisions confusing. Force-set with no `default = true` so a user
-  -- colorscheme that links these custom group names can never paint
-  -- them gray or red-where-it-should-be-green.
-  vim.api.nvim_set_hl(0, "NvimeDiffAdd", { fg = "#b8e8a8", bg = "#1f3a25" })
-  vim.api.nvim_set_hl(0, "NvimeDiffDelete", { fg = "#ffa0aa", bg = "#3a1f25" })
-  vim.api.nvim_set_hl(0, "NvimeDiffHunk", { fg = "#d7dde8", bg = "#252b35", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeConflict", { fg = "#f4bf75", bg = "#2d2412", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeError", { fg = "#ff6b7a", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeCursorLine", { bg = "#171b23", default = true })
-  vim.api.nvim_set_hl(0, "NvimeRowIndex", { fg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeRowTitle", { fg = "#d7dde8", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeRowMeta", { fg = "#6f7a92", default = true })
-  vim.api.nvim_set_hl(0, "NvimeRowDetail", { fg = "#a8b4c7", default = true })
-  vim.api.nvim_set_hl(0, "NvimeProviderClaude", { fg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeProviderCodex", { fg = "#4fd6be", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeBadge", { fg = "#10141d", bg = "#4fd6be", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeBadgeMuted", { fg = "#d7dde8", bg = "#263142", default = true })
-  vim.api.nvim_set_hl(0, "NvimeBadgeSuccess", { fg = "#10141d", bg = "#8bdc7c", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeBadgeWarn", { fg = "#10141d", bg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeBadgeError", { fg = "#10141d", bg = "#ff6b7a", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanHeading", { fg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanRule", { fg = "#2f3540", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanBadgeKey", { fg = "#10141d", bg = "#dca561", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepDone", { fg = "#8bdc7c", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepProgress", { fg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepBlocked", { fg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepPending", { fg = "#a8b4c7", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanMeta", { fg = "#6f7a92", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanFooter", { fg = "#6f7a92", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanProgressFill", { fg = "#8bdc7c", bg = "#1a2418", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanProgressActive", { fg = "#56b6c2", bg = "#102028", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanProgressTrack", { fg = "#2f3540", bg = "#171b23", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepIndex", { fg = "#10141d", bg = "#56b6c2", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepIndexDone", { fg = "#10141d", bg = "#8bdc7c", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepIndexBlocked", { fg = "#10141d", bg = "#f4bf75", bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanStepIndexPending", { fg = "#d7dde8", bg = "#263142", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanWhy", { fg = "#a8b4c7", italic = true, default = true })
+  -- Force-set with no `default = true` so a user colorscheme that links
+  -- these custom group names can never paint them gray or
+  -- red-where-it-should-be-green.
+  vim.api.nvim_set_hl(0, "NvimeDiffAdd", { fg = C.green, bg = C.add_bg })
+  vim.api.nvim_set_hl(0, "NvimeDiffDelete", { fg = C.red, bg = C.del_bg })
+  vim.api.nvim_set_hl(0, "NvimeDiffHunk", { fg = C.fg, bg = C.hunk_bg, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeConflict", { fg = C.yellow, bg = C.warn_bg, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeError", { fg = C.red, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeCursorLine", { bg = C.bg_cursor, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRowIndex", { fg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRowTitle", { fg = C.fg, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRowMeta", { fg = C.muted, default = true })
+  vim.api.nvim_set_hl(0, "NvimeRowDetail", { fg = C.fg_dim, default = true })
+  vim.api.nvim_set_hl(0, "NvimeProviderClaude", { fg = C.orange, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeProviderCodex", { fg = C.teal, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadge", { fg = C.bg, bg = C.teal, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeMuted", { fg = C.fg, bg = C.bg_band, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeSuccess", { fg = C.bg, bg = C.green, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeWarn", { fg = C.bg, bg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBadgeError", { fg = C.bg, bg = C.red, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanHeading", { fg = C.cyan, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanRule", { fg = C.rule, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanBadgeKey", { fg = C.bg, bg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepDone", { fg = C.green, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepProgress", { fg = C.blue, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepBlocked", { fg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepPending", { fg = C.fg_dim, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanMeta", { fg = C.muted, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanFooter", { fg = C.muted, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanProgressFill", { fg = C.green, bg = C.add_bg, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanProgressActive", { fg = C.blue, bg = C.bg_input, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanProgressTrack", { fg = C.faint, bg = C.bg_input, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepIndex", { fg = C.bg, bg = C.blue, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepIndexDone", { fg = C.bg, bg = C.green, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepIndexBlocked", { fg = C.bg, bg = C.yellow, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanStepIndexPending", { fg = C.fg, bg = C.bg_band, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanWhy", { fg = C.fg_dim, italic = true, default = true })
   -- Step intent lines wrap to multiple visual rows when long; bolding the
   -- whole sentence becomes a wall of bold and shouts. Use bright body fg
   -- without bold and let inline_spans (`code`, **bold**, _em_) provide the
   -- visual anchors.
-  vim.api.nvim_set_hl(0, "NvimePlanIntent", { fg = "#e9eef6", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanFile", { fg = "#7be0ed", default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanRange", { fg = "#7c8aa6", italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanMetaLabel", { fg = "#9aa6c2", bold = true, italic = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimePlanHeadingMarker", { fg = "#3f4858", default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanIntent", { fg = C.fg_bright, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanFile", { fg = C.cyan, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanRange", { fg = C.muted, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanMetaLabel", { fg = C.fg_dim, bold = true, italic = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlanHeadingMarker", { fg = C.faint, default = true })
 end
 
 function M.ensure_highlights()
@@ -219,7 +297,10 @@ function M.icon(name)
   if cfg.ascii_icons == true then
     return ASCII_ICONS[name] or ""
   end
-  return ICONS[name] or ASCII_ICONS[name] or ""
+  if cfg.nerd_font == false then
+    return UNICODE_ICONS[name] or ASCII_ICONS[name] or ""
+  end
+  return NERD_ICONS[name] or UNICODE_ICONS[name] or ASCII_ICONS[name] or ""
 end
 
 function M.truncate(text, max_width)
@@ -300,16 +381,31 @@ local function ensure_named_buffer(name, filetype)
   return bufnr
 end
 
-local function configure_window(winid)
-  vim.wo[winid].wrap = true
+-- Shared chrome for every nvime panel float. Centralized here (ui.lua owns the
+-- highlight/float layer) so the winhighlight map and the signcolumn-as-padding
+-- trick live in one place instead of drifting across the per-module
+-- configure_window copies. opts.wrap defaults true; opts.cursorline false.
+local PANEL_WINHL =
+  "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted,SignColumn:NvimeNormal,CursorLine:NvimeCursorLine"
+
+function M.configure_panel_window(winid, opts)
+  opts = opts or {}
+  vim.wo[winid].wrap = opts.wrap ~= false
   vim.wo[winid].number = false
   vim.wo[winid].relativenumber = false
-  vim.wo[winid].signcolumn = "no"
-  vim.wo[winid].cursorline = false
+  -- A 1-cell signcolumn we never put signs in is the cheapest way to give the
+  -- panel real left padding — content stops hugging the border and the float
+  -- reads as a card. SignColumn is mapped to the panel bg so the gutter is
+  -- invisible padding, not a stripe.
+  vim.wo[winid].signcolumn = "yes:1"
+  vim.wo[winid].cursorline = opts.cursorline == true
   vim.wo[winid].spell = false
   vim.wo[winid].winblend = 0
-  vim.wo[winid].winhighlight =
-    "NormalFloat:NvimeNormal,FloatBorder:NvimeBorder,FloatTitle:NvimeTitle,FloatFooter:NvimeMuted"
+  vim.wo[winid].winhighlight = PANEL_WINHL
+end
+
+local function configure_window(winid)
+  M.configure_panel_window(winid, { wrap = true, cursorline = false })
 end
 
 local function float_config(title)
@@ -338,9 +434,9 @@ local function float_config(title)
     col = math.floor((columns - width) / 2),
     style = "minimal",
     border = ui.border or "rounded",
-    title = " " .. title .. " ",
+    title = " " .. M.icon("brand") .. "  " .. title .. " ",
     title_pos = "center",
-    footer = " enter/i/o input | p/tab provider | P choose | q close ",
+    footer = " <CR> input · p provider · P choose · q close ",
     footer_pos = "center",
   }
 end

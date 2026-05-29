@@ -13,15 +13,25 @@ local function git_diff(args)
   return table.concat(git.systemlist(cmd), "\n")
 end
 
-function M.start(opts)
-  opts = opts or {}
-  local provider = opts.provider or require("nvime.state").config.provider
-  local prompt = opts.prompt
-  if not prompt or prompt == "" then
-    prompt =
-      "Review the current repository state. Be concrete, prioritize bugs and behavioral regressions. You may use shell commands including curl and web fetch/search tools when available. You may create or update Markdown documentation files only; do not edit source/config files."
-  end
+local DEFAULT_REVIEW_PROMPT =
+  "Review the current repository state. Be concrete, prioritize bugs and behavioral regressions. You may use shell commands including curl and web fetch/search tools when available. You may create or update Markdown documentation files only; do not edit source/config files."
 
+-- True when any review/docs chat session is mid-run. Re-staging a review into a
+-- live session would inject a duplicate prompt (the bug this guards against), so
+-- the interactive path defers to the picker when something is already running.
+local function any_session_busy()
+  for _, session in ipairs(chat.sessions()) do
+    if session.busy then
+      return true
+    end
+  end
+  return false
+end
+
+-- Launch a review immediately: write the prompt + response header into the
+-- session and run the agent. Used only when a caller explicitly opts in via
+-- opts.submit; the interactive <leader>nr path stages the prompt instead.
+local function fire(opts, provider, prompt)
   local input = opts.input
   if not input and opts.diff ~= false then
     input = git_diff(opts.cached and { "--cached" } or {})
@@ -83,6 +93,29 @@ function M.start(opts)
   if not handle then
     chat.set_busy(false, session_id)
   end
+end
+
+function M.start(opts)
+  opts = opts or {}
+  local provider = opts.provider or require("nvime.state").config.provider
+  local prompt = (opts.prompt and opts.prompt ~= "") and opts.prompt or DEFAULT_REVIEW_PROMPT
+
+  -- opts.submit: explicit "launch now" (programmatic callers). The default,
+  -- interactive <leader>nr path does NOT auto-launch.
+  if opts.submit then
+    return fire(opts, provider, prompt)
+  end
+
+  -- A review is already running: re-staging here would append a duplicate
+  -- prompt into the live session. Surface the picker instead so the user can
+  -- start a fresh conversation or jump to the running / earlier one.
+  if any_session_busy() then
+    return require("nvime.chats").open({ mode = "chat" })
+  end
+
+  -- Otherwise stage the review: drop the prompt into the input, ready to edit
+  -- and send (<CR>). Nothing fires until the user confirms.
+  chat.insert_prompt(prompt)
 end
 
 return M

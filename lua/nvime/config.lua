@@ -25,6 +25,7 @@ M.defaults = {
     border = "rounded",
     backdrop = 60,
     completion = "notify",
+    nerd_font = true,
     ascii_icons = false,
     icons = {},
     spinner_frames = nil,
