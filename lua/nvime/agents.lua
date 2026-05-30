@@ -164,7 +164,13 @@ local function claude_args(cfg, lane, prompt, run_opts)
     table.insert(args, "--no-session-persistence")
   end
 
-  if lane == "review" then
+  if lane == "bigchange" then
+    -- The "go crazy" lane: full autonomy inside an isolated git worktree
+    -- (M.run sets cwd to the worktree). --dangerously-skip-permissions grants
+    -- every tool with no prompts; the worktree confinement is the safety net,
+    -- not the permission layer. Used by nvime.bigchange.build.
+    table.insert(args, "--dangerously-skip-permissions")
+  elseif lane == "review" then
     local markdown_writes = review_allows_markdown_writes()
     local tools = claude_review_tools(markdown_writes)
     local disallowed = claude_review_disallowed(markdown_writes)
@@ -291,7 +297,10 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
   end
 
   local sandbox = "read-only"
-  if lane == "review" and review_allows_markdown_writes() then
+  if lane == "bigchange" then
+    -- Full autonomy confined to the worktree cwd that M.run passes via -C.
+    sandbox = "workspace-write"
+  elseif lane == "review" and review_allows_markdown_writes() then
     sandbox = "workspace-write"
   elseif lane == "plan" then
     -- plan lane writes plan.json/plan.md inside a temp workspace whose
@@ -324,6 +333,12 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
     "-C",
     cwd or repo_root(),
   })
+
+  if lane == "bigchange" then
+    -- Non-interactive full autonomy: never pause for approval. Writes stay
+    -- inside the worktree cwd via the workspace-write sandbox set above.
+    vim.list_extend(args, { "-c", 'approval_policy="never"' })
+  end
 
   -- Inject MCP servers via -c overrides. Codex stores mcp_servers in
   -- config.toml; --ignore-user-config wipes the user's config so the
@@ -361,7 +376,7 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
         end
       end
       if has_servers then
-        vim.list_extend(args, { "-c", "approval_policy=\"never\"" })
+        vim.list_extend(args, { "-c", 'approval_policy="never"' })
         -- Codex auto-cancels MCP tool calls in `exec` mode unless we set
         -- this flag, which also turns off codex's OS-level sandbox.
         -- Gated behind explicit config so users opt-in knowingly.
@@ -915,7 +930,8 @@ function M.run(opts)
     vim.fn.mkdir(tmp, "p")
     perf_workspace = { cwd = tmp, tmp = vim.fn.fnamemodify(tmp, ":h") }
   end
-  local cwd = (perf_workspace and perf_workspace.cwd)
+  local cwd = opts.cwd
+    or (perf_workspace and perf_workspace.cwd)
     or (plan_workspace and plan_workspace.cwd)
     or (workspace and workspace.cwd)
     or repo_root()
@@ -953,7 +969,8 @@ function M.run(opts)
     observed_usage.cost_usd = (observed_usage.cost_usd or 0) + (sample.cost_usd or 0)
     observed_usage.model = sample.model or observed_usage.model
   end
-  local stdout, drain_stdout = consume_chunks(provider, on_text, on_progress, handle_session_id, { on_usage = handle_usage })
+  local stdout, drain_stdout =
+    consume_chunks(provider, on_text, on_progress, handle_session_id, { on_usage = handle_usage })
   local stderr, drain_stderr = consume_chunks(provider, function(text)
     on_text(text)
   end, on_progress, handle_session_id, { stderr = true, on_usage = handle_usage })

@@ -115,8 +115,8 @@ M.defaults = {
     -- ledger, and sensitive/generated path tags from globs. Advisory; only
     -- `gA!` at the `high` level prompts a confirmation.
     enabled = true,
-    sensitive_paths = nil,    -- defaults: migrations/lockfiles/secrets/keys
-    generated_globs = nil,    -- defaults: protobuf/_generated/generated dirs
+    sensitive_paths = nil, -- defaults: migrations/lockfiles/secrets/keys
+    generated_globs = nil, -- defaults: protobuf/_generated/generated dirs
     thresholds = {
       lines = { medium = 40, high = 120 },
       ai_share = { high = 0.5 },
@@ -158,8 +158,8 @@ M.defaults = {
     -- AI-attributed hunk on the current branch, plus any review-first
     -- events (force-accepts, policy overrides, intent overrides).
     enabled = true,
-    path = nil,             -- defaults to .nvime/pr.md in the git root
-    base_branch = nil,      -- nil = auto-detect (origin/main → main → HEAD~1)
+    path = nil, -- defaults to .nvime/pr.md in the git root
+    base_branch = nil, -- nil = auto-detect (origin/main → main → HEAD~1)
     include_unattributed = true,
   },
   chat = {
@@ -258,6 +258,7 @@ M.defaults = {
       usage = "u",
       quick_fix = "f",
       send = "s",
+      bigchange = "B",
     },
     visual = {
       edit = "e",

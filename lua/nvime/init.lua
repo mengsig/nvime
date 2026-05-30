@@ -224,6 +224,9 @@ local function install_keymaps()
   set_keymap("n", prefix .. (normal.send or "s"), function()
     require("nvime.send").send()
   end, "nvime send file(s) to chat")
+  set_keymap("n", prefix .. (normal.bigchange or "B"), function()
+    require("nvime.bigchange").open()
+  end, "nvime Big Change: AI feature + forced-comprehension review")
   set_keymap("x", prefix .. (visual.edit or "e"), visual_edit, "nvime edit visual selection")
   set_keymap("x", prefix .. (visual.ask or "q"), visual_ask, "nvime ask about visual selection")
   set_keymap("x", prefix .. (visual.quick_fix or "f"), visual_quick_fix, "nvime quick fix visual selection")
@@ -404,6 +407,20 @@ function M.setup(opts)
     desc = "Reopen the last used nvime conversation",
   })
 
+  vim.api.nvim_create_user_command("NvimeBigChange", function(args)
+    local bigchange = require("nvime.bigchange")
+    if args.bang then
+      bigchange.create_interactive()
+    else
+      -- The command always shows the picker (escape hatch); the <leader>nB
+      -- keymap resumes an in-progress draft instead.
+      bigchange.open_picker()
+    end
+  end, {
+    bang = true,
+    desc = "Open the Big Change picker (append ! to start a new one)",
+  })
+
   vim.api.nvim_create_user_command("NvimeProvider", function(args)
     provider.set(args.args)
   end, {
@@ -562,12 +579,7 @@ function M.setup(opts)
       local out = { "nvime mcp servers:" }
       for _, name in ipairs(names) do
         local entry = servers[name]
-        out[#out + 1] = string.format(
-          "  %s — %s %s",
-          name,
-          entry.command or "?",
-          table.concat(entry.args or {}, " ")
-        )
+        out[#out + 1] = string.format("  %s — %s %s", name, entry.command or "?", table.concat(entry.args or {}, " "))
       end
       out[#out + 1] = "merged config: " .. tostring(mcp.config_path() or "(none)")
       out[#out + 1] = "project file:  " .. mcp.project_config_path()
@@ -583,7 +595,7 @@ function M.setup(opts)
       local path = mcp.project_config_path()
       vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
       if vim.fn.filereadable(path) ~= 1 then
-        vim.fn.writefile({ '{', '  "mcpServers": {', '  }', '}' }, path)
+        vim.fn.writefile({ "{", '  "mcpServers": {', "  }", "}" }, path)
       end
       vim.cmd("edit " .. vim.fn.fnameescape(path))
     else
@@ -762,14 +774,14 @@ function M.setup(opts)
       vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
       if vim.fn.filereadable(path) ~= 1 then
         vim.fn.writefile({
-          '{',
+          "{",
           '  "version": 1,',
           '  "rules": [',
           '    { "match": "migrations/**", "require_human": true },',
           '    { "match": "**/*.lock",     "require_human": true },',
           '    { "match": "secrets/**",    "require_human": true, "allow_lanes": [] }',
-          '  ]',
-          '}',
+          "  ]",
+          "}",
         }, path)
       end
       vim.cmd("edit " .. vim.fn.fnameescape(path))
@@ -794,6 +806,9 @@ function M.setup(opts)
       require("nvime.selection").flush_sessions()
       pcall(function()
         require("nvime.usage").flush()
+      end)
+      pcall(function()
+        require("nvime.bigchange").flush()
       end)
     end,
   })

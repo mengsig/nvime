@@ -46,6 +46,20 @@ This is an editor discipline tool, not a security sandbox. It prevents accidenta
 
 Screenshots of the plan workflow are in [Plan picker](#plan-picker), [Plan view](#plan-view), [Plan compose](#plan-compose), and [Inline diff review](#inline-diff-review).
 
+### Big Change
+
+`<leader>nB` (or `:NvimeBigChange`) opens the **Big Change** lane — let the agent build a whole feature autonomously, but only merge it once *you* have proven you understand every change.
+
+The lifecycle:
+
+1. **Draft** — pick a difficulty (`vibe` / `easy` / `medium` / `extreme`), then write a structured brief (Title / Context / Goal / Notes / Acceptance criteria) in a real editable buffer. It autosaves and is reopenable: `<leader>nB` jumps straight back into an in-progress draft (`:NvimeBigChange` always shows the picker). `<C-s>` submits it, `DD` discards it. The `# Title:` line becomes the project's name in the picker.
+2. **Intake** — the agent interrogates you with clarifying questions until the spec is crystal clear, writes that spec, and you `[a]pprove` it.
+3. **Build** — on approval, `nvime` creates an isolated git worktree under `stdpath('data')/nvime/bigchange/` (your working tree is never touched) and runs the agent full-auto inside it. Progress streams live; you can `q` to background it.
+4. **Review** — the agent groups its own diff into semantic blocks. In a dual-pane view (block tree + inline diff) you act on every block: `a` **approve** (then explain what it does — the agent grades your explanation against the difficulty threshold) or `r` **request changes** (the agent either fixes the code or pushes back if the critique is wrong). `S` submits a round; `M` merges.
+5. **Merge** — once every block is cleared, `M` prompts for a branch name, creates it in your main tree, and applies the work as **unstaged** changes for gitflow/git to stage and commit. The worktree is kept until you `d`iscard it from the picker.
+
+Difficulty only controls review strictness: `vibe` clears blocks on approve with no explanation; `easy`/`medium`/`extreme` require explanations grading ≥ 40 / 70 / 90%.
+
 ## Install
 
 Requires Neovim 0.10 or newer.
@@ -443,6 +457,7 @@ Inside the chat window:
 - `<leader>ns`: send the current file (or netrw marked files / entry under the
   cursor) as an `@path` reference into the last-opened conversation
 - visual `<leader>ns`: send the highlighted line range, e.g. `@path (lines 10-25)`
+- `<leader>nB`: open the Big Change picker (AI feature build + forced-comprehension review)
 
 Use `NvimeAsk` for questions such as "does this look right?" or "what does
 this do?". Use `NvimeEdit` only when you want a concrete patch. If the edit
