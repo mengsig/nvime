@@ -6,8 +6,8 @@
 --   right — the selected block's inline diff, your comment, and the agent's reply
 --
 -- Per-block you press `a` (approve) or `r` (request changes). Approve asks you
--- to explain the code; request-changes asks for a critique. Press `S` to submit
--- the round: every pending comment goes to the agent in ONE resumed turn, which
+-- to explain the code; request-changes asks for a critique. Press `<C-s>` to
+-- submit the round: every pending comment goes to the agent in ONE resumed turn, which
 -- grades explanations against the difficulty threshold and, for valid critiques,
 -- revises the code (we then re-capture the diff). The merge unlocks (`M`) only
 -- when every block is cleared.
@@ -96,6 +96,44 @@ local function progress(session)
   return cleared, total
 end
 
+-- Your comprehension grade out of 100. Each block scores its graded value;
+-- a cleared block with no numeric grade (e.g. a vibe-difficulty auto-clear, or
+-- a block cleared via an accepted critique) counts as 100; anything not yet
+-- attempted counts as 0 so the grade reflects real, demonstrated coverage.
+-- Returns (percent:int, scored:int, total:int), or nil when there are no blocks.
+local function overall_grade(session)
+  local blocks = session.blocks or {}
+  if #blocks == 0 then
+    return nil
+  end
+  local sum, scored = 0, 0
+  for _, b in ipairs(blocks) do
+    local g
+    if type(b.grade) == "number" then
+      g = b.grade
+    elseif b.state == "cleared" then
+      g = 100
+    end
+    if g ~= nil then
+      sum = sum + g
+      scored = scored + 1
+    end
+  end
+  return math.floor(sum / #blocks + 0.5), scored, #blocks
+end
+
+-- Highlight band for a 0-100 grade: green when passing the difficulty bar,
+-- yellow when partway, red when far below.
+local function grade_hl(session, pct)
+  local bar = threshold(session) or 100
+  if pct >= bar then
+    return "NvimeStatusSuccess"
+  elseif pct >= math.floor(bar / 2) then
+    return "NvimeStatusWarn"
+  end
+  return "NvimeStatusError"
+end
+
 -- ---------------------------------------------------------------------------
 -- left pane: block tree
 -- ---------------------------------------------------------------------------
@@ -115,6 +153,16 @@ local function render_left()
   marks[#marks + 1] = { #lines, 0, -1, "NvimeTitle" }
   lines[#lines + 1] = string.format("  %s · %d/%d cleared %s", d.label or "?", cleared, total, lock)
   marks[#marks + 1] = { #lines, 0, -1, all_cleared(session) and "NvimeStatusSuccess" or "NvimeStatusWarn" }
+
+  -- Overall comprehension grade — the headline number out of 100.
+  local pct, scored = overall_grade(session)
+  if pct ~= nil then
+    local bar = threshold(session)
+    local suffix = bar and ("  (pass ≥ " .. bar .. "%)") or ""
+    lines[#lines + 1] = string.format("  Grade: %d%%  · %d/%d graded%s", pct, scored, total, suffix)
+    marks[#marks + 1] = { #lines, 0, 14, grade_hl(session, pct) }
+    marks[#marks + 1] = { #lines, 14, -1, "NvimeMuted" }
+  end
   if session.status == store.STATUS.MERGED then
     lines[#lines + 1] = "  merged → " .. (session.merged_branch or "?")
     marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusSuccess" }
@@ -155,7 +203,7 @@ local function render_left()
   else
     lines[#lines + 1] = "  a approve · r request-changes"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
-    lines[#lines + 1] = "  S submit · M merge · q close"
+    lines[#lines + 1] = "  <C-s> submit · M merge · q close"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
   end
 
@@ -209,6 +257,23 @@ local function render_right()
         marks[#marks + 1] = { #lines, 0, -1, "NvimeDiffDelete" }
       end
     end
+  end
+
+  -- An unsubmitted draft (typed but not yet committed with <C-s>). Surfaced so
+  -- the user can see their cached work after leaving and reopening the review.
+  local pending_draft = block.draft and block.draft ~= ""
+    and block.state ~= "explaining"
+    and block.state ~= "critiquing"
+  if pending_draft then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "  ╭─ draft (unsubmitted) ──────────────────"
+    marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusWarn" }
+    for _, cl in ipairs(vim.split(block.draft, "\n", { plain = true })) do
+      lines[#lines + 1] = "  │ " .. cl
+      marks[#marks + 1] = { #lines, 0, -1, "NvimeUserText" }
+    end
+    lines[#lines + 1] = "  ╰─ a/r to resume ───────────────────────"
+    marks[#marks + 1] = { #lines, 0, -1, "NvimeMuted" }
   end
 
   if block.comment and block.comment ~= "" then
@@ -291,12 +356,24 @@ local function approve()
     render()
     return
   end
-  uikit.input({ title = "Explain block " .. block.id .. ": " .. block.title }, function(text)
+  uikit.input({
+    title = "Explain block " .. block.id .. ": " .. block.title,
+    no_paste = true,
+    -- Prefill with any cached draft (or a prior explanation) so re-opening the
+    -- box keeps your work; autosave keystrokes so closing before submit is safe.
+    initial = block.draft or block.comment or "",
+    on_change = function(t)
+      block.draft = t
+      store.touch(R.session)
+    end,
+    on_cancel = render,
+  }, function(text)
     if not text or text == "" then
       return
     end
     block.action = "approve"
     block.comment = text
+    block.draft = nil -- consumed by submit
     block.state = "explaining"
     block.hint = nil
     block.agent_response = nil
@@ -313,12 +390,22 @@ local function request_changes()
   if not block then
     return
   end
-  uikit.input({ title = "Request changes on block " .. block.id .. ": " .. block.title }, function(text)
+  uikit.input({
+    title = "Request changes on block " .. block.id .. ": " .. block.title,
+    no_paste = true,
+    initial = block.draft or block.comment or "",
+    on_change = function(t)
+      block.draft = t
+      store.touch(R.session)
+    end,
+    on_cancel = render,
+  }, function(text)
     if not text or text == "" then
       return
     end
     block.action = "request_changes"
     block.comment = text
+    block.draft = nil -- consumed by submit
     block.state = "critiquing"
     block.hint = nil
     block.agent_response = nil
@@ -350,11 +437,23 @@ local function grade_prompt(session, pending)
     "",
     "For each block below:",
     "- action=approve: the user EXPLAINS the code. Grade 0-100 how accurately and",
-    "  completely their explanation matches what the code actually does, at this",
-    "  difficulty. Give a one-line verdict and, if below passing, a one-line hint.",
+    "  completely their explanation matches what the code actually DOES and WHY, at",
+    "  this difficulty. Reward genuine understanding in the user's OWN words.",
+    "  ANTI-CHEAT — grade these <= 15 (failing) regardless of difficulty:",
+    "    * the explanation merely restates or lightly rephrases the block TITLE,",
+    "    * it parrots identifiers/comments/strings copied verbatim from the diff",
+    "      without saying what they mean or why they're there,",
+    "    * it is generic boilerplate that would fit almost any code change.",
+    "  An explanation must add information not already visible in the title/diff to",
+    "  pass. If below passing, give a SOCRATIC hint (see below).",
     "- action=request_changes: the user CRITIQUES your code. If the critique is valid,",
     "  FIX the code now (edit the files in this worktree) and set revised=true. If the",
     "  critique is wrong or misguided, set valid=false and explain why in response.",
+    "",
+    "HINTS must be Socratic: pose a question or point at the concept/area the user",
+    "MISSED — e.g. \"What happens to the second branch when the list is empty?\" — and",
+    "NEVER state the correct explanation, name the answer, or quote the fix. A reader",
+    "should still have to think. One line, no spoilers.",
     "",
     "Output ONLY a JSON array wrapped in <JSON></JSON>:",
     '  [{"id": <int>, "action": "approve"|"request_changes",',
@@ -461,7 +560,14 @@ local function submit_round()
         store.touch(session)
         render()
         if all_cleared(session) then
-          vim.notify("nvime bigchange: all blocks cleared — press M to merge 🔓", vim.log.levels.INFO)
+          local pct = overall_grade(session)
+          vim.notify(
+            string.format(
+              "nvime bigchange: all blocks cleared — final grade %d%% — press M to merge 🔓",
+              pct or 100
+            ),
+            vim.log.levels.INFO
+          )
         end
       end
       if need_recapture then
@@ -515,7 +621,7 @@ local function install_keymaps(bufnr)
   map("o", select_block)
   map("a", approve)
   map("r", request_changes)
-  map("S", submit_round)
+  map("<C-s>", submit_round)
   map("M", merge)
   map("q", M.close)
 end

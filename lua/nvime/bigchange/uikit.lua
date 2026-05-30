@@ -9,8 +9,33 @@ local ui = require("nvime.ui")
 
 local M = {}
 
--- Multiline input popup. opts = { title, initial, height }. Calls
--- on_submit(text) on <C-s> (insert or normal), or opts.on_cancel on <Esc>/q.
+-- Block the usual ways to paste text into `buf`. Used by the forced-
+-- comprehension review so an explanation has to be TYPED, not pasted from the
+-- block title or the diff. This is a deterrent, not a vault: bracketed paste
+-- from the terminal still streams characters in, so the grader-side check
+-- (review.lua) is the real defense. We disable the in-editor paste verbs and
+-- the register-paste keys, and neutralize bracketed-paste at the buffer level.
+local function block_paste(buf)
+  local nop = function() end
+  -- Normal-mode paste verbs.
+  for _, lhs in ipairs({ "p", "P", "gp", "gP" }) do
+    vim.keymap.set("n", lhs, nop, { buffer = buf, nowait = true, silent = true })
+  end
+  -- Insert/cmdline register-paste and system-clipboard / mouse paste keys.
+  for _, lhs in ipairs({ "<C-r>", "<C-v>", "<S-Insert>", "<D-v>", "<C-S-v>", "<MiddleMouse>", "<2-MiddleMouse>" }) do
+    vim.keymap.set({ "i" }, lhs, nop, { buffer = buf, nowait = true, silent = true })
+  end
+  vim.keymap.set("n", "<MiddleMouse>", nop, { buffer = buf, nowait = true, silent = true })
+  -- Bracketed paste arrives via the `<Paste>` pseudo-key on modern Neovim.
+  vim.keymap.set({ "i", "n" }, "<Paste>", nop, { buffer = buf, nowait = true, silent = true })
+end
+
+-- Multiline input popup. opts = { title, initial, height, no_paste, on_change }.
+-- Calls on_submit(text) on <C-s> (insert or normal), or opts.on_cancel on
+-- <Esc>/q. When opts.no_paste is set, paste keys are disabled in the popup (see
+-- block_paste) so the text must be typed. When opts.on_change(text) is given it
+-- fires (debounced) as the user types — used to cache an in-progress draft so
+-- closing the popup before submit doesn't lose the work.
 function M.input(opts, on_submit)
   opts = opts or {}
   ui.ensure_highlights()
@@ -33,10 +58,37 @@ function M.input(opts, on_submit)
     border = (require("nvime.state").config.ui or {}).border or "rounded",
     title = " " .. (opts.title or "Input") .. " ",
     title_pos = "center",
-    footer = " <C-s> submit · <Esc> cancel ",
+    footer = opts.no_paste and " <C-s> submit · <Esc> cancel · paste disabled "
+      or " <C-s> submit · <Esc> cancel ",
     footer_pos = "center",
   })
   ui.configure_panel_window(win, { wrap = true, cursorline = false })
+  if opts.no_paste then
+    block_paste(buf)
+  end
+
+  -- Live draft autosave: debounce buffer changes onto opts.on_change so the
+  -- caller can stash an in-progress draft. Cancelling (Esc/q) then keeps the
+  -- last autosaved text instead of throwing the work away.
+  if type(opts.on_change) == "function" then
+    local timer
+    vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+      buffer = buf,
+      callback = function()
+        if timer then
+          pcall(function()
+            timer:stop()
+          end)
+        end
+        timer = vim.defer_fn(function()
+          timer = nil
+          if vim.api.nvim_buf_is_valid(buf) then
+            opts.on_change(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
+          end
+        end, 250)
+      end,
+    })
+  end
 
   local done = false
   local function finish(submit)
@@ -45,6 +97,11 @@ function M.input(opts, on_submit)
     end
     done = true
     local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+    -- Flush the latest text to the draft sink before the buffer is wiped, so no
+    -- final keystrokes are lost to the debounce window.
+    if type(opts.on_change) == "function" then
+      pcall(opts.on_change, text)
+    end
     if vim.api.nvim_win_is_valid(win) then
       pcall(vim.api.nvim_win_close, win, true)
     end

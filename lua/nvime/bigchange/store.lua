@@ -114,6 +114,11 @@ local function serialize(session)
     draft = session.draft,
     spec = session.spec,
     spec_approved = session.spec_approved == true,
+    -- The live structured plan (clarifying decisions + the user's in-progress
+    -- selections) so an interrupted intake reopens exactly where it left off.
+    plan = session.plan,
+    -- A half-typed "message the agent" draft, cached until sent.
+    message_draft = session.message_draft,
     provider_sessions = session.provider_sessions or {},
     worktree_sessions = session.worktree_sessions or {},
     worktree = session.worktree,
