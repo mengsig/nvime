@@ -265,8 +265,11 @@ Plan author mode says:
 - "You MUST NOT modify any source code."
 - "You MAY create or edit files only inside `.nvime/plans/<plan-id>/`."
 - "Decompose into ORDERED steps. Each step targets exactly ONE file and ONE range."
-- Runtime behavior work that needs implementation plus tests is invalid with
-  fewer than 3 steps; split tests/compatibility into separate reviewable steps
-  rather than collapsing implementation and tests together.
+- Match the number of steps to the actual scope of the change. Most requests are
+  small: a localized, single-file change is ONE step. Add steps only when the work
+  genuinely spans multiple files, ranges, or independently-reviewable units — never
+  pad a small change with artificial steps. For runtime behavior changes, ensure a
+  regression test exists, but for a small change put it in the step's `tests` field
+  rather than spawning a separate test step.
 - "Acceptance items must be CHECKABLE — prefer commands and observable behavior."
 - "Emit one final NVIME_PLAN marker confirming the plan id, summary, step count, and files."

@@ -3893,7 +3893,7 @@ end)();
   require_in(plan_src, "You MUST NOT modify any source code", "plan.lua")
   require_in(plan_src, "ONLY for paths under `.nvime/plans/<plan-id>/`.", "plan.lua")
   require_in(plan_src, "Decompose into ORDERED steps", "plan.lua")
-  require_in(plan_src, "plan is INVALID with fewer than 3 steps", "plan.lua")
+  require_in(plan_src, "Match the NUMBER of steps to the ACTUAL scope", "plan.lua")
 
   -- General chat invariants
   require_in(chat_src, "Never edit non-Markdown files from this lane", "chat.lua")
@@ -3913,7 +3913,7 @@ end)();
   require_in(protocol_md, "NVIME_REPLACEMENT", "PROTOCOL.md")
   require_in(protocol_md, "Precomputed nvime project context", "PROTOCOL.md")
   require_in(protocol_md, "Do not narrate tool use, investigation progress", "PROTOCOL.md")
-  require_in(protocol_md, "fewer than 3 steps", "PROTOCOL.md")
+  require_in(protocol_md, "Match the number of steps to the actual scope", "PROTOCOL.md")
   require_in(protocol_md, "NVIME_DIFF", "PROTOCOL.md")
   require_in(protocol_md, "NVIME_PLAN", "PROTOCOL.md")
   require_in(protocol_md, "RATIONALE:", "PROTOCOL.md")

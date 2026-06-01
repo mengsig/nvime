@@ -2819,7 +2819,7 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   '     - Targets exactly ONE file and ONE range (existing range, or "new" for a new file).',
   "     - Is small enough to apply through a focused diff review (~5-100 lines).",
   "     - Has CHECKABLE acceptance criteria — prefer shell commands and observable behavior.",
-  "     - For runtime behavior work that needs implementation plus tests, the plan is INVALID with fewer than 3 steps. If only two files are touched, split one file into multiple range-specific test/compatibility steps rather than collapsing the plan.",
+  "     - Match the NUMBER of steps to the ACTUAL scope. Most requests are small: a localized, single-file change is ONE step. Only add steps when the work genuinely spans multiple files, ranges, or independently-reviewable units. NEVER pad a small change with artificial steps or split one coherent edit just to raise the step count.",
   "  4. Write `.nvime/plans/<plan-id>/plan.json` with the schema below.",
   "  5. Write `.nvime/plans/<plan-id>/plan.md` — a human-readable narrative a future engineer can read cold.",
   "  6. Emit ONE machine-readable marker as the FINAL output (no other prose):",
@@ -2858,8 +2858,8 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "Quality bar:",
   "  - Read enough of the actual code to ground every line/range you cite.",
   "  - If the work has uncertainty, encode the choice in `notes`. Don't punt.",
-  "  - Prefer 4-12 small steps over 1-2 huge steps.",
-  "  - For runtime behavior changes, produce at least 3 steps: focused regression test(s), implementation, and compatibility/edge coverage. Do not collapse tests and implementation into a 1-2 step plan.",
+  "  - Right-size the plan to the work. A trivial change is 1 step; a small feature 2-4; only genuinely large, multi-file work needs more. Step count should reflect real, independently-reviewable units — not a target. Do not inflate a small task, and do not collapse unrelated work into one step.",
+  "  - For runtime behavior changes, ensure a regression test exists — but for a small change put it in the implementation step's `tests` field rather than spawning a separate test step. Add a dedicated test step only when the test work is substantial enough to review on its own.",
   "  - If the codebase already has a tracked roadmap (e.g. IMPROVEMENTS.md), cite the relevant section in `why`.",
   "",
   "Tests are load-bearing:",
@@ -2939,8 +2939,18 @@ local function format_run_log()
   if panel and panel.bufnr and vim.api.nvim_buf_is_valid(panel.bufnr) then
     return panel.bufnr
   end
-  local bufnr = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(bufnr, "nvime://plan/run")
+  -- The run-log buffer is bufhidden="hide", so closing its window only hides it
+  -- — the named buffer survives even though WinClosed drops the panel reference.
+  -- Reuse the existing buffer by name (clearing it) rather than creating a fresh
+  -- one and colliding on the name (E95) on a second author run this session.
+  local bufnr = find_buffer("nvime://plan/run")
+  if bufnr then
+    vim.bo[bufnr].modifiable = true
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
+  else
+    bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(bufnr, "nvime://plan/run")
+  end
   vim.bo[bufnr].buftype = "nofile"
   vim.bo[bufnr].bufhidden = "hide"
   vim.bo[bufnr].swapfile = false
