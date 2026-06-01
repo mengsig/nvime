@@ -87,16 +87,21 @@ local ASCII_ICONS = {
 -- across the dashboard, plan, diff, and chat surfaces — and so retuning is a
 -- one-line change instead of a hex-hunt across the file.
 local C = {
-  -- Surfaces (deepest → most elevated)
-  backdrop = "#15161e", -- dim layer behind floats
-  bg = "#1a1b26", -- normal panel background
-  bg_input = "#1e2030", -- input / code surfaces (slightly raised)
-  bg_band = "#222436", -- heading band, badge-muted, raised chips
-  bg_cursor = "#2f334d", -- cursor line / selected row
+  -- Surfaces (deepest → most elevated). The steps between layers are
+  -- deliberately wide enough to read as physical elevation: a near-black
+  -- backdrop makes every float sit forward as a lit card, and each surface
+  -- above it (panel → input → band → cursor row) brightens by a clear,
+  -- even increment so structure is legible without any borders inside the
+  -- panel.
+  backdrop = "#0d0e15", -- near-black dim layer behind floats (deep shadow)
+  bg = "#1a1b26", -- normal panel background (the lit card)
+  bg_input = "#21232f", -- input / code surfaces (raised)
+  bg_band = "#272a3d", -- heading band, badge-muted, raised chips
+  bg_cursor = "#343a55", -- cursor line / selected row (clearly highlighted)
 
   -- Structure
-  border = "#545c7e", -- float border (soft but legible)
-  rule = "#2d3149", -- dividers / horizontal rules
+  border = "#5b658c", -- float border (soft but legible)
+  rule = "#2f3450", -- dividers / horizontal rules
   faint = "#3b4261", -- markers, punctuation, faint glyphs
 
   -- Text
@@ -391,6 +396,10 @@ local PANEL_WINHL =
 function M.configure_panel_window(winid, opts)
   opts = opts or {}
   vim.wo[winid].wrap = opts.wrap ~= false
+  -- Keep wrapped continuation lines aligned under the indent of their parent
+  -- line. Plan WHY/notes paragraphs and chat prose are indented; without this
+  -- a wrapped line snaps back to column 0 and the block loses its left edge.
+  vim.wo[winid].breakindent = true
   vim.wo[winid].number = false
   vim.wo[winid].relativenumber = false
   -- A 1-cell signcolumn we never put signs in is the cheapest way to give the

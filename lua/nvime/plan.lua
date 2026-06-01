@@ -3726,24 +3726,10 @@ local function compose_decorate(bufnr)
       })
     end
   end
-  -- floating footer hint above the last line
-  vim.api.nvim_buf_set_extmark(bufnr, COMPOSE_NS, math.max(0, #lines - 1), 0, {
-    virt_lines_above = true,
-    virt_lines = {
-      { { string.rep("─", 78), "NvimePlanRule" } },
-      {
-        { "  ", "" },
-        { "<C-s>", "NvimeKey" },
-        { " submit  ", "NvimePlanFooter" },
-        { "<C-c>", "NvimeKey" },
-        { " cancel running  ", "NvimePlanFooter" },
-        { "q", "NvimeKey" },
-        { " close (draft preserved)  ", "NvimePlanFooter" },
-        { "gC", "NvimeKey" },
-        { " clear template", "NvimePlanFooter" },
-      },
-    },
-  })
+  -- The key hints live in the float footer (compose_window_config). We
+  -- deliberately do NOT repeat them as an in-buffer virt_line: the editable
+  -- text wraps, so a fixed-width help line overflows the float and reads as a
+  -- duplicate of the footer right below it.
 end
 
 local function compose_window_config(refining_id)
