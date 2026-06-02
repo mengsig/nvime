@@ -30,8 +30,6 @@ It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex 
 
 `n` (or `<C-n>`, `N`) in the picker — or `<leader>nP` followed by `n` — opens the persistent compose buffer. Multi-line, free-form, edit/leave/return preserves the draft. `<C-s>` submits to the plan author agent.
 
-![nvime plan compose](docs/plan-compose.png)
-
 ### Inline diff review
 
 After step execution, the inline diff opens in the target file with a `RATIONALE:` banner from the patch worker, optional critic verdict, per-block accept/reject controls, and conflict detection if the file drifted under the agent.
@@ -50,6 +48,8 @@ Screenshots of the plan workflow are in [Plan picker](#plan-picker), [Plan view]
 
 `<leader>nB` (or `:NvimeBigChange`) opens the **Big Change** lane — let the agent build a whole feature autonomously, but only merge it once *you* have proven you understand every change.
 
+![nvime Big Change picker](docs/big-change-dashboard.png)
+
 The lifecycle:
 
 1. **Draft** — pick a difficulty (`vibe` / `easy` / `medium` / `extreme`), then write a structured brief (Title / Context / Goal / Notes / Acceptance criteria) in a real editable buffer. It autosaves and is reopenable: `<leader>nB` jumps straight back into an in-progress draft (`:NvimeBigChange` always shows the picker). `<C-s>` submits it, `DD` discards it. The `# Title:` line becomes the project's name in the picker.
@@ -57,6 +57,16 @@ The lifecycle:
 3. **Build** — on approval, `nvime` creates an isolated git worktree under `stdpath('data')/nvime/bigchange/` (your working tree is never touched) and runs the agent full-auto inside it. Progress streams live; you can `q` to background it.
 4. **Review** — the agent groups its own diff into semantic blocks. In a dual-pane view (block tree + inline diff) you act on every block: `a` **approve** (then explain what it does — the agent grades your explanation against the difficulty threshold) or `r` **request changes** (the agent either fixes the code or pushes back if the critique is wrong). `S` submits a round; `M` merges.
 5. **Merge** — once every block is cleared, `M` prompts for a branch name, creates it in your main tree, and applies the work as **unstaged** changes for gitflow/git to stage and commit. The worktree is kept until you `d`iscard it from the picker.
+
+The structured brief you fill in during **Draft** (Title / Context / Goal / Notes / Acceptance criteria):
+
+![nvime Big Change draft brief](docs/bigchange-plan-compose.png)
+
+The forced-comprehension **Review** — block tree on the left, inline diff on the right. On `a`pprove you explain what the block does and the agent grades your explanation against the difficulty threshold:
+
+![nvime Big Change review](docs/big-change-review.png)
+
+![nvime Big Change review — block grading and progress](docs/big-change-review-2.png)
 
 Difficulty only controls review strictness: `vibe` clears blocks on approve with no explanation; `easy`/`medium`/`extreme` require explanations grading ≥ 40 / 70 / 90%.
 
@@ -305,7 +315,7 @@ require("nvime").setup({
 
 Chat, selection, and discussion picker windows currently use floating scratch
 buffers. `ui.layout` and `ui.side` are reserved defaults and do not select a
-split layout in v0.2.0.
+split layout in v0.3.0.
 
 To disable shipped keymaps:
 
@@ -385,6 +395,12 @@ switch the All, Chat, Ask, Edit, and Running tabs; in scoped pickers, `1`-`9`
 still open visible session rows.
 For statuslines, `require("nvime").statusline()` returns a compact summary such
 as `nvime 2` or `nvime 1/3 running`.
+
+General chat and the selection Ask/Edit/quick-fix lanes share one clean
+scratch-buffer chat view — transcript above, the active `[provider lane]$`
+prompt at the bottom, status in the float title/footer:
+
+![nvime chat view](docs/general-ask-edit-fix-chatview.png)
 
 `:NvimeChat` opens the general conversation picker. Press `n` to start a fresh
 chat/review conversation, or open an older conversation from the list. Each
