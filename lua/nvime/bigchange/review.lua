@@ -49,6 +49,15 @@ local function state_meta(s)
   return STATE[s] or STATE.pending
 end
 
+-- A block's display meta. Trivial auto-clears get a distinct ⚡ badge; earned
+-- clears keep the standard cleared ✓ meta.
+local function block_meta(b)
+  if b.trivial and b.state == "cleared" then
+    return { icon = "⚡", hl = "NvimeMuted", label = "trivial · auto-cleared" }
+  end
+  return state_meta(b.state)
+end
+
 -- ---------------------------------------------------------------------------
 -- helpers
 -- ---------------------------------------------------------------------------
@@ -100,26 +109,32 @@ end
 -- a cleared block with no numeric grade (e.g. a vibe-difficulty auto-clear, or
 -- a block cleared via an accepted critique) counts as 100; anything not yet
 -- attempted counts as 0 so the grade reflects real, demonstrated coverage.
--- Returns (percent:int, scored:int, total:int), or nil when there are no blocks.
+-- Trivial auto-clears are self-evident and excluded entirely (both numerator
+-- and denominator) so they neither inflate nor dilute the demonstrated grade.
+-- Returns (percent:int, scored:int, nontrivial:int), or nil when there are no
+-- gradeable (non-trivial) blocks.
 local function overall_grade(session)
   local blocks = session.blocks or {}
-  if #blocks == 0 then
+  local sum, scored, nontrivial = 0, 0, 0
+  for _, b in ipairs(blocks) do
+    if not b.trivial then
+      nontrivial = nontrivial + 1
+      local g
+      if type(b.grade) == "number" then
+        g = b.grade
+      elseif b.state == "cleared" then
+        g = 100
+      end
+      if g ~= nil then
+        sum = sum + g
+        scored = scored + 1
+      end
+    end
+  end
+  if nontrivial == 0 then
     return nil
   end
-  local sum, scored = 0, 0
-  for _, b in ipairs(blocks) do
-    local g
-    if type(b.grade) == "number" then
-      g = b.grade
-    elseif b.state == "cleared" then
-      g = 100
-    end
-    if g ~= nil then
-      sum = sum + g
-      scored = scored + 1
-    end
-  end
-  return math.floor(sum / #blocks + 0.5), scored, #blocks
+  return math.floor(sum / nontrivial + 0.5), scored, nontrivial
 end
 
 -- Highlight band for a 0-100 grade: green when passing the difficulty bar,
@@ -154,12 +169,13 @@ local function render_left()
   lines[#lines + 1] = string.format("  %s · %d/%d cleared %s", d.label or "?", cleared, total, lock)
   marks[#marks + 1] = { #lines, 0, -1, all_cleared(session) and "NvimeStatusSuccess" or "NvimeStatusWarn" }
 
-  -- Overall comprehension grade — the headline number out of 100.
-  local pct, scored = overall_grade(session)
+  -- Overall comprehension grade — the headline number out of 100. Trivial
+  -- auto-clears are excluded, so the denominator is the non-trivial count.
+  local pct, scored, gradeable = overall_grade(session)
   if pct ~= nil then
     local bar = threshold(session)
     local suffix = bar and ("  (pass ≥ " .. bar .. "%)") or ""
-    lines[#lines + 1] = string.format("  Grade: %d%%  · %d/%d graded%s", pct, scored, total, suffix)
+    lines[#lines + 1] = string.format("  Grade: %d%%  · %d/%d graded%s", pct, scored, gradeable, suffix)
     marks[#marks + 1] = { #lines, 0, 14, grade_hl(session, pct) }
     marks[#marks + 1] = { #lines, 14, -1, "NvimeMuted" }
   end
@@ -184,7 +200,7 @@ local function render_left()
     lines[#lines + 1] = "  ▾ " .. file
     marks[#marks + 1] = { #lines, 0, -1, "NvimeSection" }
     for _, b in ipairs(by_file[file]) do
-      local meta = state_meta(b.state)
+      local meta = block_meta(b)
       local grade = b.grade and (" " .. tostring(b.grade) .. "%") or ""
       local sel = (b.id == R.active_block_id) and "›" or " "
       local text = string.format("  %s  %s %d %s%s", sel, meta.icon, b.id, b.title, grade)
@@ -235,7 +251,7 @@ local function render_right()
     return
   end
 
-  local meta = state_meta(block.state)
+  local meta = block_meta(block)
   local grade = block.grade and (" · " .. block.grade .. "%") or ""
   lines[#lines + 1] = string.format("  Block %d · %s · %s", block.id, block.title, block.file)
   marks[#marks + 1] = { #lines, 0, -1, "NvimeHeader" }
@@ -672,5 +688,8 @@ function M.open(session)
   vim.api.nvim_set_current_win(R.left_win)
   render()
 end
+
+-- Test-only export.
+M._overall_grade = overall_grade
 
 return M

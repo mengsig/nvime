@@ -462,6 +462,16 @@ Common options:
           chat = {
             max_history_messages = 24,
           },
+          bigchange = {
+            trivial = {
+              enabled = true,          -- auto-clear self-evident review blocks
+              doc_globs = {            -- which files count as documentation
+                "*.md", "*.markdown", "*.rst", "*.txt",
+                "**/*.md", "**/*.markdown", "**/*.rst", "**/*.txt",
+                "docs/**", "doc/**",
+              },
+            },
+          },
           sessions = {
             enabled = true,
             path = nil,
@@ -536,6 +546,17 @@ buffers, and blocked guard events from the last day.
 Default audit path:
 	        .nvime/audit.jsonl in the current git root, or
 	        stdpath("state")/nvime/audit.jsonl when there is no git root.
+
+Big Change review (|<leader>nB|) auto-clears self-evident blocks on the `easy`
+and `medium` difficulties: a block whose changed lines are only imports /
+requires, documentation or markdown prose, comments, or version/config value
+bumps clears with no explanation, shown as "trivial . auto-cleared". Such
+blocks still count toward the X/Y cleared merge lock but are excluded from the
+headline comprehension Grade (numerator and denominator), so a change made
+entirely of trivial blocks shows no Grade line yet still merges. The relaxation
+is off on `extreme` (every block must be explained) and is a no-op on `vibe`
+(which already auto-clears). Configure with `bigchange.trivial.enabled`
+(default true) and `bigchange.trivial.doc_globs` (files treated as docs).
 
 ==============================================================================
 PROTOCOL                                                      *nvime-protocol*

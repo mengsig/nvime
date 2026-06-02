@@ -60,6 +60,8 @@ The lifecycle:
 
 Difficulty only controls review strictness: `vibe` clears blocks on approve with no explanation; `easy`/`medium`/`extreme` require explanations grading ≥ 40 / 70 / 90%.
 
+On `easy`/`medium`, **self-evident blocks auto-clear** with no explanation: blocks whose changed lines are only imports/requires, documentation/markdown prose, comments, or version/config value bumps. They show as `⚡ trivial · auto-cleared`, count toward the `X/Y cleared` merge lock, and are excluded from the headline comprehension Grade (so a change made entirely of trivial blocks shows no Grade line but still merges). The relaxation is off on `extreme` (everything must be explained) and is a no-op on `vibe` (which already auto-clears). Tune it with `bigchange.trivial.enabled` (default `true`) and `bigchange.trivial.doc_globs` (which files count as documentation).
+
 ## Install
 
 Requires Neovim 0.10 or newer.

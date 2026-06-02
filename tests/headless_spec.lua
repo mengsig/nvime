@@ -105,6 +105,113 @@ do
   assert(#warnings >= 3, "config validation warns on unknown keys and wrong types")
 end
 do
+  -- triviality: self-evident Big Change review blocks auto-clear without a
+  -- graded explanation on easy/medium difficulty.
+  local triviality = require("nvime.bigchange.triviality")
+  local function hunks_of(file, lines)
+    local hl = {}
+    for _, l in ipairs(lines) do
+      hl[#hl + 1] = { kind = l[1], text = l[2] }
+    end
+    return { { file = file, header = "@@", lines = hl } }
+  end
+  local function classify(file, lines, opts)
+    opts = opts or {}
+    local session = { difficulty = opts.difficulty or "easy" }
+    local block = { file = file, agent_trivial = opts.agent_trivial }
+    return triviality.classify(session, block, hunks_of(file, lines))
+  end
+
+  -- pure imports across lua / py / js
+  local lua_imports = classify("lua/foo.lua", { { "add", 'local bar = require("bar")' } })
+  assert_eq(lua_imports.trivial, true, "lua imports are trivial")
+  assert_eq(lua_imports.source, "heuristic", "lua imports clear via heuristic")
+  assert_eq(lua_imports.category, "imports", "lua imports category")
+  local py_imports = classify("app/x.py", { { "add", "import os" }, { "add", "from a.b import c" } })
+  assert_eq(py_imports.category, "imports", "py imports category")
+  assert_eq(py_imports.source, "heuristic", "py imports heuristic")
+  local js_imports = classify("src/x.js", { { "add", 'import x from "y"' } })
+  assert_eq(js_imports.category, "imports", "js imports category")
+
+  -- documentation files (by extension and by docs/** directory)
+  assert_eq(classify("README.md", { { "add", "# New heading" } }).category, "docs", "markdown is docs")
+  assert_eq(classify("docs/guide.rst", { { "add", "Some prose." } }).category, "docs", "docs/** is docs")
+
+  -- comment-only edits
+  assert_eq(
+    classify("lua/foo.lua", { { "add", "-- explain the why" }, { "add", "" } }).category,
+    "comments",
+    "comment-only block is comments"
+  )
+
+  -- version / config value bumps
+  assert_eq(classify("Cargo.toml", { { "add", 'version = "0.4.0"' } }).category, "config", "toml is config")
+  assert_eq(classify("lua/version.lua", { { "add", 'M.version = "0.4.0"' } }).category, "config", "version.lua is config")
+
+  -- mixing an import with executable code is NOT trivial
+  local mixed_exec = classify("lua/foo.lua", { { "add", 'local x = require("y")' }, { "add", "x.run()" } })
+  assert_eq(mixed_exec.trivial, false, "import + executable assignment is not trivial")
+
+  -- agent-tagged block mixing trivial kinds (no executable code) clears via agent path
+  local agent_mixed = classify(
+    "lua/foo.lua",
+    { { "add", 'local x = require("y")' }, { "add", "-- note" }, { "add", "" } },
+    { agent_trivial = true }
+  )
+  assert_eq(agent_mixed.trivial, true, "agent-tagged mixed-trivial block clears")
+  assert_eq(agent_mixed.source, "agent", "agent-tagged mixed block clears via agent path")
+  assert_eq(agent_mixed.category, "mixed", "agent-tagged mixed block category")
+
+  -- the agent guard: a block with executable code never auto-clears
+  local agent_exec = classify(
+    "lua/foo.lua",
+    { { "add", 'local x = require("y")' }, { "add", "dangerous()" } },
+    { agent_trivial = true }
+  )
+  assert_eq(agent_exec.trivial, false, "agent guard blocks executable code")
+
+  -- relaxation is off on extreme / when disabled / and a no-op on vibe
+  assert_eq(triviality.applies({ difficulty = "extreme" }), false, "applies false on extreme")
+  assert_eq(
+    classify("lua/foo.lua", { { "add", 'local b = require("b")' } }, { difficulty = "extreme" }).trivial,
+    false,
+    "extreme never auto-clears"
+  )
+  assert_eq(triviality.applies({ difficulty = "vibe" }), false, "applies false on vibe")
+  assert_eq(
+    classify("lua/foo.lua", { { "add", 'local b = require("b")' } }, { difficulty = "vibe" }).trivial,
+    false,
+    "vibe is a no-op for triviality"
+  )
+  local state = require("nvime.state")
+  local prior_trivial = state.config.bigchange and state.config.bigchange.trivial
+  state.config.bigchange = state.config.bigchange or {}
+  state.config.bigchange.trivial = { enabled = false }
+  assert_eq(triviality.applies({ difficulty = "easy" }), false, "applies false when disabled")
+  assert_eq(
+    classify("lua/foo.lua", { { "add", 'local b = require("b")' } }).trivial,
+    false,
+    "disabled never auto-clears"
+  )
+  state.config.bigchange.trivial = prior_trivial
+
+  -- overall_grade excludes trivial blocks from the percentage
+  local review = require("nvime.bigchange.review")
+  local all_trivial = { blocks = { { trivial = true, state = "cleared" }, { trivial = true, state = "cleared" } } }
+  assert_eq(review._overall_grade(all_trivial), nil, "all-trivial change has no grade")
+  local mix = {
+    blocks = {
+      { trivial = true, state = "cleared" },
+      { grade = 80, state = "cleared" },
+      { grade = 40, state = "cleared" },
+    },
+  }
+  local pct, scored, gradeable = review._overall_grade(mix)
+  assert_eq(pct, 60, "grade excludes trivial block from the average")
+  assert_eq(scored, 2, "grade counts only non-trivial graded blocks")
+  assert_eq(gradeable, 2, "grade denominator is the non-trivial count")
+end
+do
   local state = require("nvime.state")
   local wrapped_system = vim.system
   require("nvime").disable()

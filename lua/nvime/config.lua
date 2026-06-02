@@ -165,6 +165,21 @@ M.defaults = {
   chat = {
     max_history_messages = 24,
   },
+  bigchange = {
+    -- Forced-comprehension review relaxation for self-evident blocks. When a
+    -- review block is only imports/requires, documentation/markdown prose,
+    -- comments, or version/config bumps, it is auto-cleared (no explanation).
+    -- Disabled implicitly on `extreme` difficulty, where everything must be
+    -- explained. Never applies on `vibe` (which already auto-clears).
+    trivial = {
+      enabled = true,
+      doc_globs = {
+        "*.md", "*.markdown", "*.rst", "*.txt",
+        "**/*.md", "**/*.markdown", "**/*.rst", "**/*.txt",
+        "docs/**", "doc/**",
+      },
+    },
+  },
   plan = {
     enabled = true,
     dir = nil, -- defaults to <git-root>/.nvime/plans

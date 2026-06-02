@@ -81,8 +81,9 @@ local function group_prompt(hunks)
     "- Each block groups hunks from ONE file only.",
     "- Every hunk must belong to exactly one block.",
     "- Give each block a SHORT descriptive title (<= 60 chars). Do NOT explain the code.",
+    '- Mark a block "trivial": true ONLY when it is self-evident and needs no comprehension check — import/require/use lines, documentation/markdown prose, comment-only edits, or version/config value bumps. Otherwise omit it or set false.',
     "- Output ONLY a JSON array wrapped in <JSON></JSON>, no prose:",
-    '  [{"title": "...", "file": "path", "hunk_ids": ["path#1"]}]',
+    '  [{"title": "...", "file": "path", "hunk_ids": ["path#1"], "trivial": false}]',
     "",
     "Hunks:",
   }
@@ -142,7 +143,12 @@ local function normalize_groups(groups, hunks)
         end
       end
       if #ids > 0 then
-        out[#out + 1] = { title = tostring(g.title or "block"), file = g.file or valid_ids[ids[1]], hunk_ids = ids }
+        out[#out + 1] = {
+          title = tostring(g.title or "block"),
+          file = g.file or valid_ids[ids[1]],
+          hunk_ids = ids,
+          trivial = g.trivial == true,
+        }
       end
     end
   end
@@ -177,6 +183,13 @@ local function carry_state(session, new_blocks, prior_blocks)
       b.grade = prior.grade
       b.comment = prior.comment
       b.action = prior.action
+      -- Keep a previously trivial-cleared, content-unchanged block flagged so a
+      -- re-capture does not silently downgrade it to an earned 100% clear.
+      if prior.action == "auto_trivial" then
+        b.trivial = prior.trivial
+        b.trivial_category = prior.trivial_category
+        b.trivial_source = prior.trivial_source
+      end
     end
   end
 end
@@ -201,9 +214,23 @@ local function assemble(session, groups, prior_blocks)
       grade = nil,
       hint = nil,
       agent_response = nil,
+      agent_trivial = g.trivial == true,
     }
   end
   carry_state(session, blocks, prior_blocks)
+  -- Auto-clear self-evident blocks (imports/docs/comments/config bumps) so the
+  -- user never writes a graded explanation for them.
+  local triviality = require("nvime.bigchange.triviality")
+  for _, b in ipairs(blocks) do
+    if b.state ~= "cleared" then
+      local res = triviality.classify(session, b, M.block_hunks(session, b))
+      if res.trivial then
+        b.state, b.action = "cleared", "auto_trivial"
+        b.trivial, b.trivial_category, b.trivial_source = true, res.category, res.source
+        b.grade, b.comment, b.hint, b.agent_response = nil, nil, nil, nil
+      end
+    end
+  end
   session.blocks = blocks
 end
 
