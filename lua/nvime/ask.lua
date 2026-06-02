@@ -163,6 +163,9 @@ run = function(selection, question, provider, session_opts)
   local session_id = selection_state.active_session_id()
   selection_state.append_user(provider, "ask", question, session_id)
   selection_state.append_response_header(provider, "ask", session_id)
+  -- Mark the conversation's persona as read-only so a later switch to edit mode
+  -- re-establishes the full edit contract instead of resuming read-only.
+  selection_state.mark_run_mode(session_id, "ask")
 
   local response = {}
   local prompt = build_prompt(selection, question)
@@ -332,6 +335,10 @@ function M.start(opts)
 
   run(selection, question, provider, { session_id = opts.session_id, new_session = opts.new_session })
 end
+
+-- Re-arm the panel's input for ask mode on an existing session, preserving the
+-- selection/session. Used by the in-panel ask⇄edit toggle (nvime.selection).
+M.arm_prompt = arm_followup
 
 M._build_prompt = build_prompt
 M._wants_edit_followup = wants_edit_followup

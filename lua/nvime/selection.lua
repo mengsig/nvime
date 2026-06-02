@@ -111,8 +111,9 @@ local policy = {
   module_name = "nvime.selection",
   input_buffer_name = "nvime://selection-input",
   buffer_name_prefix = "nvime://selection/",
-  footer = " i input | ? prompts | <CR> send on prompt | p provider | m model | q close ",
+  footer = " i input | e ask⇄edit | ? prompts | <CR> send | p provider | m model | q close ",
   zindex = 52,
+  supports_mode_toggle = true,
   provider_scope = "selection",
   enter_input_method = "focus_input",
   persist_filename = "selection-sessions.json",
@@ -136,6 +137,7 @@ local policy = {
       selection = persisted_selection(session.selection),
       provider = session.provider,
       mode = session.mode,
+      last_run_mode = session.last_run_mode,
       input_start = session.input_start,
       provider_sessions = session.provider_sessions or {},
       last_ask = persisted_last_ask(session.last_ask),
@@ -293,6 +295,24 @@ function M.notify_finished(lane, session_id, code)
   ctx.notify_finished(session, code or 0, lane)
 end
 
+-- Record the lane of the agent run a session most recently launched. A resumed
+-- provider conversation carries the SYSTEM/persona framing of that last run, so
+-- callers (edit.run_edit) use this — not the display `mode`, which a UI toggle
+-- can flip ahead of any run — to decide whether the resumed agent still thinks
+-- it is read-only and needs the full edit contract re-established.
+function M.mark_run_mode(session_id, run_mode)
+  local session = session_id and ctx.get_session(session_id) or ctx.active_session()
+  if session then
+    session.last_run_mode = run_mode
+    ctx.touch_session(session)
+  end
+end
+
+function M.last_run_mode(session_id)
+  local session = session_id and ctx.get_session(session_id) or ctx.active_session()
+  return session and session.last_run_mode or nil
+end
+
 function M.matching_sessions(selection)
   local key = selection_key(selection)
   local matches = {}
@@ -386,6 +406,45 @@ function M.append_prompt(text, session_id)
   local existing = vim.trim(ctx.current_input_text() or "")
   local combined = existing ~= "" and (existing .. "\n" .. text) or text
   ctx.reset_input(combined, { force_follow = true })
+end
+
+-- Switch the active selection chat between ask (read-only) and edit modes in
+-- place, keeping the same session, selection, provider, and any prompt you've
+-- already typed. Bound to `e` in the panel.
+function M.toggle_mode()
+  local session = ctx.active_session()
+  if not session then
+    vim.notify("nvime: no selection chat open to switch", vim.log.levels.INFO)
+    return
+  end
+  if session.busy then
+    vim.notify("nvime: wait for the current run to finish before switching modes", vim.log.levels.WARN)
+    return
+  end
+  local current = (session.mode == "edit") and "edit" or "ask"
+  local next_mode = (current == "ask") and "edit" or "ask"
+  local selection = session.selection
+  if not selection then
+    vim.notify("nvime: this chat has no selection to switch", vim.log.levels.INFO)
+    return
+  end
+  local provider = session.provider
+  local session_id = session.id
+  -- Preserve whatever is staged so toggling never eats an in-progress prompt.
+  local staged = vim.trim(ctx.current_input_text() or "")
+
+  if next_mode == "edit" then
+    require("nvime.edit").arm_prompt(selection, provider, session_id)
+  else
+    require("nvime.ask").arm_prompt(selection, provider, session_id)
+  end
+  if staged ~= "" then
+    ctx.reset_input(staged, { force_follow = true })
+  end
+  vim.notify(
+    "nvime: " .. next_mode .. (next_mode == "ask" and " (read-only)" or " (can edit files)"),
+    vim.log.levels.INFO
+  )
 end
 
 function M.choose_prompt()

@@ -879,6 +879,11 @@ function M.create(policy)
     vim.keymap.set("n", "?", function()
       require(module_name).choose_prompt()
     end, opts)
+    if policy.supports_mode_toggle then
+      vim.keymap.set("n", "e", function()
+        require(module_name).toggle_mode()
+      end, opts)
+    end
     vim.keymap.set("n", "<C-c>", function()
       require(module_name).cancel_active()
     end, opts)

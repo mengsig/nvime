@@ -203,6 +203,21 @@ function M.scrollback(bufnr, ns)
   local in_code = false
   local code_lang = nil
 
+  -- Width of the text area of the window showing this buffer, used to suppress
+  -- right-aligned badges that would otherwise overlay (hide) the last
+  -- characters of a long line — e.g. the "user" badge over a long prompt you
+  -- are still typing.
+  local badge_avail = nil
+  do
+    local win = vim.fn.bufwinid(bufnr)
+    if win ~= -1 then
+      local info = vim.fn.getwininfo(win)[1]
+      if info then
+        badge_avail = info.width - (info.textoff or 0)
+      end
+    end
+  end
+
   local function mark(row, start_col, end_col, group, opts)
     if row < 0 or row >= #lines then
       return
@@ -233,6 +248,15 @@ function M.scrollback(bufnr, ns)
   local function label(row, text, group)
     if row < 0 or row >= #lines then
       return
+    end
+    -- Drop the badge rather than let it cover real text: a right-aligned
+    -- virt_text is painted at the window edge even when the line reaches it.
+    if badge_avail then
+      local line_w = vim.fn.strdisplaywidth(lines[row + 1] or "")
+      local text_w = vim.fn.strdisplaywidth(text)
+      if line_w + text_w + 1 > badge_avail then
+        return
+      end
     end
     vim.api.nvim_buf_set_extmark(bufnr, ns, row, 0, {
       virt_text = { { text, group or "NvimeMuted" } },

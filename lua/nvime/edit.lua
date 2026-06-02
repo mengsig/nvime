@@ -597,7 +597,11 @@ end
 run_edit = function(selection, intent, provider, session_opts)
   session_opts = session_opts or {}
   local prior_session = session_opts.session_id and selection_state.get_session(session_opts.session_id)
-  local prior_mode = prior_session and prior_session.mode
+  -- The persona of the conversation we may resume is set by its LAST agent run,
+  -- not the panel's display mode (a UI toggle can flip `mode` to "edit" before
+  -- any edit run has happened). Use the run persona so a resumed read-only ask
+  -- conversation is correctly re-armed with the full edit contract.
+  local prior_run_mode = prior_session and prior_session.last_run_mode
   selection_state.open({
     provider = provider,
     mode = "edit",
@@ -611,6 +615,10 @@ run_edit = function(selection, intent, provider, session_opts)
 
   local response = {}
   local lane = session_opts.lane == "perf" and "perf" or session_opts.lane == "quick" and "quick" or "edit"
+  -- Tag the conversation's persona for the NEXT turn's resume decision (read
+  -- above for prior_run_mode). Set after prior_run_mode was captured, so this
+  -- never clobbers the value the switch detection just used.
+  selection_state.mark_run_mode(session_id, lane)
   local agent_session = selection_state.agent_run_opts(session_id, provider)
   -- Plan-level continuity override: when the caller passes a plan_continuity
   -- table, its resume_session_id wins over the selection-session one (so all
@@ -642,20 +650,21 @@ run_edit = function(selection, intent, provider, session_opts)
   end
 
   local resuming = effective_resume and effective_resume ~= ""
+  -- Only an edit-family persona already carries the patch contract. Resuming an
+  -- ask (read-only), unknown, or any non-edit conversation means the agent still
+  -- believes it must not patch — so re-send the FULL edit contract with an
+  -- explicit override, not a terse "prior rules still apply" follow-up (which
+  -- would re-assert the read-only persona and yield narrated, unappliable diffs).
+  local edit_family = { edit = true, perf = true, quick = true }
   local prompt
-  if resuming and prior_mode == "ask" then
+  if resuming and not edit_family[prior_run_mode or ""] then
     prompt = table.concat({
-      "MODE SWITCH: you were in read-only ask mode, now switching to NVIME EDIT MODE.",
-      "You already investigated this code in the previous messages. Use that context. You may re-read the selected file to verify exact line content before patching.",
-      "Produce a patch using NVIME_DIFF or NVIME_REPLACEMENT format.",
-      "You may only propose changes for the selected range in the current file.",
-      "Prefer NVIME_DIFF for changes to existing text. Include --- a/ +++ b/ and @@ headers.",
-      "Emit one RATIONALE: line before the patch block.",
+      "MODE SWITCH — the earlier read-only instructions NO LONGER APPLY.",
+      "You are now in nvime EDIT MODE. You MUST answer with a patch block",
+      "(NVIME_DIFF or NVIME_REPLACEMENT) or NVIME_NO_CHANGE — never a narrated or",
+      "fenced ```diff. Reuse anything you already learned about this code above.",
       "",
-      "File: " .. (selection.path or "unknown"),
-      "Allowed range: " .. tostring(selection.line1 or 1) .. "-" .. tostring(selection.line2 or selection.line1 or 1),
-      "Intent: " .. intent,
-    }, "\n")
+    }, "\n") .. build_prompt(selection, intent)
   elseif resuming then
     prompt = table.concat({
       "Follow-up on the same selection.",
@@ -1113,6 +1122,10 @@ function M.quick_fix(opts)
   end
   run_edit(selection, intent, provider, { lane = "quick", new_session = true })
 end
+
+-- Re-arm the panel's input for edit mode on an existing session, preserving the
+-- selection/session. Used by the in-panel ask⇄edit toggle (nvime.selection).
+M.arm_prompt = arm_edit_followup
 
 M._build_prompt = build_prompt
 M._build_perf_prompt = build_perf_prompt
