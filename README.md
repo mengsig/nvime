@@ -62,7 +62,7 @@ The structured brief you fill in during **Draft** (Title / Context / Goal / Note
 
 ![nvime Big Change draft brief](docs/bigchange-plan-compose.png)
 
-The forced-comprehension **Review** — block tree on the left, inline diff on the right. On `a`pprove you explain what the block does and the agent grades your explanation against the difficulty threshold:
+The forced-comprehension **Review** — block tree on the left, inline diff on the right. On `a`pprove you explain what the block does and the agent grades your explanation against the difficulty threshold (hereuner, we show 2 cases where we get denied for different reasons on `easy` mode:
 
 ![nvime Big Change review](docs/big-change-review.png)
 
