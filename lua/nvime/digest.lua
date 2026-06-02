@@ -91,6 +91,7 @@ function M.summarize(events)
     sessions = {},
     plans = {},
     files_touched = {},
+    acceptance = { resolutions = 0, accepted = 0, total = 0, by_provider = {} },
     earliest_ts = nil,
     latest_ts = nil,
   }
@@ -127,6 +128,19 @@ function M.summarize(events)
     then
       stats.risky[#stats.risky + 1] = event
     end
+    if kind == "diff_resolved" then
+      stats.acceptance.resolutions = stats.acceptance.resolutions + 1
+      local acc = tonumber(event.accepted) or 0
+      local tot = tonumber(event.total) or 0
+      stats.acceptance.accepted = stats.acceptance.accepted + acc
+      stats.acceptance.total = stats.acceptance.total + tot
+      if event.provider then
+        local p = event.provider
+        stats.acceptance.by_provider[p] = stats.acceptance.by_provider[p] or { accepted = 0, total = 0 }
+        stats.acceptance.by_provider[p].accepted = stats.acceptance.by_provider[p].accepted + acc
+        stats.acceptance.by_provider[p].total = stats.acceptance.by_provider[p].total + tot
+      end
+    end
     if kind == "agent_start" then
       ensure_counts(stats.sessions, event.lane or "unknown")
       stats.sessions[event.lane or "unknown"] = stats.sessions[event.lane or "unknown"] + 1
@@ -161,6 +175,13 @@ local function pad_right(text, width)
     return text
   end
   return text .. string.rep(" ", width - visible)
+end
+
+local function pct(acc, tot)
+  if not tot or tot == 0 then
+    return 0
+  end
+  return math.floor((acc / tot) * 100 + 0.5)
 end
 
 local function sorted_pairs(map)
@@ -227,6 +248,37 @@ local function render_digest(stats, window_days)
       )
     end
   end
+  push("")
+
+  push("  ▎ DIFF ACCEPTANCE", "NvimePlanHeading")
+  local acc = stats.acceptance or { resolutions = 0, accepted = 0, total = 0, by_provider = {} }
+  if (acc.resolutions or 0) == 0 then
+    push("    (no resolved diffs recorded)", "NvimePlanWhy")
+  else
+    push(
+      string.format("    %s  %d/%d blocks (%d%%)", pad_right("overall", 14), acc.accepted, acc.total, pct(acc.accepted, acc.total)),
+      "NvimePlanFile"
+    )
+    -- per-provider, ordered by total blocks descending (resolved providers only)
+    local totals = {}
+    for provider, bucket in pairs(acc.by_provider or {}) do
+      totals[provider] = bucket.total or 0
+    end
+    for _, provider in ipairs(sorted_pairs(totals)) do
+      local b = acc.by_provider[provider]
+      push(
+        string.format("    %s  %d/%d (%d%%)", pad_right(provider, 14), b.accepted, b.total, pct(b.accepted, b.total)),
+        "NvimePlanFile"
+      )
+    end
+  end
+  -- force-accepts line, always shown
+  local fa = (stats.by_event or {})["block_force_applied"] or 0
+  local vf = (stats.by_event or {})["verify_force"] or 0
+  push(
+    string.format("    force-accepts: %d (block_force_applied) · %d (verify_force)", fa, vf),
+    (fa + vf > 0) and "NvimePlanStepBlocked" or "NvimePlanStepDone"
+  )
   push("")
 
   push("  ▎ RISKY EVENTS", "NvimePlanHeading")

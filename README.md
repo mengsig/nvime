@@ -342,8 +342,10 @@ require("nvime").setup({
 - `:NvimeDiff` opens the active diff in a two-pane review workspace.
 - `:NvimeAudit` opens `.nvime/audit.jsonl`. `:NvimeAudit summary [days]` opens a
   digest float (default 7 days) that groups events by lane/provider, ranks the
-  most-touched files, and surfaces risky events (force-accepts, diff conflicts,
-  plan rollbacks). `:NvimeAudit forces` opens a focused review of every
+  most-touched files, reports the diff block acceptance rate (overall and per
+  provider) alongside the force-accept count, and surfaces risky events
+  (force-accepts, diff conflicts, plan rollbacks). `:NvimeAudit forces` opens a
+  focused review of every
   force-accepted diff block — the single class of action that bypassed nvime's
   live-content guard.
 - `:NvimeAttribute` shows the attribution entry for the line under the cursor

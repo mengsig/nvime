@@ -3598,26 +3598,35 @@ assert(vim.fn.exists(":NvimeAttribute") == 2, "NvimeAttribute command exists");
     file = "lua/nvime/plan.lua",
     ts = recent_iso,
   })
+  write_event({ event = "diff_resolved", accepted = 2, total = 3, provider = "claude", ts = recent_iso })
+  write_event({ event = "diff_resolved", accepted = 0, total = 1, provider = "codex", ts = recent_iso })
   -- Old event, outside the 7-day window.
   write_event({ event = "agent_start", lane = "edit", provider = "claude", ts = stale_iso })
 
   local events = digest.read_events({ path = synthetic, window_days = 7 })
-  assert(#events == 6, "digest: 7-day window excludes stale event (got " .. #events .. ")")
+  assert(#events == 8, "digest: 7-day window excludes stale event (got " .. #events .. ")")
   local all_events = digest.read_events({ path = synthetic })
-  assert(#all_events == 7, "digest: no window returns all events (got " .. #all_events .. ")")
+  assert(#all_events == 9, "digest: no window returns all events (got " .. #all_events .. ")")
 
   local stats = digest.summarize(events)
-  assert_eq(stats.total, 6, "digest: total events")
+  assert_eq(stats.total, 8, "digest: total events")
   -- by_lane counts every event tagged with a lane (start + exit etc.).
   assert_eq(stats.by_lane.edit, 2, "digest: edit-lane events (start + exit)")
   assert_eq(stats.by_lane.plan, 1, "digest: plan-lane events")
   -- sessions counts agent_start only, so it represents distinct sessions.
   assert_eq(stats.sessions.edit, 1, "digest: edit sessions started")
   assert_eq(stats.sessions.plan, 1, "digest: plan sessions started")
-  assert_eq(stats.by_provider.claude, 2, "digest: claude provider events")
-  assert_eq(stats.by_provider.codex, 1, "digest: codex provider events")
+  assert_eq(stats.by_provider.claude, 3, "digest: claude provider events")
+  assert_eq(stats.by_provider.codex, 2, "digest: codex provider events")
   assert(#stats.risky == 3, "digest: risky events bucketed (force/conflict/rollback)")
   assert_eq(stats.plans["0001-test"], 1, "digest: plan id surfaced")
+  assert_eq(stats.acceptance.resolutions, 2, "digest: diff_resolved count")
+  assert_eq(stats.acceptance.accepted, 2, "digest: accepted blocks summed")
+  assert_eq(stats.acceptance.total, 4, "digest: total blocks summed")
+  assert_eq(stats.acceptance.by_provider.claude.accepted, 2, "digest: claude accepted")
+  assert_eq(stats.acceptance.by_provider.claude.total, 3, "digest: claude total")
+  assert_eq(stats.acceptance.by_provider.codex.accepted, 0, "digest: codex accepted")
+  assert_eq(stats.acceptance.by_provider.codex.total, 1, "digest: codex total")
 
   local forces = digest.force_review(events)
   assert(#forces == 1, "digest: exactly one force_applied")
