@@ -37,3 +37,4 @@ bench/
 # Local files for development
 REVIEW.md
 IMPROVEMENTS.md
+.claude/
