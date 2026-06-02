@@ -221,6 +221,12 @@ local function define_highlights()
   -- red-where-it-should-be-green.
   vim.api.nvim_set_hl(0, "NvimeDiffAdd", { fg = C.green, bg = C.add_bg })
   vim.api.nvim_set_hl(0, "NvimeDiffDelete", { fg = C.red, bg = C.del_bg })
+  -- Background-only variants for tinting a WHOLE real-file line (via
+  -- extmark line_hl_group) without flattening its syntax/treesitter foreground.
+  -- Used by the bigchange file-view review so added lines read green-ish while
+  -- their code stays fully highlighted and navigable.
+  vim.api.nvim_set_hl(0, "NvimeDiffAddLine", { bg = C.add_bg })
+  vim.api.nvim_set_hl(0, "NvimeDiffDeleteLine", { bg = C.del_bg })
   vim.api.nvim_set_hl(0, "NvimeDiffHunk", { fg = C.fg, bg = C.hunk_bg, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeConflict", { fg = C.yellow, bg = C.warn_bg, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeError", { fg = C.red, bold = true, default = true })

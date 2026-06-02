@@ -13,6 +13,7 @@
 -- when every block is cleared.
 
 local blocks_mod = require("nvime.bigchange.blocks")
+local fileview = require("nvime.bigchange.fileview")
 local store = require("nvime.bigchange.store")
 local uikit = require("nvime.bigchange.uikit")
 local ui = require("nvime.ui")
@@ -22,12 +23,19 @@ local M = {}
 local R = {
   session = nil,
   tabpage = nil,
+  -- left pane: the block tree + control surface (approve / request-changes /
+  -- submit / merge). right pane: the active block's REAL worktree file, opened
+  -- as a normal navigable buffer (LSP, treesitter, gd, search all work) with
+  -- the diff annotated inline; ]c / [c jump between its change chunks.
   left_win = nil,
   left_buf = nil,
   right_win = nil,
-  right_buf = nil,
+  right_buf = nil, -- bufnr currently shown in right_win (a real file, or the fallback scratch)
+  right_file = nil, -- worktree-relative path currently annotated (nil for placeholder)
+  fallback_buf = nil, -- reused scratch for files not on disk (deleted/binary)
+  anchors = {}, -- buffer lines starting each hunk in the shown file (for ]c/[c)
   ns_left = vim.api.nvim_create_namespace("nvime.bigchange.review.left"),
-  ns_right = vim.api.nvim_create_namespace("nvime.bigchange.review.right"),
+  ns_overlay = vim.api.nvim_create_namespace("nvime.bigchange.review.overlay"),
   row_to_block = {},
   active_block_id = nil,
   busy = false,
@@ -93,6 +101,19 @@ local function all_cleared(session)
     end
   end
   return true
+end
+
+-- The block to focus by default: the first not-yet-cleared one, else the first.
+local function default_active()
+  for _, b in ipairs(R.session.blocks or {}) do
+    if b.state ~= "cleared" then
+      return b.id
+    end
+  end
+  if R.session.blocks and R.session.blocks[1] then
+    return R.session.blocks[1].id
+  end
+  return nil
 end
 
 local function progress(session)
@@ -217,6 +238,8 @@ local function render_left()
     lines[#lines + 1] = "  ● " .. (R.status or "submitting…")
     marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusRunning" }
   else
+    lines[#lines + 1] = "  <CR> open file · ]c/[c hunks · <C-w>h back"
+    marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
     lines[#lines + 1] = "  a approve · r request-changes"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
     lines[#lines + 1] = "  <C-s> submit · M merge · q close"
@@ -230,40 +253,148 @@ local function render_left()
 end
 
 -- ---------------------------------------------------------------------------
--- right pane: block diff + comment
+-- right pane: the active block's REAL file, navigably annotated
 -- ---------------------------------------------------------------------------
-local function render_right()
-  if not (R.right_buf and vim.api.nvim_buf_is_valid(R.right_buf)) then
+
+-- Worktree-absolute path for a block's file, or nil when unresolvable.
+local function file_path(session, file)
+  local wt = session.worktree
+  if not wt or wt == "" or not file or file == "" then
+    return nil
+  end
+  return wt .. "/" .. file
+end
+
+-- A normal editor window (NOT panel chrome): syntax/treesitter foreground must
+-- show through, and we need a signcolumn for the "+" change signs.
+local function configure_file_window(winid)
+  if not (winid and vim.api.nvim_win_is_valid(winid)) then
     return
   end
-  local session = R.session
-  ui.ensure_highlights()
-  local lines, marks = {}, {}
-  local block = R.active_block_id and get_block(R.active_block_id) or nil
+  vim.wo[winid].signcolumn = "yes:1"
+  vim.wo[winid].number = true
+  vim.wo[winid].relativenumber = false
+  vim.wo[winid].wrap = false
+  vim.wo[winid].cursorline = true
+  vim.wo[winid].winhighlight = ""
+end
 
-  if not block then
-    lines[#lines + 1] = "  Select a block on the left (<CR>) to review it."
-    marks[#marks + 1] = { 1, 0, -1, "NvimeMuted" }
-    vim.bo[R.right_buf].modifiable = true
-    vim.api.nvim_buf_set_lines(R.right_buf, 0, -1, false, lines)
-    vim.bo[R.right_buf].modifiable = false
-    uikit.apply_marks(R.right_buf, R.ns_right, lines, marks)
-    return
-  end
-
+-- The status / comment / agent-reply box drawn as virtual lines above the
+-- block's first changed line, so the review feedback rides along with the code.
+local function overlay_lines(block)
   local meta = block_meta(block)
+  local out = {}
   local grade = block.grade and (" · " .. block.grade .. "%") or ""
-  lines[#lines + 1] = string.format("  Block %d · %s · %s", block.id, block.title, block.file)
-  marks[#marks + 1] = { #lines, 0, -1, "NvimeHeader" }
-  lines[#lines + 1] = "  [" .. meta.label .. grade .. "]"
-  marks[#marks + 1] = { #lines, 0, -1, meta.hl }
-  lines[#lines + 1] =
-    "  ───────────────────────────────────────────────"
-  marks[#marks + 1] = { #lines, 0, -1, "NvimeRule" }
+  out[#out + 1] = {
+    { "╭─ ", "NvimeAgent" },
+    { string.format("Block %d · %s", block.id, block.title), "NvimeHeader" },
+    { "  [" .. meta.label .. grade .. "]", meta.hl },
+  }
 
-  for _, h in ipairs(blocks_mod.block_hunks(session, block)) do
+  -- An unsubmitted draft (typed but not yet committed with <C-s>).
+  local pending_draft = block.draft
+    and block.draft ~= ""
+    and block.state ~= "explaining"
+    and block.state ~= "critiquing"
+  if pending_draft then
+    out[#out + 1] = { { "│ ", "NvimeAgent" }, { "draft (unsubmitted) — a/r to resume", "NvimeStatusWarn" } }
+    for _, cl in ipairs(vim.split(block.draft, "\n", { plain = true })) do
+      out[#out + 1] = { { "│   ", "NvimeAgent" }, { cl, "NvimeUserText" } }
+    end
+  end
+
+  if block.comment and block.comment ~= "" then
+    local title = block.action == "request_changes" and "your critique" or "your explanation"
+    local foot = block.state == "explaining" and " · ⏳ awaiting grade"
+      or block.state == "critiquing" and " · ⏳ awaiting agent"
+      or ""
+    out[#out + 1] = { { "│ ", "NvimeAgent" }, { title .. foot, "NvimeSection" } }
+    for _, cl in ipairs(vim.split(block.comment, "\n", { plain = true })) do
+      out[#out + 1] = { { "│   ", "NvimeAgent" }, { cl, "NvimeUserText" } }
+    end
+  end
+
+  if block.agent_response and block.agent_response ~= "" then
+    out[#out + 1] = { { "│ ", "NvimeAgent" }, { "agent", "NvimeAgent" } }
+    for _, cl in ipairs(vim.split(block.agent_response, "\n", { plain = true })) do
+      out[#out + 1] = { { "│   ", "NvimeAgent" }, { cl, "NvimeNormal" } }
+    end
+  end
+
+  if block.hint and block.hint ~= "" and block.state == "needs_explanation" then
+    out[#out + 1] = { { "│ hint: ", "NvimeAgent" }, { block.hint, "NvimeStatusWarn" } }
+  end
+
+  out[#out + 1] = { { "╰─ a approve · r request-changes (left pane) ─", "NvimeMuted" } }
+  return out
+end
+
+-- Draw the overlay box for `block` above buffer line `anchor`.
+local function render_overlay(bufnr, block, anchor)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(bufnr, R.ns_overlay, 0, -1)
+  if not (block and anchor and anchor >= 1) then
+    return
+  end
+  ui.ensure_highlights()
+  pcall(vim.api.nvim_buf_set_extmark, bufnr, R.ns_overlay, anchor - 1, 0, {
+    virt_lines = overlay_lines(block),
+    virt_lines_above = true,
+  })
+end
+
+local function install_file_keymaps(bufnr)
+  vim.keymap.set("n", "]c", function()
+    fileview.jump(R.right_win, R.anchors, 1)
+  end, { buffer = bufnr, silent = true })
+  vim.keymap.set("n", "[c", function()
+    fileview.jump(R.right_win, R.anchors, -1)
+  end, { buffer = bufnr, silent = true })
+end
+
+-- A reusable scratch buffer for the placeholder / not-on-disk fallback views.
+local function ensure_fallback_buf()
+  if R.fallback_buf and vim.api.nvim_buf_is_valid(R.fallback_buf) then
+    return R.fallback_buf
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "hide"
+  vim.bo[buf].filetype = "nvime"
+  R.fallback_buf = buf
+  install_file_keymaps(buf)
+  return buf
+end
+
+-- Show a one-line message in the right window (no block selected).
+local function placeholder(msg)
+  if not (R.right_win and vim.api.nvim_win_is_valid(R.right_win)) then
+    return
+  end
+  local buf = ensure_fallback_buf()
+  ui.ensure_highlights()
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "  " .. msg })
+  vim.bo[buf].modifiable = false
+  uikit.apply_marks(buf, R.ns_overlay, { "  " .. msg }, { { 1, 0, -1, "NvimeMuted" } })
+  vim.api.nvim_win_set_buf(R.right_win, buf)
+  ui.configure_panel_window(R.right_win, { wrap = true, cursorline = false })
+  R.right_buf, R.right_file, R.anchors = buf, nil, {}
+end
+
+-- Files that aren't on disk (deleted, binary) can't be opened navigably — fall
+-- back to a read-only diff-text view so the change is still visible.
+local function show_fallback(block)
+  local buf = ensure_fallback_buf()
+  ui.ensure_highlights()
+  local lines, marks, anchors = {}, {}, {}
+  lines[#lines + 1] = "  " .. block.file .. "  (not on disk — diff view)"
+  marks[#marks + 1] = { #lines, 0, -1, "NvimeHeader" }
+  for _, h in ipairs(blocks_mod.block_hunks(R.session, block)) do
     lines[#lines + 1] = "  " .. h.header
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeSection" }
+    anchors[#anchors + 1] = #lines
+    marks[#marks + 1] = { #lines, 0, -1, "NvimeDiffHunk" }
     for _, l in ipairs(h.lines) do
       local sigil = (l.kind == "add" and "+") or (l.kind == "del" and "-") or " "
       lines[#lines + 1] = "  " .. sigil .. " " .. l.text
@@ -274,69 +405,96 @@ local function render_right()
       end
     end
   end
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  uikit.apply_marks(buf, R.ns_overlay, lines, marks)
+  vim.api.nvim_win_set_buf(R.right_win, buf)
+  ui.configure_panel_window(R.right_win, { wrap = false, cursorline = true })
+  R.right_buf, R.right_file, R.anchors = buf, block.file, anchors
+  if anchors[1] then
+    pcall(vim.api.nvim_win_set_cursor, R.right_win, { anchors[1], 0 })
+  end
+end
 
-  -- An unsubmitted draft (typed but not yet committed with <C-s>). Surfaced so
-  -- the user can see their cached work after leaving and reopening the review.
-  local pending_draft = block.draft and block.draft ~= ""
-    and block.state ~= "explaining"
-    and block.state ~= "critiquing"
-  if pending_draft then
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "  ╭─ draft (unsubmitted) ──────────────────"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusWarn" }
-    for _, cl in ipairs(vim.split(block.draft, "\n", { plain = true })) do
-      lines[#lines + 1] = "  │ " .. cl
-      marks[#marks + 1] = { #lines, 0, -1, "NvimeUserText" }
+-- Load the active block's real worktree file into the right window, annotate
+-- its diff, draw the feedback overlay, and jump to the block's first hunk.
+-- opts.reload forces a disk reload (after the agent revised code);
+-- opts.focus moves the cursor into the right window.
+local function show_file(block, opts)
+  opts = opts or {}
+  if not (R.right_win and vim.api.nvim_win_is_valid(R.right_win)) then
+    return
+  end
+  if not block then
+    placeholder("Select a block on the left (<CR>) to review it.")
+    return
+  end
+  local path = file_path(R.session, block.file)
+  if not path or vim.fn.filereadable(path) ~= 1 then
+    show_fallback(block)
+    return
+  end
+
+  -- :edit loads the real file (reloading from disk when unmodified, so agent
+  -- revisions are picked up); :edit! forces it after a grading round revised code.
+  local cmd = opts.reload and "edit!" or "edit"
+  pcall(vim.api.nvim_win_call, R.right_win, function()
+    vim.cmd(cmd .. " " .. vim.fn.fnameescape(path))
+  end)
+  local bufnr = vim.api.nvim_win_get_buf(R.right_win)
+  R.right_buf, R.right_file = bufnr, block.file
+  configure_file_window(R.right_win)
+  install_file_keymaps(bufnr)
+
+  local res = fileview.apply(bufnr, fileview.hunks_for_file(R.session, block.file))
+  R.anchors = res.anchors
+  local first_id = block.hunk_ids and block.hunk_ids[1]
+  local anchor = (first_id and res.by_hunk[first_id]) or res.anchors[1]
+  render_overlay(bufnr, block, anchor or 1)
+  if anchor and vim.api.nvim_win_is_valid(R.right_win) then
+    pcall(vim.api.nvim_win_set_cursor, R.right_win, { anchor, 0 })
+    pcall(vim.api.nvim_win_call, R.right_win, function()
+      vim.cmd("normal! zz")
+    end)
+  end
+  if opts.focus and vim.api.nvim_win_is_valid(R.right_win) then
+    vim.api.nvim_set_current_win(R.right_win)
+  end
+end
+
+-- Re-annotate the already-shown file and redraw its overlay WITHOUT re-editing
+-- or moving the cursor — used on cheap re-renders (grading progress, state
+-- changes). A genuinely different file is left for the next explicit selection.
+local function refresh_right()
+  local block = R.active_block_id and get_block(R.active_block_id) or nil
+  if not block then
+    if R.right_file ~= nil then
+      placeholder("Select a block on the left (<CR>) to review it.")
     end
-    lines[#lines + 1] = "  ╰─ a/r to resume ───────────────────────"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeMuted" }
+    return
   end
-
-  if block.comment and block.comment ~= "" then
-    lines[#lines + 1] = ""
-    local title = block.action == "request_changes" and "your critique" or "your explanation"
-    lines[#lines + 1] = "  ╭─ " .. title .. " ───────────────────────"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeSection" }
-    for _, cl in ipairs(vim.split(block.comment, "\n", { plain = true })) do
-      lines[#lines + 1] = "  │ " .. cl
-      marks[#marks + 1] = { #lines, 0, -1, "NvimeUserText" }
-    end
-    local foot = block.state == "explaining" and "⏳ awaiting grade"
-      or block.state == "critiquing" and "⏳ awaiting agent"
-      or "─"
-    lines[#lines + 1] = "  ╰─ " .. foot .. " ──────────────────────"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeMuted" }
+  if R.right_file ~= block.file then
+    return
   end
-
-  if block.agent_response and block.agent_response ~= "" then
-    lines[#lines + 1] = ""
-    lines[#lines + 1] =
-      "  ╭─ agent ──────────────────────────────"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeAgent" }
-    for _, cl in ipairs(vim.split(block.agent_response, "\n", { plain = true })) do
-      lines[#lines + 1] = "  │ " .. cl
-      marks[#marks + 1] = { #lines, 0, -1, "NvimeNormal" }
-    end
-    lines[#lines + 1] =
-      "  ╰──────────────────────────────────────"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeAgent" }
+  if not (R.right_buf and vim.api.nvim_buf_is_valid(R.right_buf)) then
+    return
   end
-
-  if block.hint and block.hint ~= "" and block.state == "needs_explanation" then
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "  hint: " .. block.hint
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusWarn" }
+  -- The fallback (not-on-disk) view is static text; only the overlay box can
+  -- change, but it's baked into that buffer — re-show it to refresh.
+  if R.right_buf == R.fallback_buf then
+    show_fallback(block)
+    return
   end
-
-  vim.bo[R.right_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(R.right_buf, 0, -1, false, lines)
-  vim.bo[R.right_buf].modifiable = false
-  uikit.apply_marks(R.right_buf, R.ns_right, lines, marks)
+  local res = fileview.apply(R.right_buf, fileview.hunks_for_file(R.session, block.file))
+  R.anchors = res.anchors
+  local first_id = block.hunk_ids and block.hunk_ids[1]
+  render_overlay(R.right_buf, block, (first_id and res.by_hunk[first_id]) or res.anchors[1] or 1)
 end
 
 local function render()
   render_left()
-  render_right()
+  refresh_right()
 end
 
 -- ---------------------------------------------------------------------------
@@ -354,6 +512,16 @@ local function target_block()
   return R.active_block_id and get_block(R.active_block_id) or nil
 end
 
+-- Ensure the active block's file is shown in the right pane (without stealing
+-- focus) before we act on it — so approving/critiquing from the left tree keeps
+-- the diff in view.
+local function ensure_shown(block)
+  R.active_block_id = block.id
+  if R.right_file ~= block.file then
+    show_file(block, { focus = false })
+  end
+end
+
 local function approve()
   if R.busy then
     return
@@ -362,6 +530,7 @@ local function approve()
   if not block then
     return
   end
+  ensure_shown(block)
   if threshold(R.session) == nil then
     -- vibe: approve clears instantly, no explanation.
     block.state = "cleared"
@@ -406,6 +575,7 @@ local function request_changes()
   if not block then
     return
   end
+  ensure_shown(block)
   uikit.input({
     title = "Request changes on block " .. block.id .. ": " .. block.title,
     no_paste = true,
@@ -434,10 +604,8 @@ local function select_block()
   local block = target_block()
   if block then
     R.active_block_id = block.id
-    render()
-    if R.right_win and vim.api.nvim_win_is_valid(R.right_win) then
-      vim.api.nvim_set_current_win(R.right_win)
-    end
+    render_left()
+    show_file(block, { focus = true })
   end
 end
 
@@ -570,11 +738,18 @@ local function submit_round()
       local results = require("nvime.bigchange.agent").extract_json(text)
       local need_recapture = apply_results(session, results, pending)
       session.review_round = (session.review_round or 0) + 1
-      local function finish()
+      local function finish(did_recapture)
         R.busy = false
         R.status = nil
         store.touch(session)
         render()
+        if did_recapture then
+          -- The agent rewrote files on disk and blocks were re-grouped: re-resolve
+          -- the active block and reload its buffer so the file view reflects the
+          -- revised code instead of stale annotations on stale content.
+          R.active_block_id = default_active()
+          show_file(R.active_block_id and get_block(R.active_block_id) or nil, { reload = true })
+        end
         if all_cleared(session) then
           local pct = overall_grade(session)
           vim.notify(
@@ -590,10 +765,10 @@ local function submit_round()
         R.status = "re-capturing revised diff…"
         render()
         blocks_mod.recapture(session, function()
-          finish()
+          finish(true)
         end)
       else
-        finish()
+        finish(false)
       end
     end,
   })
@@ -627,9 +802,12 @@ function M.close()
     end)
   end
   R.tabpage = nil
+  R.right_buf, R.right_file, R.anchors = nil, nil, {}
 end
 
-local function install_keymaps(bufnr)
+-- Control keys live on the LEFT tree only — the right pane is a real file, so
+-- clobbering a/r/o/q there would break normal editing and navigation.
+local function install_left_keymaps(bufnr)
   local function map(lhs, fn)
     vim.keymap.set("n", lhs, fn, { buffer = bufnr, silent = true, nowait = true })
   end
@@ -640,6 +818,12 @@ local function install_keymaps(bufnr)
   map("<C-s>", submit_round)
   map("M", merge)
   map("q", M.close)
+  -- Convenience: hop to the file pane to navigate / find definitions.
+  map("<Tab>", function()
+    if R.right_win and vim.api.nvim_win_is_valid(R.right_win) then
+      vim.api.nvim_set_current_win(R.right_win)
+    end
+  end)
 end
 
 function M.open(session)
@@ -650,13 +834,12 @@ function M.open(session)
     return
   end
 
+  -- New tab. The initial window becomes the right (file) pane; show_file will
+  -- :edit the real worktree file into it.
   vim.cmd("tabnew")
   R.tabpage = vim.api.nvim_get_current_tabpage()
   R.right_win = vim.api.nvim_get_current_win()
-  R.right_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[R.right_buf].bufhidden = "wipe"
-  vim.bo[R.right_buf].filetype = "nvime"
-  vim.api.nvim_win_set_buf(R.right_win, R.right_buf)
+  R.right_buf, R.right_file, R.anchors = nil, nil, {}
 
   vim.cmd("topleft vsplit")
   R.left_win = vim.api.nvim_get_current_win()
@@ -668,22 +851,11 @@ function M.open(session)
 
   ui.ensure_highlights()
   ui.configure_panel_window(R.left_win, { wrap = false, cursorline = true })
-  ui.configure_panel_window(R.right_win, { wrap = true, cursorline = false })
 
-  install_keymaps(R.left_buf)
-  install_keymaps(R.right_buf)
+  install_left_keymaps(R.left_buf)
 
-  -- Default the active block to the first not-yet-cleared one.
-  R.active_block_id = nil
-  for _, b in ipairs(session.blocks or {}) do
-    if b.state ~= "cleared" then
-      R.active_block_id = b.id
-      break
-    end
-  end
-  if not R.active_block_id and session.blocks and session.blocks[1] then
-    R.active_block_id = session.blocks[1].id
-  end
+  R.active_block_id = default_active()
+  show_file(R.active_block_id and get_block(R.active_block_id) or nil, { focus = false })
 
   vim.api.nvim_set_current_win(R.left_win)
   render()
