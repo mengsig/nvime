@@ -1,6 +1,6 @@
 # nvime
 
-`nvime` — No Vibe (Coding) In My Editor. The AI keeps its filthy little hands off your code until you tell it exactly where, how, and why — then it does that and not one keystroke more. No sprawl. No mystery edits. No drive-by refactors. No permissionless slop. No hallucinated helpers. No confident lies. No hand-holding. No "oops, I rewrote your repo." No begging forgiveness because it never had permission. No bullshit, no apologies, no second chances. This is your editor — the model is a guest, and guests don't touch the knives.
+`nvime` — No Vibe (Coding) In My Editor. The AI keeps its hands off your code until you tell it exactly where, how, and why — then it does that and not one keystroke more. No sprawl. No mystery edits. No drive-by refactors. No hallucinated helpers. No "oops, I rewrote your repo." This is your editor — the model is a guest, and guests don't touch the knives. Simply put... no bullshit.
 
 It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex CLI through explicit engineering lanes:
 
