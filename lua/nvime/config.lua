@@ -108,6 +108,11 @@ M.defaults = {
     -- See lua/nvime/verify.lua for the built-in shape and shipped checks
     -- (ruff/shellcheck/luacheck/selene/gofmt/zig ast-check/mypy).
     checks = {},
+    -- Run the built-in / user-configured external linters & type-checkers
+    -- (ruff, shellcheck, luacheck, gofmt, mypy, plus verify.checks). When
+    -- false, only the tree-sitter parse gate runs; lint/type findings are
+    -- suppressed entirely.
+    external_checks = false,
   },
   risk = {
     -- Blast-radius badge in the diff banner. Computes lines added/removed,
@@ -174,9 +179,16 @@ M.defaults = {
     trivial = {
       enabled = true,
       doc_globs = {
-        "*.md", "*.markdown", "*.rst", "*.txt",
-        "**/*.md", "**/*.markdown", "**/*.rst", "**/*.txt",
-        "docs/**", "doc/**",
+        "*.md",
+        "*.markdown",
+        "*.rst",
+        "*.txt",
+        "**/*.md",
+        "**/*.markdown",
+        "**/*.rst",
+        "**/*.txt",
+        "docs/**",
+        "doc/**",
       },
     },
   },
@@ -231,7 +243,7 @@ M.defaults = {
     -- run `runner` (or fall back to plan.test_runner). On non-zero exit,
     -- either auto-launch a follow-up edit prompt (auto_fix=true) or
     -- prompt the user. Capped at max_retries to prevent loops.
-    enabled = true,
+    enabled = false,
     runner = nil, -- shell command string; nil means use plan.test_runner / autodetect
     auto_fix = false,
     max_retries = 2,

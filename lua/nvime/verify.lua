@@ -352,6 +352,9 @@ end
 
 local function resolve_checks(path)
   local out = {}
+  if cfg().external_checks == false then
+    return out
+  end
   if not path or path == "" then
     return out
   end
@@ -545,8 +548,7 @@ end
 -- Run one external check. Returns immediately; on_finish is called with the
 -- check result table on the main thread.
 local function run_check(entry, tempfile, on_finish)
-  local args = entry.cmd and entry.cmd(tempfile)
-    or (entry.command and { entry.command, tempfile })
+  local args = entry.cmd and entry.cmd(tempfile) or (entry.command and { entry.command, tempfile })
   if not args or not args[1] then
     on_finish({ name = entry.name, code = 0, findings = {} })
     return
@@ -819,8 +821,7 @@ function M.verify_path(path, content, opts)
   end
   -- Run synchronously by spawning each check and waiting.
   for _, entry in ipairs(checks) do
-    local args = entry.cmd and entry.cmd(tempfile)
-      or (entry.command and { entry.command, tempfile })
+    local args = entry.cmd and entry.cmd(tempfile) or (entry.command and { entry.command, tempfile })
     if args and args[1] and vim.fn.executable(args[1]) == 1 then
       local ok, sys = pcall(vim.system, args, { text = true, timeout = math.min(timeout_ms(), wait_ms) })
       if ok and sys then
