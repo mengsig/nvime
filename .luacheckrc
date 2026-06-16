@@ -6,6 +6,8 @@ globals = {
 
 ignore = {
   "211", -- unused values are still being cleaned up in older modules.
+  "212", -- unused arguments (kept for callback/interface signatures).
+  "231", -- locals set but not yet read in older modules.
   "311",
   "411",
   "421",
@@ -19,9 +21,11 @@ ignore = {
 files["tests/headless_spec.lua"] = {
   ignore = {
     "111", -- large integration spec intentionally keeps many locals.
+    "112", -- the spec shares one `state` module handle across IIFE blocks.
     "113",
     "211",
     "212",
+    "231",
     "631",
   },
 }
