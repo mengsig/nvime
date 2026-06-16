@@ -342,7 +342,7 @@ local function overlay_lines(block)
     out[#out + 1] = { { "│ attempts: ", "NvimeAgent" }, { table.concat(marks, " · "), "NvimeMuted" } }
   end
 
-  out[#out + 1] = { { "╰─ a approve · r request-changes (left pane) ─", "NvimeMuted" } }
+  out[#out + 1] = { { "╰─ a approve · r request-changes · X explain-anyway (left pane) ─", "NvimeMuted" } }
   return out
 end
 
@@ -936,6 +936,48 @@ function M.close()
   R.right_buf, R.right_file, R.anchors, R.shown_id = nil, nil, {}, nil
 end
 
+-- Re-lock a self-evident, auto-cleared block so it must be explained anyway.
+-- The trivial relaxation is a convenience, not a ceiling: if you want to prove
+-- you understand a block the heuristic waved through, you can demand the gate.
+-- Returns true when the block was a trivial auto-clear and got re-locked.
+local function override_trivial(session, block)
+  if not (block and block.trivial and block.state == "cleared") then
+    return false
+  end
+  block.trivial = false
+  block.state = "pending"
+  block.action = nil
+  block.grade = nil
+  block.comment = nil
+  block.hint = nil
+  store.touch(session)
+  audit.write({
+    event = "bigchange_trivial_overridden",
+    project = session.id or session.title,
+    block_id = block.id,
+    file = block.file,
+  })
+  return true
+end
+
+M._override_trivial = override_trivial
+
+local function explain_anyway()
+  if R.busy then
+    return
+  end
+  local block = target_block()
+  if not block then
+    return
+  end
+  if not override_trivial(R.session, block) then
+    vim.notify("nvime big change: only a trivial auto-cleared block can be re-locked", vim.log.levels.INFO)
+    return
+  end
+  vim.notify("nvime big change: block " .. block.id .. " now requires an explanation", vim.log.levels.INFO)
+  render()
+end
+
 -- Control keys live on the LEFT tree only — the right pane is a real file, so
 -- clobbering a/r/o/q there would break normal editing and navigation.
 local function install_left_keymaps(bufnr)
@@ -946,6 +988,7 @@ local function install_left_keymaps(bufnr)
   map("o", select_block)
   map("a", approve)
   map("r", request_changes)
+  map("X", explain_anyway)
   map("<C-s>", submit_round)
   map("M", merge)
   map("q", M.close)

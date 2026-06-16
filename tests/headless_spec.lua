@@ -240,6 +240,33 @@ do
     end
   end
   assert(saw_grade_audit, "grading: bigchange_block_graded audit event written")
+
+  -- #11: a trivial auto-cleared block can be re-locked to require explanation.
+  local osession = {
+    id = "proj-ovr",
+    title = "Override",
+    difficulty = "easy",
+    blocks = {
+      { id = 1, title = "imports", file = "a.lua", trivial = true, state = "cleared", action = "auto_trivial" },
+    },
+  }
+  local ob = osession.blocks[1]
+  assert(review._override_trivial(osession, ob), "override: a trivial auto-clear is re-lockable")
+  assert_eq(ob.state, "pending", "override: re-locked block returns to pending")
+  assert_eq(ob.trivial, false, "override: re-locked block is no longer trivial (now counts toward the grade)")
+  assert_eq(
+    review._override_trivial(osession, { id = 2, state = "cleared", grade = 90 }),
+    false,
+    "override: an earned (non-trivial) clear is not re-locked"
+  )
+  local saw_override_audit = false
+  for _, line in ipairs(vim.fn.readfile(audit_path)) do
+    local ok_d, d = pcall(vim.json.decode, line)
+    if ok_d and type(d) == "table" and d.event == "bigchange_trivial_overridden" then
+      saw_override_audit = true
+    end
+  end
+  assert(saw_override_audit, "override: bigchange_trivial_overridden audit event written")
 end
 do
   local state = require("nvime.state")
