@@ -36,3 +36,19 @@ jobs:
       - run: sudo luarocks --lua-version=5.1 install luacheck
       - run: stylua --check lua/ plugin/ tests/
       - run: eval "$(luarocks --lua-version=5.1 path --bin)" && luacheck lua plugin tests
+
+  prompt-contract:
+    name: prompt-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+      # Build every nvime/general/plan prompt with the current code and assert
+      # it still matches the committed baselines under
+      # tests/fixtures/prompt-baselines/. This exercises every prompt builder (a
+      # builder error fails the job) and locks the prompt contract so a prompt
+      # edit can't land unreviewed. No provider calls, no token spend.
+      - run: python3 scripts/agent-exercises --check-prompts

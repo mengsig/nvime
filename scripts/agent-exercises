@@ -1974,6 +1974,62 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
           shutil.rmtree(workspace, ignore_errors=True)
 
 
+BASELINE_DIR = REPO_ROOT / "tests" / "fixtures" / "prompt-baselines"
+
+
+def _scrub_prompt(text: str, workspace: Path) -> str:
+    # Replace the nondeterministic tokens so the snapshot is stable across
+    # machines/runs: the per-run temp workspace and the absolute repo root.
+    for needle in (str(workspace), str(workspace.resolve()), os.path.realpath(str(workspace))):
+        text = text.replace(needle, "<WORKSPACE>")
+    for needle in (str(REPO_ROOT), os.path.realpath(str(REPO_ROOT))):
+        text = text.replace(needle, "<REPO>")
+    return text
+
+
+def emit_prompts(out_dir: Path) -> int:
+    """Build every mode/exercise prompt, scrub temp paths, and write it to
+    out_dir/<mode>/<exercise>.txt. Returns the count written. No provider calls."""
+    specs: list[tuple[str, str]] = []
+    specs += [("nvime", name) for name in EXERCISES]
+    specs += [("general", name) for name in GENERAL_EXERCISES]
+    specs += [("plan", name) for name in PLAN_EXERCISES]
+    count = 0
+    for mode, name in specs:
+        workspace = Path(tempfile.mkdtemp(prefix=f"nvime-emit-{mode}-{name}-"))
+        try:
+            if mode == "nvime":
+                selection = prepare_exercise(name, workspace)
+                prompt = build_nvime_prompt(workspace, EXERCISES[name], selection)
+            elif mode == "general":
+                prepare_general_exercise(name, workspace)
+                prompt = build_general_prompt(workspace, GENERAL_EXERCISES[name]["intent"])
+            else:
+                prepare_plan_exercise(name, workspace)
+                prompt = build_plan_prompt(workspace, PLAN_EXERCISES[name]["intent"])
+            dest = out_dir / mode / f"{name}.txt"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(_scrub_prompt(prompt, workspace), encoding="utf-8")
+            count += 1
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+    return count
+
+
+def compare_prompt_trees(expected: Path, actual: Path) -> list[str]:
+    exp = {p.relative_to(expected) for p in expected.rglob("*.txt")} if expected.exists() else set()
+    act = {p.relative_to(actual) for p in actual.rglob("*.txt")}
+    out = []
+    for rel in sorted(exp - act):
+        out.append(f"missing now (delete the stale baseline): {rel}")
+    for rel in sorted(act - exp):
+        out.append(f"new, uncommitted baseline: {rel}")
+    for rel in sorted(exp & act):
+        if (expected / rel).read_text(encoding="utf-8") != (actual / rel).read_text(encoding="utf-8"):
+            out.append(f"changed: {rel}")
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", choices=["codex", "claude"], default="codex")
@@ -1988,7 +2044,48 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--fix-attempts", type=int, default=0, help="nvime-mode test-feedback retries after a failed attempt")
     parser.add_argument("--list", action="store_true", help="list exercises and exit")
+    parser.add_argument(
+        "--emit-prompts",
+        metavar="DIR",
+        help="build every prompt, scrub temp paths, write to DIR/<mode>/<exercise>.txt, and exit (no provider calls)",
+    )
+    parser.add_argument(
+        "--check-prompts",
+        action="store_true",
+        help="fail if the prompts the current code generates differ from the committed baselines",
+    )
+    parser.add_argument(
+        "--update-baselines",
+        action="store_true",
+        help="regenerate the committed prompt baselines (leaves the tree dirty for you to commit)",
+    )
     args = parser.parse_args()
+
+    if args.emit_prompts:
+        n = emit_prompts(Path(args.emit_prompts))
+        print(f"emitted {n} prompts to {args.emit_prompts}")
+        return 0
+
+    if args.update_baselines:
+        if BASELINE_DIR.exists():
+            shutil.rmtree(BASELINE_DIR)
+        n = emit_prompts(BASELINE_DIR)
+        print(f"regenerated {n} prompt baselines at {BASELINE_DIR} — review and commit them")
+        return 0
+
+    if args.check_prompts:
+        scratch = Path(tempfile.mkdtemp(prefix="nvime-prompt-check-"))
+        try:
+            emit_prompts(scratch)
+            mismatches = compare_prompt_trees(BASELINE_DIR, scratch)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        if mismatches:
+            sys.stderr.write("prompt baselines differ from current code:\n  " + "\n  ".join(mismatches) + "\n")
+            sys.stderr.write("run `scripts/agent-exercises --update-baselines`, review the diff, and commit it.\n")
+            return 1
+        print("prompt baselines match")
+        return 0
 
     if args.list:
         for key, exercise in EXERCISES.items():

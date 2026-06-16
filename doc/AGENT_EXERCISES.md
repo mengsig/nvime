@@ -118,6 +118,16 @@ for the hardest edit and plan-execution cases, and the plan-execution path can
 feed validation or patch failures back into a bounded repair attempt with
 `--fix-attempts`.
 
+## Prompt baselines (no-spend contract)
+
+The prompts nvime sends are the contract with the model, so they are snapshot-
+tested. `scripts/agent-exercises --check-prompts` rebuilds every nvime/general/
+plan prompt with the current code (no provider call) and fails if it differs
+from the committed snapshots under `tests/fixtures/prompt-baselines/`. After an
+intentional prompt change, run `scripts/agent-exercises --update-baselines`,
+review the diff, and commit it. CI runs `--check-prompts` in the
+`prompt-contract` job so a prompt edit can never land unreviewed.
+
 ## Permission Notes
 
 Claude can use the nvime MCP server through `--mcp-config` with the normal
