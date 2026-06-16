@@ -4238,7 +4238,11 @@ end)(); -- ---------------------------------------------------------------------
   }, file)
   vim.cmd("edit " .. vim.fn.fnameescape(file))
   local bufnr = vim.api.nvim_get_current_buf()
-  local rel = require("nvime.git").repo_relative_path(file) or file
+  -- Derive rel from the BUFFER NAME (what show_at_cursor uses), not the raw
+  -- tempname: on macOS `:edit` resolves /var/... to /private/var/..., so keying
+  -- the record off the tempname would not match the cursor lookup.
+  local buf_name = vim.api.nvim_buf_get_name(bufnr)
+  local rel = require("nvime.git").repo_relative_path(buf_name) or buf_name
   -- Record an attribution entry covering lines 2-3
   require("nvime.attribution").record({
     file = rel,
