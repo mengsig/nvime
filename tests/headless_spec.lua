@@ -5635,6 +5635,40 @@ end)();
   restore.keys = vim.tbl_extend("force", {}, restore.keys or {}, { prefix = orig_prefix })
   require("nvime").setup(restore)
   pcall(vim.keymap.del, "n", "<leader>Zc")
+end)();
+
+(function()
+  -- #20: content search across the session archive (chat + selection).
+  local chats = require("nvime.chats")
+  local chat = require("nvime.chat")
+  local selection = require("nvime.selection")
+  local orig_chat, orig_sel = chat.sessions, selection.sessions
+  chat.sessions = function()
+    return {
+      {
+        id = 7,
+        title = "Auth refactor",
+        updated_at = 200,
+        history = { { role = "user", content = "how do we handle JWT refresh token rotation safely?" } },
+      },
+      {
+        id = 8,
+        title = "Docs pass",
+        updated_at = 100,
+        history = { { role = "assistant", content = "updated the README install section" } },
+      },
+    }
+  end
+  selection.sessions = function()
+    return {}
+  end
+  local hits = chats.search("jwt refresh", { no_ui = true })
+  local empty = chats.search("zzz-not-present-zzz", { no_ui = true })
+  chat.sessions, selection.sessions = orig_chat, orig_sel
+  assert(#hits == 1, "search: finds exactly the matching session")
+  assert_eq(hits[1].id, 7, "search: returns the matching session id")
+  assert(hits[1].snippet:find("refresh", 1, true), "search: result carries a snippet around the match")
+  assert_eq(#empty, 0, "search: no matches for an absent term")
 end)()
 
 print("nvime headless spec passed")

@@ -235,6 +235,9 @@ local function install_keymaps()
   set_keymap("n", prefix .. (normal.send or "s"), function()
     require("nvime.send").send()
   end, "nvime send file(s) to chat")
+  set_keymap("n", prefix .. (normal.search or "/"), function()
+    require("nvime.chats").search()
+  end, "nvime search the session archive")
   set_keymap("n", prefix .. (normal.bigchange or "B"), function()
     require("nvime.bigchange").open()
   end, "nvime Big Change: AI feature + forced-comprehension review")
@@ -449,15 +452,20 @@ function M.setup(opts)
   })
 
   vim.api.nvim_create_user_command("NvimeChats", function(args)
+    local fargs = args.fargs or {}
+    if fargs[1] == "search" then
+      require("nvime.chats").search(table.concat(fargs, " ", 2))
+      return
+    end
     require("nvime.chats").open({
       mode = args.args ~= "" and args.args or nil,
     })
   end, {
-    nargs = "?",
+    nargs = "*",
     complete = function()
-      return { "dashboard", "chat", "ask", "edit" }
+      return { "dashboard", "chat", "ask", "edit", "search" }
     end,
-    desc = "Open the nvime chat or selection discussion picker",
+    desc = "Open the nvime chat/selection picker, or `search <query>` the session archive",
   })
 
   vim.api.nvim_create_user_command("NvimeLast", M.open_last, {

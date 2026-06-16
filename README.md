@@ -331,6 +331,9 @@ require("nvime").setup({
   selection discussions, running state, tabs, and action rows.
 - `:NvimeChat` opens the picker for general chat/review conversations.
 - `:NvimeChats [chat|ask|edit]` opens the picker for general chat or highlighted-code Ask/Edit discussions.
+- `:NvimeChats search <query>` searches the persisted session archive (chat +
+  selection transcripts) by content and reopens the conversation you pick.
+  `<leader>n/` prompts for the query.
 - `:NvimeReview [claude|codex] [prompt]` opens a review/docs session and *stages*
   the prompt in the input — edit it, then `<CR>` to send. Append `!`
   (`:NvimeReview!`) to launch immediately with the current worktree diff. If a
@@ -477,6 +480,7 @@ Inside the chat window:
 - `<leader>ns`: send the current file (or netrw marked files / entry under the
   cursor) as an `@path` reference into the last-opened conversation
 - visual `<leader>ns`: send the highlighted line range, e.g. `@path (lines 10-25)`
+- `<leader>n/`: search the session archive by content and reopen a match
 - `<leader>nB`: open the Big Change picker (AI feature build + forced-comprehension review)
 
 Use `NvimeAsk` for questions such as "does this look right?" or "what does

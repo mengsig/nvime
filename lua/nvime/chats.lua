@@ -1210,4 +1210,85 @@ function M.open(opts)
   return bufnr
 end
 
+-- Content search across the persisted session archive (chat + selection
+-- transcripts). Read-only: it finds where something was discussed and reopens
+-- that conversation, so older context is recoverable instead of lost in the
+-- pile. Returns the match list (also for testing); presents a vim.ui.select
+-- picker when interactive.
+function M.search(query, opts)
+  opts = opts or {}
+  query = vim.trim(query or "")
+  if query == "" then
+    vim.ui.input({ prompt = "nvime search: " }, function(input)
+      if input and vim.trim(input) ~= "" then
+        M.search(input, opts)
+      end
+    end)
+    return {}
+  end
+
+  local needle = query:lower()
+  local results = {}
+
+  local function scan(sessions, kind)
+    for _, session in ipairs(sessions or {}) do
+      for _, msg in ipairs(session.history or {}) do
+        local content = type(msg.content) == "string" and msg.content or ""
+        local pos = content ~= "" and content:lower():find(needle, 1, true) or nil
+        if pos then
+          local from = math.max(1, pos - 40)
+          local to = math.min(#content, pos + #needle + 40)
+          results[#results + 1] = {
+            kind = kind,
+            id = session.id,
+            title = session.title or ("session " .. tostring(session.id)),
+            role = msg.role or "?",
+            snippet = (content:sub(from, to):gsub("%s+", " ")),
+            ts = session.updated_at or 0,
+          }
+          break -- one (first) hit per session keeps the result list tight
+        end
+      end
+    end
+  end
+
+  local ok_chat, chat = pcall(require, "nvime.chat")
+  if ok_chat then
+    scan(chat.sessions(), "chat")
+  end
+  local ok_sel, selection = pcall(require, "nvime.selection")
+  if ok_sel then
+    scan(selection.sessions(), "selection")
+  end
+
+  table.sort(results, function(a, b)
+    return (a.ts or 0) > (b.ts or 0)
+  end)
+
+  if opts.no_ui then
+    return results
+  end
+  if #results == 0 then
+    vim.notify(string.format("nvime search: no sessions contain %q", query), vim.log.levels.INFO)
+    return results
+  end
+
+  vim.ui.select(results, {
+    prompt = string.format("nvime search · %d match(es) for %q", #results, query),
+    format_item = function(item)
+      return string.format("[%s] %s — %s: %s", item.kind, item.title, item.role, item.snippet)
+    end,
+  }, function(choice)
+    if not choice then
+      return
+    end
+    if choice.kind == "chat" then
+      require("nvime.chat").open_session(choice.id)
+    else
+      require("nvime.selection").open_session(choice.id)
+    end
+  end)
+  return results
+end
+
 return M

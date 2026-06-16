@@ -319,6 +319,7 @@ M.defaults = {
       quick_fix = "f",
       send = "s",
       bigchange = "B",
+      search = "/",
     },
     visual = {
       edit = "e",
