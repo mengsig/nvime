@@ -406,6 +406,32 @@ end
 M.close_popup = close_blame_popup
 M._build_blame_lines = build_blame_lines
 
+-- Compact relative age ("3d", "2w", "5m") for the gutter overlay, so a glance
+-- shows not just WHO authored a line but HOW STALE the AI authorship is — old
+-- AI lines that have survived review read very differently from fresh ones.
+local function relative_age(ts)
+  ts = tonumber(ts)
+  if not ts or ts <= 0 then
+    return nil
+  end
+  local delta = os.time() - ts
+  if delta < 0 then
+    delta = 0
+  end
+  if delta < 3600 then
+    return string.format("%dm", math.max(1, math.floor(delta / 60)))
+  elseif delta < 86400 then
+    return string.format("%dh", math.floor(delta / 3600))
+  elseif delta < 86400 * 7 then
+    return string.format("%dd", math.floor(delta / 86400))
+  elseif delta < 86400 * 365 then
+    return string.format("%dw", math.floor(delta / (86400 * 7)))
+  end
+  return string.format("%dy", math.floor(delta / (86400 * 365)))
+end
+
+M._relative_age = relative_age
+
 local function clear_overlay(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, OVERLAY_NS, 0, -1)
   vim.b[bufnr].nvime_attribution_overlay = false
@@ -436,6 +462,10 @@ local function paint_overlay(bufnr)
           end
           if type(entry.verdict) == "table" and entry.verdict.decision then
             label_parts[#label_parts + 1] = entry.verdict.decision
+          end
+          local age = relative_age(entry.ts)
+          if age then
+            label_parts[#label_parts + 1] = age
           end
           local hl = "Comment"
           if entry.forced then

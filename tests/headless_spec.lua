@@ -5566,6 +5566,13 @@ end)();
 end)();
 
 (function()
+  -- Wave 3: #19 attribution gutter age-awareness.
+  local attribution = require("nvime.attribution")
+  assert(attribution._relative_age(os.time() - 5) == "1m", "relative_age: floors sub-hour to >=1m")
+  assert(attribution._relative_age(os.time() - 3 * 86400) == "3d", "relative_age: days")
+  assert(attribution._relative_age(os.time() - 2 * 7 * 86400) == "2w", "relative_age: weeks")
+  assert(attribution._relative_age(nil) == nil, "relative_age: nil ts → nil")
+
   -- Wave 3: pre-flight setup validation — keymap conflict detection (#8).
   -- Bind a user mapping where a fresh-prefix nvime install will land, force a
   -- re-setup onto that prefix, and assert nvime records that it clobbered it.
