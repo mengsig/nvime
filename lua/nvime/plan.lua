@@ -2814,7 +2814,7 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "",
   "Workflow:",
   "  1. Read the user's intent.",
-  "  2. Investigate the repo. Be specific: identify actual files, line numbers, dependencies.",
+  "  2. Investigate the repo. Be specific: identify actual files, line numbers, dependencies. If nvime MCP tools are available, call nvime.check_policy on each file you plan to touch and RESPECT + CITE the returned constraints (human-only paths, max changed-lines budgets, allowed lanes) in the step notes — they are constraints to honor, not permission to proceed.",
   "  3. Decompose into ORDERED steps. Each step:",
   '     - Targets exactly ONE file and ONE range (existing range, or "new" for a new file).',
   "     - Is small enough to apply through a focused diff review (~5-100 lines).",

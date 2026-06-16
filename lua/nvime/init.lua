@@ -15,9 +15,18 @@ local function delete_keymaps()
   state.keymaps = {}
 end
 
+-- Conflicts detected during the most recent install_keymaps() pass: lhs that
+-- already had a (non-nvime) mapping nvime is about to override. delete_keymaps
+-- runs first, so anything still bound here is genuinely foreign.
+local keymap_conflicts = {}
+
 local function set_keymap(mode, lhs, rhs, desc)
   if not lhs or lhs == "" then
     return
+  end
+  local existing = vim.fn.maparg(lhs, mode)
+  if existing ~= nil and existing ~= "" then
+    keymap_conflicts[#keymap_conflicts + 1] = { mode = mode, lhs = lhs, existing = existing }
   end
   vim.keymap.set(mode, lhs, rhs, {
     desc = desc,
@@ -176,9 +185,11 @@ end
 
 local function install_keymaps()
   delete_keymaps()
+  keymap_conflicts = {}
 
   local keys = state.config.keys or {}
   if keys.enabled == false then
+    state.last_keymap_conflicts = {}
     return
   end
 
@@ -231,6 +242,52 @@ local function install_keymaps()
   set_keymap("x", prefix .. (visual.ask or "q"), visual_ask, "nvime ask about visual selection")
   set_keymap("x", prefix .. (visual.quick_fix or "f"), visual_quick_fix, "nvime quick fix visual selection")
   set_keymap("x", prefix .. (visual.send or "s"), visual_send, "nvime send selection to chat")
+
+  state.last_keymap_conflicts = keymap_conflicts
+  if #keymap_conflicts > 0 and keys.warn_conflicts ~= false then
+    local lhs_list = {}
+    for _, c in ipairs(keymap_conflicts) do
+      lhs_list[#lhs_list + 1] = c.lhs
+    end
+    vim.schedule(function()
+      vim.notify(
+        "nvime: overrode existing keymap(s): "
+          .. table.concat(lhs_list, ", ")
+          .. " (set keys.warn_conflicts = false to silence)",
+        vim.log.levels.WARN
+      )
+    end)
+  end
+end
+
+-- Cheap setup-time validation so a misconfigured provider or unwritable state
+-- dir is discovered at setup, not on first agent run. Notifies only on
+-- problems (a clean setup is silent); :checkhealth nvime has the full report.
+local function preflight_notify()
+  local cfg = state.config or {}
+  local problems = {}
+  for name, provider in pairs(cfg.providers or {}) do
+    local cmd = provider and provider.cmd
+    if type(cmd) == "string" and cmd ~= "" and vim.fn.executable(cmd) ~= 1 then
+      problems[#problems + 1] = string.format("provider `%s` command not executable: %s", name, cmd)
+    end
+  end
+  local ok_audit, audit = pcall(require, "nvime.audit")
+  if ok_audit then
+    local dir = vim.fn.fnamemodify(audit.path(), ":h")
+    pcall(vim.fn.mkdir, dir, "p")
+    if vim.fn.isdirectory(dir) ~= 1 or vim.fn.filewritable(dir) ~= 2 then
+      problems[#problems + 1] = "state directory not writable: " .. dir
+    end
+  end
+  if #problems > 0 then
+    vim.schedule(function()
+      vim.notify(
+        "nvime pre-flight:\n  - " .. table.concat(problems, "\n  - ") .. "\n(run :checkhealth nvime for details)",
+        vim.log.levels.WARN
+      )
+    end)
+  end
 end
 
 local function parse_provider(args)
@@ -797,6 +854,7 @@ function M.setup(opts)
   })
 
   install_keymaps()
+  preflight_notify()
 
   pcall(vim.api.nvim_clear_autocmds, { group = persist_group })
   vim.api.nvim_create_autocmd("VimLeavePre", {

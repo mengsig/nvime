@@ -4304,6 +4304,7 @@ end)(); -- ---------------------------------------------------------------------
   assert(names["nvime.session_search"], "mcp: session_search tool advertised")
   assert(names["nvime.session_recent"], "mcp: session_recent tool advertised")
   assert(names["nvime.recent_diffs"], "mcp: recent_diffs tool advertised")
+  assert(names["nvime.check_policy"], "mcp: check_policy tool advertised")
 
   local plans = send({
     jsonrpc = "2.0",
@@ -4519,6 +4520,46 @@ end)(); -- ---------------------------------------------------------------------
   assert(
     search_missing_query.result and search_missing_query.result.isError,
     "mcp: session_search rejects missing query"
+  )
+
+  -- #5: nvime.check_policy returns CONSTRAINTS only (never a risk score / green
+  -- light). A human-only path is blocked; a normal path is not "approved", just
+  -- unconstrained; traversal is rejected.
+  local pol_block = send({
+    jsonrpc = "2.0",
+    id = 60,
+    method = "tools/call",
+    params = { name = "nvime.check_policy", arguments = { file = "migrations/0001_init.sql" } },
+  })
+  assert(pol_block.result and pol_block.result.content, "mcp: check_policy returns content")
+  local pol_block_payload = vim.json.decode(pol_block.result.content[1].text)
+  assert_eq(pol_block_payload.require_human, true, "mcp: check_policy flags migrations as human-only")
+  assert_eq(pol_block_payload.blocked, true, "mcp: check_policy blocks a human-only path")
+  -- The response must NOT carry a risk score / green-light field (regression
+  -- guard against re-adding a "looks safe, proceed" signal).
+  assert(pol_block_payload.risk == nil, "mcp: check_policy returns no risk field")
+  assert(pol_block_payload.level == nil, "mcp: check_policy returns no level field")
+  assert(pol_block_payload.score == nil, "mcp: check_policy returns no score field")
+
+  local pol_ok = send({
+    jsonrpc = "2.0",
+    id = 61,
+    method = "tools/call",
+    params = { name = "nvime.check_policy", arguments = { file = "lua/nvime/init.lua" } },
+  })
+  local pol_ok_payload = vim.json.decode(pol_ok.result.content[1].text)
+  assert_eq(pol_ok_payload.blocked, false, "mcp: check_policy does not block an ordinary source path")
+  assert_eq(pol_ok_payload.matched_rule, nil, "mcp: check_policy reports no matched rule for an ordinary path")
+
+  local pol_traversal = send({
+    jsonrpc = "2.0",
+    id = 62,
+    method = "tools/call",
+    params = { name = "nvime.check_policy", arguments = { file = "../../etc/passwd" } },
+  })
+  assert(
+    pol_traversal.result and pol_traversal.result.isError,
+    "mcp: check_policy rejects parent-traversal paths"
   )
 
   vim.env.NVIME_REPO_ROOT = nil
@@ -5522,6 +5563,32 @@ end)();
     end
   end
   assert(saw_proto, "protocol: a malformed response writes a protocol_violation audit event")
+end)();
+
+(function()
+  -- Wave 3: pre-flight setup validation — keymap conflict detection (#8).
+  -- Bind a user mapping where a fresh-prefix nvime install will land, force a
+  -- re-setup onto that prefix, and assert nvime records that it clobbered it.
+  local state = require("nvime.state")
+  local orig_prefix = (state.config.keys or {}).prefix or "<leader>n"
+  vim.keymap.set("n", "<leader>Zc", "<Cmd>echo 'user-owned'<CR>", { silent = true })
+  local cfg = vim.deepcopy(state.config)
+  cfg.force = true
+  cfg.keys = vim.tbl_extend("force", {}, state.config.keys or {}, { prefix = "<leader>Z" })
+  require("nvime").setup(cfg)
+  local found = false
+  for _, c in ipairs(state.last_keymap_conflicts or {}) do
+    if c.lhs == "<leader>Zc" then
+      found = true
+    end
+  end
+  assert(found, "#8: setup detects and records a clobbered user keymap")
+  -- Restore the original prefix so later runs are unaffected.
+  local restore = vim.deepcopy(state.config)
+  restore.force = true
+  restore.keys = vim.tbl_extend("force", {}, restore.keys or {}, { prefix = orig_prefix })
+  require("nvime").setup(restore)
+  pcall(vim.keymap.del, "n", "<leader>Zc")
 end)()
 
 print("nvime headless spec passed")

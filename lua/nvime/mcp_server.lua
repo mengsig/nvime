@@ -202,6 +202,18 @@ local TOOLS = {
       required = { "file" },
     },
   },
+  {
+    name = "nvime.check_policy",
+    description = "Return the project's declared edit constraints for a path BEFORE proposing changes: whether the path is human-only (require_human/blocked), the max changed-lines budget for it, which lanes may touch it, the matched rule, and sensitivity tags. These are constraints to RESPECT and CITE in your plan/RATIONALE, not permission to proceed — the human's accept gate remains the only authority, and a path with no blocking rule is NOT thereby approved.",
+    inputSchema = {
+      type = "object",
+      properties = {
+        file = { type = "string", description = "Repo-relative path you intend to edit." },
+        lane = { type = "string", description = 'Edit lane to check against (default "edit").' },
+      },
+      required = { "file" },
+    },
+  },
 }
 
 local function repo_root()
@@ -798,6 +810,44 @@ local function tool_verify_file(args)
   return ok_json(result)
 end
 
+-- Read-only introspection of the project's per-path edit policy + sensitivity
+-- tags. Deliberately returns ONLY constraints (no risk score / green light): a
+-- self-correcting agent should know a path is human-only or budget-capped and
+-- avoid proposing into it, not be told a change is "safe".
+local function tool_check_policy(args)
+  local file = args.file
+  if not file or file == "" then
+    return err_result("file is required")
+  end
+  -- Traversal guard only; policy_rules matches on the repo-relative path.
+  local _, perr = safe_join(repo_root(), file)
+  if perr then
+    return err_result("invalid file: " .. perr)
+  end
+  local ok_pr, policy_rules = pcall(require, "nvime.policy_rules")
+  if not ok_pr or not policy_rules or type(policy_rules.evaluate) ~= "function" then
+    return err_result("policy_rules module unavailable")
+  end
+  local lane = args.lane or "edit"
+  local result = policy_rules.evaluate(file, lane)
+  local tags = {}
+  local ok_risk, risk = pcall(require, "nvime.risk")
+  if ok_risk and risk and type(risk._sensitive_tags) == "function" then
+    tags = risk._sensitive_tags(file) or {}
+  end
+  return ok_json({
+    file = file,
+    lane = lane,
+    blocked = (result.allowed == false and result.require_human == true) or false,
+    require_human = result.require_human or false,
+    max_changed_lines = result.max_changed_lines,
+    allow_lanes = result.allow_lanes,
+    matched_rule = result.rule and result.rule.match or nil,
+    reason = result.reason,
+    sensitive_tags = tags,
+  })
+end
+
 local TOOL_HANDLERS = {
   ["nvime.search_attribution"] = tool_search_attribution,
   ["nvime.list_plans"] = tool_list_plans,
@@ -812,6 +862,7 @@ local TOOL_HANDLERS = {
   ["nvime.session_recent"] = tool_session_recent,
   ["nvime.recent_diffs"] = tool_recent_diffs,
   ["nvime.verify_file"] = tool_verify_file,
+  ["nvime.check_policy"] = tool_check_policy,
 }
 
 local function jsonrpc_response(id, result)

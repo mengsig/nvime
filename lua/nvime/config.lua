@@ -285,6 +285,10 @@ M.defaults = {
   keys = {
     enabled = true,
     prefix = "<leader>n",
+    -- Warn (once at setup) when nvime overrides an existing mapping at one of
+    -- its `<leader>n*` lhs — so a clobbered user binding is discovered at setup
+    -- rather than silently. Set false to silence.
+    warn_conflicts = true,
     normal = {
       dashboard = "<Space>",
       chat = "c",
