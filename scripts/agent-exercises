@@ -560,6 +560,167 @@ EXERCISES: dict[str, dict[str, Any]] = {
             """,
         },
     },
+    "cross_file_pricing_rules": {
+        "difficulty": "hard",
+        "title": "Apply pricing rules defined in sibling files",
+        "target": "pricing.py",
+        "intent": (
+            "Fix total_price so it computes the cart subtotal, applies the correct discount "
+            "tier from rules.py (the highest tier threshold the subtotal reaches, inclusive), "
+            "then applies tax, then rounds the final amount with money.round_money. An empty "
+            "cart costs 0.0. Read rules.py and money.py for the exact tiers, tax rate, and "
+            "rounding rule — do not hardcode those values."
+        ),
+        "files": {
+            "pricing.py": """
+                from rules import DISCOUNT_TIERS, TAX_RATE
+                from money import round_money
+
+
+                def total_price(cart):
+                    # NVIME_SELECT_START
+                    return sum(item["price"] * item["qty"] for item in cart)
+                    # NVIME_SELECT_END
+            """,
+            "rules.py": """
+                # Discount tiers as (subtotal_threshold, rate_off). The HIGHEST threshold
+                # the pre-tax subtotal reaches (inclusive) wins. Tax is applied AFTER the
+                # discount.
+                DISCOUNT_TIERS = [(0, 0.0), (100, 0.05), (500, 0.10), (1000, 0.15)]
+                TAX_RATE = 0.08
+            """,
+            "money.py": """
+                from decimal import Decimal, ROUND_HALF_UP
+
+
+                def round_money(amount):
+                    # Round to 2 decimal places, half-up, returning a float.
+                    return float(Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+            """,
+            "test_pricing.py": """
+                import unittest
+
+                from pricing import total_price
+
+
+                class PricingTests(unittest.TestCase):
+                    def test_no_discount_small_cart(self):
+                        self.assertEqual(total_price([{"price": 20.0, "qty": 2}]), 43.2)
+
+                    def test_mid_tier_discount(self):
+                        self.assertEqual(total_price([{"price": 100.0, "qty": 2}]), 205.2)
+
+                    def test_empty_cart(self):
+                        self.assertEqual(total_price([]), 0.0)
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+        "hidden_files": {
+            "test_hidden_pricing.py": """
+                import unittest
+
+                from pricing import total_price
+
+
+                class HiddenPricingTests(unittest.TestCase):
+                    def test_tier_boundary_inclusive(self):
+                        self.assertEqual(total_price([{"price": 250.0, "qty": 2}]), 486.0)
+
+                    def test_rounding_half_up(self):
+                        self.assertEqual(total_price([{"price": 33.33, "qty": 1}]), 36.0)
+
+                    def test_top_tier(self):
+                        self.assertEqual(total_price([{"price": 500.0, "qty": 2}]), 918.0)
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+    },
+    "cross_file_workflow_transitions": {
+        "difficulty": "hard",
+        "title": "Drive a state machine defined in a sibling file",
+        "target": "workflow.py",
+        "intent": (
+            "Fix next_state to return the destination state for (current, event) per the "
+            "TRANSITIONS table in transitions.py. Raise ValueError for any pair not in the "
+            "table, and for any event applied to a state listed in TERMINAL. Read "
+            "transitions.py for the allowed transitions and terminal states."
+        ),
+        "files": {
+            "workflow.py": """
+                from transitions import TRANSITIONS, TERMINAL
+
+
+                def next_state(current, event):
+                    # NVIME_SELECT_START
+                    return event
+                    # NVIME_SELECT_END
+            """,
+            "transitions.py": """
+                # Allowed (from_state, event) -> to_state. Anything not listed is invalid.
+                TRANSITIONS = {
+                    ("draft", "submit"): "review",
+                    ("review", "approve"): "published",
+                    ("review", "reject"): "draft",
+                    ("published", "archive"): "archived",
+                }
+
+                # Terminal states accept no events.
+                TERMINAL = {"archived"}
+            """,
+            "test_workflow.py": """
+                import unittest
+
+                from workflow import next_state
+
+
+                class WorkflowTests(unittest.TestCase):
+                    def test_valid_transitions(self):
+                        self.assertEqual(next_state("draft", "submit"), "review")
+                        self.assertEqual(next_state("review", "approve"), "published")
+
+                    def test_invalid_transition_raises(self):
+                        with self.assertRaises(ValueError):
+                            next_state("draft", "approve")
+
+                    def test_terminal_state_raises(self):
+                        with self.assertRaises(ValueError):
+                            next_state("archived", "submit")
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+        "hidden_files": {
+            "test_hidden_workflow.py": """
+                import unittest
+
+                from workflow import next_state
+
+
+                class HiddenWorkflowTests(unittest.TestCase):
+                    def test_reject_cycles_back_to_draft(self):
+                        self.assertEqual(next_state("review", "reject"), "draft")
+
+                    def test_unknown_state_raises(self):
+                        with self.assertRaises(ValueError):
+                            next_state("nope", "submit")
+
+                    def test_publish_then_archive(self):
+                        self.assertEqual(next_state("published", "archive"), "archived")
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+    },
 }
 
 
@@ -2016,6 +2177,56 @@ def emit_prompts(out_dir: Path) -> int:
     return count
 
 
+def compare_runs(before_path: str, after_path: str) -> int:
+    """Print a before/after benchmark comparison of two `--live` result JSON
+    files: per-exercise pass/fail, aggregate pass rate, and any regressions
+    (passed before, fails now). Returns 1 if there is at least one regression."""
+
+    def load(path: str) -> dict[tuple[str, str], dict[str, Any]]:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        out = {}
+        for r in data.get("results", []):
+            out[(r.get("mode", "?"), r.get("exercise", "?"))] = r
+        return out
+
+    before = load(before_path)
+    after = load(after_path)
+    keys = sorted(set(before) | set(after))
+
+    def mark(r: dict[str, Any] | None) -> str:
+        if r is None:
+            return "  -  "
+        return "PASS " if r.get("success") else "FAIL "
+
+    regressions: list[str] = []
+    improvements: list[str] = []
+    print(f"{'mode/exercise':45} {'before':>7} {'after':>7}")
+    print("-" * 61)
+    for key in keys:
+        b, a = before.get(key), after.get(key)
+        label = f"{key[0]}/{key[1]}"
+        print(f"{label:45} {mark(b):>7} {mark(a):>7}")
+        bs = bool(b and b.get("success"))
+        as_ = bool(a and a.get("success"))
+        if bs and not as_:
+            regressions.append(label)
+        elif as_ and not bs:
+            improvements.append(label)
+
+    def rate(m: dict[str, Any]) -> str:
+        total = len(m)
+        passed = sum(1 for r in m.values() if r.get("success"))
+        return f"{passed}/{total}" if total else "0/0"
+
+    print("-" * 61)
+    print(f"pass rate: before {rate(before)} -> after {rate(after)}")
+    if improvements:
+        print(f"improved ({len(improvements)}): {', '.join(improvements)}")
+    if regressions:
+        print(f"REGRESSED ({len(regressions)}): {', '.join(regressions)}")
+    return 1 if regressions else 0
+
+
 def compare_prompt_trees(expected: Path, actual: Path) -> list[str]:
     exp = {p.relative_to(expected) for p in expected.rglob("*.txt")} if expected.exists() else set()
     act = {p.relative_to(actual) for p in actual.rglob("*.txt")}
@@ -2059,7 +2270,16 @@ def main() -> int:
         action="store_true",
         help="regenerate the committed prompt baselines (leaves the tree dirty for you to commit)",
     )
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("BEFORE", "AFTER"),
+        help="compare two --live result JSON files: per-exercise pass/fail, pass rate, regressions",
+    )
     args = parser.parse_args()
+
+    if args.compare:
+        return compare_runs(args.compare[0], args.compare[1])
 
     if args.emit_prompts:
         n = emit_prompts(Path(args.emit_prompts))

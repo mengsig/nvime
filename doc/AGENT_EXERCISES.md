@@ -36,6 +36,14 @@ scripts/agent-exercises --provider codex --mode plan-execute --exercise all --li
 | `extremely_difficult_json_patch` | extremely_difficult | Implement an RFC 6902 subset over JSON Pointer paths. | Escaped keys, list append/indexing, atomic failure, invalid operation rejection. |
 | `extremely_difficult_topological_batches` | extremely_difficult | Implement stable dependency batches. | Stable topological batches, duplicate/missing dependency/cycle rejection, no input mutation. |
 | `extremely_difficult_csv_parser` | extremely_difficult | Implement strict RFC 4180 CSV row parser. | Quoted-field embedded newlines, doubled-quote escape, CRLF, empty-field preservation, rejection of unterminated/bare/stray quotes. |
+| `cross_file_pricing_rules` | hard | Apply discount tiers + tax + rounding **defined in sibling files** (`rules.py`, `money.py`). | Correct edit requires reading the other files; only `pricing.py` may change; hidden tests cover tier boundaries and half-up rounding. |
+| `cross_file_workflow_transitions` | hard | Drive a state machine **defined in a sibling file** (`transitions.py`). | Correct edit requires reading the transition table + terminal states; only `workflow.py` may change; invalid/terminal transitions raise `ValueError`. |
+
+The two `cross_file_*` exercises are the hardest class for the constrained edit
+lane: the editable range is a single file (the `scope_ok` check still requires
+that **only** the target changes), but the correct behavior is specified in
+other files the agent must read first. They exercise nvime's project-context
+injection and the agent's cross-file investigation, not just local editing.
 
 ## Workflow Exercise Matrix
 
@@ -117,6 +125,28 @@ implementation step it asserts against. The harness now also has hidden tests
 for the hardest edit and plan-execution cases, and the plan-execution path can
 feed validation or patch failures back into a bounded repair attempt with
 `--fix-attempts`.
+
+## Benchmarking agent quality (before/after a change)
+
+To measure whether an nvime change helps or hurts agent performance, capture a
+`--live` run before and after, then diff them:
+
+```sh
+# before your change (e.g. on main), capture the graded results
+git switch main
+scripts/agent-exercises --provider claude --mode nvime --exercise all --live > /tmp/before.json
+
+# after your change (your branch)
+git switch your-branch
+scripts/agent-exercises --provider claude --mode nvime --exercise all --live > /tmp/after.json
+
+# compare: per-exercise PASS/FAIL, aggregate pass rate, and regressions
+scripts/agent-exercises --compare /tmp/before.json /tmp/after.json
+```
+
+`--compare` exits non-zero if any exercise that passed before now fails, so it
+can gate a change. Live runs spend provider tokens; the structural and
+prompt-baseline checks above do not.
 
 ## Prompt baselines (no-spend contract)
 
