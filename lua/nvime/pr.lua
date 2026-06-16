@@ -50,8 +50,12 @@ end
 local function git_commits_between(base, head)
   local root = repo_root()
   local out = git.systemlist({
-    "git", "-C", root, "log",
-    "--reverse", "--format=%H%x00%ct%x00%s",
+    "git",
+    "-C",
+    root,
+    "log",
+    "--reverse",
+    "--format=%H%x00%ct%x00%s",
     base .. ".." .. head,
   })
   local commits = {}
@@ -71,7 +75,12 @@ end
 local function changed_files(base, head)
   local root = repo_root()
   local out = git.systemlist({
-    "git", "-C", root, "diff", "--name-only", base .. "..." .. head,
+    "git",
+    "-C",
+    root,
+    "diff",
+    "--name-only",
+    base .. "..." .. head,
   })
   local files = {}
   for _, name in ipairs(out or {}) do
@@ -146,8 +155,7 @@ local function format_entry(entry)
     lines[#lines + 1] = "  - human rationale: " .. entry.user_rationale
   end
   if type(entry.verdict) == "table" and entry.verdict.decision then
-    lines[#lines + 1] = string.format("  - critic %s: %s",
-      entry.verdict.decision, entry.verdict.justification or "")
+    lines[#lines + 1] = string.format("  - critic %s: %s", entry.verdict.decision, entry.verdict.justification or "")
   end
   local vsum = attribution._verify_summary(entry.verify)
   if vsum then
@@ -165,11 +173,14 @@ local function format_risky(event)
   if label == "verify_force" or label == "verify_block" then
     detail = string.format("%s · %s", event.file or "?", event.reason or "?")
   elseif label == "risk_force" then
-    detail = string.format("%s · %s · +%d −%d ai %d%%",
-      event.file or "?", event.level or "?",
+    detail = string.format(
+      "%s · %s · +%d −%d ai %d%%",
+      event.file or "?",
+      event.level or "?",
       tonumber(event.lines_added) or 0,
       tonumber(event.lines_removed) or 0,
-      math.floor(((tonumber(event.ai_share) or 0)) * 100 + 0.5))
+      math.floor((tonumber(event.ai_share) or 0) * 100 + 0.5)
+    )
   elseif label == "block_force_applied" then
     detail = string.format("%s:%d-%d", event.file or "?", event.start_line or -1, event.end_line or -1)
   elseif label == "policy_block" then
@@ -215,8 +226,10 @@ function M.render(opts)
   local lines = {}
   table.insert(lines, "# nvime PR sidecar")
   table.insert(lines, "")
-  table.insert(lines, string.format("Base: `%s` · Head: `%s` · %d commits · %d files changed",
-    base, head, #commits, #files))
+  table.insert(
+    lines,
+    string.format("Base: `%s` · Head: `%s` · %d commits · %d files changed", base, head, #commits, #files)
+  )
   table.insert(lines, "")
   if #risky > 0 then
     table.insert(lines, "## Review-first events")

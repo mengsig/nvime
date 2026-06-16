@@ -36,7 +36,13 @@ local function build_prompt(selection, question)
     "Do not edit files directly. Do not produce a patch unless you are only narrating what a future patch would do.",
     "",
     "File: " .. selection.path,
-    "Selected range: " .. tostring(selection.line1) .. "-" .. tostring(selection.line2) .. " (" .. (selection.source or "range") .. ")",
+    "Selected range: "
+      .. tostring(selection.line1)
+      .. "-"
+      .. tostring(selection.line2)
+      .. " ("
+      .. (selection.source or "range")
+      .. ")",
     "Question: " .. question,
     "",
     "Selected code:",

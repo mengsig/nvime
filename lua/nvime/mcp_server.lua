@@ -195,9 +195,18 @@ local TOOLS = {
     inputSchema = {
       type = "object",
       properties = {
-        file = { type = "string", description = "Repo-relative path. Used for glob matching and project-config resolution. The file does not have to exist on disk when `content` is supplied." },
-        content = { type = "string", description = "Proposed full-file content to verify. If omitted, the on-disk file is read." },
-        wait_ms = { type = "integer", description = "How long to wait for external checks before returning (default 0 — parse-only). Max 60000." },
+        file = {
+          type = "string",
+          description = "Repo-relative path. Used for glob matching and project-config resolution. The file does not have to exist on disk when `content` is supplied.",
+        },
+        content = {
+          type = "string",
+          description = "Proposed full-file content to verify. If omitted, the on-disk file is read.",
+        },
+        wait_ms = {
+          type = "integer",
+          description = "How long to wait for external checks before returning (default 0 — parse-only). Max 60000.",
+        },
       },
       required = { "file" },
     },

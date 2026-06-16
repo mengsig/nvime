@@ -256,7 +256,13 @@ local function render_digest(stats, window_days)
     push("    (no resolved diffs recorded)", "NvimePlanWhy")
   else
     push(
-      string.format("    %s  %d/%d blocks (%d%%)", pad_right("overall", 14), acc.accepted, acc.total, pct(acc.accepted, acc.total)),
+      string.format(
+        "    %s  %d/%d blocks (%d%%)",
+        pad_right("overall", 14),
+        acc.accepted,
+        acc.total,
+        pct(acc.accepted, acc.total)
+      ),
       "NvimePlanFile"
     )
     -- per-provider, ordered by total blocks descending (resolved providers only)
@@ -344,7 +350,7 @@ local function render_digest(stats, window_days)
           event.level or "?",
           tonumber(event.lines_added) or 0,
           tonumber(event.lines_removed) or 0,
-          math.floor(((tonumber(event.ai_share) or 0)) * 100 + 0.5)
+          math.floor((tonumber(event.ai_share) or 0) * 100 + 0.5)
         )
       else
         detail = vim.inspect(event):sub(1, 80)

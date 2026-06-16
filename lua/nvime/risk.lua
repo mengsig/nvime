@@ -301,10 +301,9 @@ function M.banner_row(session, icon_fn)
     parts[#parts + 1] = tag
   end
   local icon_name = (r.level == "high" and "warning") or (r.level == "medium" and "review") or "review"
-  local hl = (r.level == "high" and "NvimeStatusError")
-    or (r.level == "medium" and "NvimeStatusWarn")
-    or "NvimeMuted"
-  local text = string.format("  %s risk %s · %s", icon_fn and icon_fn(icon_name) or "", r.level, table.concat(parts, " · "))
+  local hl = (r.level == "high" and "NvimeStatusError") or (r.level == "medium" and "NvimeStatusWarn") or "NvimeMuted"
+  local text =
+    string.format("  %s risk %s · %s", icon_fn and icon_fn(icon_name) or "", r.level, table.concat(parts, " · "))
   -- On a high-risk diff, say WHY it is high right in the row (the gA! prompt is
   -- the friction; the explanation is what makes that friction meaningful).
   if r.level == "high" then

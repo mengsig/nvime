@@ -59,7 +59,8 @@ local function ingest_plan(raw)
       local options = {}
       for _, o in ipairs(q.options or {}) do
         if type(o) == "table" then
-          options[#options + 1] = { label = tostring(o.label or "option"), detail = o.detail and tostring(o.detail) or nil }
+          options[#options + 1] =
+            { label = tostring(o.label or "option"), detail = o.detail and tostring(o.detail) or nil }
         elseif type(o) == "string" then
           options[#options + 1] = { label = o }
         end
@@ -191,9 +192,7 @@ end
 -- Render one decision as a bordered card with selectable option rows.
 local function render_question(lines, marks, qi, q)
   local w = rule_width()
-  local kind_tag = (q.kind == "single" and "pick one")
-    or (q.kind == "multi" and "pick any")
-    or "type an answer"
+  local kind_tag = (q.kind == "single" and "pick one") or (q.kind == "multi" and "pick any") or "type an answer"
 
   local label = "─ Decision " .. qi .. " "
   local top = "  ╭" .. label .. hrule(math.max(3, w - vim.fn.strdisplaywidth(label))) .. "╮"
@@ -265,7 +264,12 @@ local function render()
   view.row_to_q = {}
   view.first_select_row = nil
 
-  push(lines, marks, "  " .. ui.icon("brand") .. "  " .. (session.title or "Big Change") .. " — planning", "NvimeTitle")
+  push(
+    lines,
+    marks,
+    "  " .. ui.icon("brand") .. "  " .. (session.title or "Big Change") .. " — planning",
+    "NvimeTitle"
+  )
   local diff = store.DIFFICULTY[session.difficulty] or { label = session.difficulty, detail = "" }
   push(lines, marks, "  Difficulty: " .. (diff.label or "?") .. " — " .. (diff.detail or ""), "NvimeMuted")
   push(lines, marks, "  " .. hrule(rule_width()), "NvimeRule")
@@ -621,7 +625,12 @@ function M.open(session)
 
   render()
   -- Auto-start the interrogation when this is a fresh intake.
-  if #(session.intake_history or {}) == 0 and not spec_ready(session) and not plan_active(session) and not view.busy then
+  if
+    #(session.intake_history or {}) == 0
+    and not spec_ready(session)
+    and not plan_active(session)
+    and not view.busy
+  then
     kickoff()
   end
 end

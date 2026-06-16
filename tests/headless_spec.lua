@@ -146,7 +146,11 @@ do
 
   -- version / config value bumps
   assert_eq(classify("Cargo.toml", { { "add", 'version = "0.4.0"' } }).category, "config", "toml is config")
-  assert_eq(classify("lua/version.lua", { { "add", 'M.version = "0.4.0"' } }).category, "config", "version.lua is config")
+  assert_eq(
+    classify("lua/version.lua", { { "add", 'M.version = "0.4.0"' } }).category,
+    "config",
+    "version.lua is config"
+  )
 
   -- mixing an import with executable code is NOT trivial
   local mixed_exec = classify("lua/foo.lua", { { "add", 'local x = require("y")' }, { "add", "x.run()" } })
@@ -4147,10 +4151,7 @@ end)();
     end
   end
   assert(why_heading_row, "plan view: WHY section heading present")
-  assert(
-    has_hl_at(why_heading_row, "NvimePlanHeading"),
-    "plan view: WHY heading row gets NvimePlanHeading"
-  )
+  assert(has_hl_at(why_heading_row, "NvimePlanHeading"), "plan view: WHY heading row gets NvimePlanHeading")
 
   -- Step file/range row separates the path from the L<n>-<m> label.
   local file_row = nil
@@ -4557,10 +4558,7 @@ end)(); -- ---------------------------------------------------------------------
     method = "tools/call",
     params = { name = "nvime.check_policy", arguments = { file = "../../etc/passwd" } },
   })
-  assert(
-    pol_traversal.result and pol_traversal.result.isError,
-    "mcp: check_policy rejects parent-traversal paths"
-  )
+  assert(pol_traversal.result and pol_traversal.result.isError, "mcp: check_policy rejects parent-traversal paths")
 
   vim.env.NVIME_REPO_ROOT = nil
   pcall(vim.api.nvim_set_current_dir, prior_cwd)

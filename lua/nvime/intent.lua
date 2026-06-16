@@ -390,10 +390,7 @@ function M.guard(intent, opts)
   end
   if result.verdict == "questionable" then
     vim.schedule(function()
-      vim.notify(
-        "nvime intent: " .. result.reason .. " (sending anyway)",
-        vim.log.levels.INFO
-      )
+      vim.notify("nvime intent: " .. result.reason .. " (sending anyway)", vim.log.levels.INFO)
     end)
     return true
   end

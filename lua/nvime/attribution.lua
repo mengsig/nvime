@@ -337,7 +337,7 @@ local function open_blame_popup(lines, opts)
     width = width,
     height = height,
     style = "minimal",
-    border = (((state.config or {}).ui or {}).border) or "rounded",
+    border = ((state.config or {}).ui or {}).border or "rounded",
     title = " " .. (opts and opts.title or "nvime attribution") .. " ",
     title_pos = "left",
     zindex = 60,

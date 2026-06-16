@@ -58,8 +58,7 @@ function M.input(opts, on_submit)
     border = (require("nvime.state").config.ui or {}).border or "rounded",
     title = " " .. (opts.title or "Input") .. " ",
     title_pos = "center",
-    footer = opts.no_paste and " <C-s> submit · <Esc> cancel · paste disabled "
-      or " <C-s> submit · <Esc> cancel ",
+    footer = opts.no_paste and " <C-s> submit · <Esc> cancel · paste disabled " or " <C-s> submit · <Esc> cancel ",
     footer_pos = "center",
   })
   ui.configure_panel_window(win, { wrap = true, cursorline = false })

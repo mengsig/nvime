@@ -424,7 +424,13 @@ local function build_perf_prompt(selection, intent)
     "```",
     "",
     "File: " .. selection.path,
-    "Allowed range: " .. tostring(selection.line1 or 1) .. "-" .. tostring(selection.line2 or selection.line1 or 1) .. " (" .. (selection.source or "range") .. ")",
+    "Allowed range: "
+      .. tostring(selection.line1 or 1)
+      .. "-"
+      .. tostring(selection.line2 or selection.line1 or 1)
+      .. " ("
+      .. (selection.source or "range")
+      .. ")",
     "Intent: " .. intent,
     "",
     "Selected code:",
@@ -511,7 +517,13 @@ local function build_prompt(selection, intent)
     "```",
     "",
     "File: " .. selection.path,
-    "Allowed range: " .. tostring(selection.line1 or 1) .. "-" .. tostring(selection.line2 or selection.line1 or 1) .. " (" .. (selection.source or "range") .. ")",
+    "Allowed range: "
+      .. tostring(selection.line1 or 1)
+      .. "-"
+      .. tostring(selection.line2 or selection.line1 or 1)
+      .. " ("
+      .. (selection.source or "range")
+      .. ")",
     "Intent: " .. intent,
     table.concat(prior_context, "\n"),
     project_context and table.concat({
@@ -532,9 +544,25 @@ end
 local run_edit
 
 local edit_keywords = {
-  "make", "change", "fix", "add", "remove", "replace", "implement",
-  "refactor", "rename", "convert", "update", "handle", "delete",
-  "move", "extract", "inline", "wrap", "unwrap", "rewrite",
+  "make",
+  "change",
+  "fix",
+  "add",
+  "remove",
+  "replace",
+  "implement",
+  "refactor",
+  "rename",
+  "convert",
+  "update",
+  "handle",
+  "delete",
+  "move",
+  "extract",
+  "inline",
+  "wrap",
+  "unwrap",
+  "rewrite",
 }
 
 local function has_edit_keyword(text)

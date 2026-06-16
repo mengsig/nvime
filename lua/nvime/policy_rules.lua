@@ -201,11 +201,7 @@ function M.evaluate(path, lane, ctx)
   end
   if out.max_changed_lines and ctx.changed_lines and ctx.changed_lines > out.max_changed_lines then
     out.allowed = false
-    out.reason = string.format(
-      "diff changes %d lines, exceeds rule limit %d",
-      ctx.changed_lines,
-      out.max_changed_lines
-    )
+    out.reason = string.format("diff changes %d lines, exceeds rule limit %d", ctx.changed_lines, out.max_changed_lines)
     return out
   end
   out.reason = "ok"
