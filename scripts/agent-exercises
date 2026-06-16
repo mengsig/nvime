@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1520,6 +1521,25 @@ def parse_claude(stdout: str) -> str:
     return "\n".join(chunks).strip()
 
 
+def count_nvime_tool_calls(stdout: str) -> int:
+    """Count nvime MCP tool invocations in a claude stream-json transcript.
+
+    Lets a null A/B result be interpreted: if exposing the nav tools changed
+    nothing AND this is 0, the agent never reached for them (a discoverability/
+    prompt question, not a tool-value one)."""
+    n = 0
+    for line in stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("type") == "assistant":
+            for block in (item.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and "nvime" in (block.get("name") or ""):
+                    n += 1
+    return n
+
+
 def parse_codex(stdout: str) -> str:
     chunks: list[str] = []
     for line in stdout.splitlines():
@@ -1565,6 +1585,37 @@ def write_mcp_config(workspace: Path) -> Path:
     return path
 
 
+def _looks_transient(returncode: int, text: str, stderr: str) -> bool:
+    """A transient provider/infra failure (retry-worthy), not a model answer.
+
+    Live benchmarking otherwise miscounts API 500s / overloads as fixture
+    failures and poisons the pass-rate comparison — exactly what N=1 noise did
+    in the first sweep."""
+    if returncode == 0:
+        return False
+    if not (text or "").strip():
+        return True
+    blob = f"{text}\n{stderr}".lower()
+    return any(
+        m in blob
+        for m in ("api error: 5", "internal server error", "overloaded", "service unavailable", "rate limit")
+    )
+
+
+def run_provider_cmd(cmd, workspace, parse_fn, timeout, *, text=None, retries=3, backoff=4.0):
+    """Run a provider CLI, retrying on transient API/infra errors with linear
+    backoff. Returns (proc, parsed_text) of the last attempt."""
+    proc = run(cmd, workspace, text=text, timeout=timeout)
+    parsed = parse_fn(proc.stdout)
+    attempt = 0
+    while attempt < retries and _looks_transient(proc.returncode, parsed, proc.stderr or ""):
+        attempt += 1
+        time.sleep(backoff * attempt)
+        proc = run(cmd, workspace, text=text, timeout=timeout)
+        parsed = parse_fn(proc.stdout)
+    return proc, parsed
+
+
 def call_provider(
     provider: str, mode: str, prompt: str, workspace: Path, timeout: int, with_mcp: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -1585,8 +1636,7 @@ def call_provider(
             str(workspace),
             "-",
         ]
-        proc = run(cmd, workspace, text=prompt, timeout=timeout)
-        return proc, parse_codex(proc.stdout)
+        return run_provider_cmd(cmd, workspace, parse_codex, timeout, text=prompt)
 
     if provider == "claude":
         tools = "Read,Grep,Glob,LS,Bash"
@@ -1627,9 +1677,12 @@ def call_provider(
             cmd.extend(["--model", os.environ["NVIME_AGENT_EXERCISE_CLAUDE_MODEL"]])
         if os.environ.get("NVIME_AGENT_EXERCISE_CLAUDE_BUDGET"):
             cmd.extend(["--max-budget-usd", os.environ["NVIME_AGENT_EXERCISE_CLAUDE_BUDGET"]])
-        cmd.append(prompt)
-        proc = run(cmd, workspace, timeout=timeout)
-        return proc, parse_claude(proc.stdout)
+        # Pass the prompt on STDIN, not as a trailing positional. claude's
+        # --disallowedTools/--allowedTools greedily consume following args, so a
+        # positional prompt gets shredded into bogus "deny rule" tokens and the
+        # task text is mangled — silently degrading every run. stdin is how the
+        # codex branch already feeds the prompt.
+        return run_provider_cmd(cmd, workspace, parse_claude, timeout, text=prompt)
 
     raise ValueError(provider)
 
@@ -2343,6 +2396,7 @@ def run_one(
               "provider_exit": proc.returncode,
               "applied": applied,
               "apply_error": apply_error,
+              "nvime_tool_calls": count_nvime_tool_calls(proc.stdout) if provider == "claude" else None,
               "test_exit": tests.returncode,
               "scope_ok": scope_ok,
               "changed_files": files,
@@ -2382,6 +2436,7 @@ def run_one(
           "provider_exit": result["provider_exit"],
           "applied": result["applied"],
           "apply_error": result["apply_error"],
+          "nvime_tool_calls": result.get("nvime_tool_calls"),
           "test_exit": result["test_exit"],
           "scope_ok": result["scope_ok"],
           "changed_files": result["changed_files"],
