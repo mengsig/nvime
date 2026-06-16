@@ -214,6 +214,32 @@ do
   assert_eq(pct, 60, "grade excludes trivial block from the average")
   assert_eq(scored, 2, "grade counts only non-trivial graded blocks")
   assert_eq(gradeable, 2, "grade denominator is the non-trivial count")
+
+  -- #10: every grading attempt is recorded to per-block history + audit.
+  local gsession = {
+    id = "proj-grade",
+    title = "Grade project",
+    difficulty = "medium", -- threshold 70
+    blocks = { { id = 1, title = "Block A", file = "a.lua", action = "approve", comment = "explains the change" } },
+  }
+  local audit_before = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  review._apply_results(gsession, { { id = 1, grade = 85 } }, gsession.blocks)
+  assert_eq(gsession.blocks[1].state, "cleared", "grading: 85 >= 70 clears the block")
+  assert_eq(#gsession.blocks[1].grading_history, 1, "grading: first attempt recorded")
+  assert_eq(gsession.blocks[1].grading_history[1].passed, true, "grading: passing attempt marked passed")
+  gsession.blocks[1].action = "approve"
+  review._apply_results(gsession, { { id = 1, grade = 40 } }, gsession.blocks)
+  assert_eq(gsession.blocks[1].state, "needs_explanation", "grading: 40 < 70 needs a better explanation")
+  assert_eq(#gsession.blocks[1].grading_history, 2, "grading: attempts accumulate in history")
+  assert_eq(gsession.blocks[1].grading_history[2].passed, false, "grading: failing attempt marked not passed")
+  local saw_grade_audit = false
+  for _, line in ipairs(vim.fn.readfile(audit_path)) do
+    local ok_d, d = pcall(vim.json.decode, line)
+    if ok_d and type(d) == "table" and d.event == "bigchange_block_graded" and d.block_id == 1 then
+      saw_grade_audit = true
+    end
+  end
+  assert(saw_grade_audit, "grading: bigchange_block_graded audit event written")
 end
 do
   local state = require("nvime.state")

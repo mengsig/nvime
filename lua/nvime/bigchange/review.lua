@@ -17,6 +17,7 @@ local fileview = require("nvime.bigchange.fileview")
 local store = require("nvime.bigchange.store")
 local uikit = require("nvime.bigchange.uikit")
 local ui = require("nvime.ui")
+local audit = require("nvime.audit")
 
 local M = {}
 
@@ -329,6 +330,16 @@ local function overlay_lines(block)
 
   if block.hint and block.hint ~= "" and block.state == "needs_explanation" then
     out[#out + 1] = { { "│ hint: ", "NvimeAgent" }, { block.hint, "NvimeStatusWarn" } }
+  end
+
+  -- Grading history: when a block took more than one attempt, show the trail of
+  -- grades so the work it took to demonstrate comprehension is visible.
+  if type(block.grading_history) == "table" and #block.grading_history > 1 then
+    local marks = {}
+    for _, h in ipairs(block.grading_history) do
+      marks[#marks + 1] = string.format("%d%%%s", h.grade or 0, h.passed and "✓" or "✗")
+    end
+    out[#out + 1] = { { "│ attempts: ", "NvimeAgent" }, { table.concat(marks, " · "), "NvimeMuted" } }
   end
 
   out[#out + 1] = { { "╰─ a approve · r request-changes (left pane) ─", "NvimeMuted" } }
@@ -782,6 +793,29 @@ local function apply_results(session, results, pending)
         b.state = "needs_explanation"
         b.hint = r.hint or "add more detail about what the code does and why"
       end
+      -- Record every grading attempt: the per-block history shows how many
+      -- tries comprehension took (a real signal), and the audit event makes the
+      -- forced-comprehension gate itself accountable months later.
+      local passed = b.state == "cleared"
+      b.grading_history = b.grading_history or {}
+      b.grading_history[#b.grading_history + 1] = {
+        grade = b.grade,
+        threshold = bar,
+        passed = passed,
+        ts = os.time(),
+      }
+      audit.write({
+        event = "bigchange_block_graded",
+        project = session.id or session.title,
+        block_id = b.id,
+        block_title = b.title,
+        file = b.file,
+        difficulty = session.difficulty,
+        grade = b.grade,
+        threshold = bar,
+        passed = passed,
+        attempt = #b.grading_history,
+      })
     elseif b.action == "request_changes" then
       b.agent_response = r.response or (r.revised and "fixed" or "critique declined")
       if r.revised == true then
@@ -961,5 +995,6 @@ end
 
 -- Test-only export.
 M._overall_grade = overall_grade
+M._apply_results = apply_results
 
 return M
