@@ -223,6 +223,24 @@ local TOOLS = {
       required = { "file" },
     },
   },
+  {
+    name = "nvime.find_symbol",
+    description = "Find where an identifier appears across the repo (git grep, word-boundary, tracked files only -> .gitignore-aware). Bounded + compact for LOW-CONTEXT navigation of an arbitrary, language-agnostic repo: returns { file, line, text } rows capped per-file and overall, with a `truncated` flag, instead of whole files. Does NOT classify definitions vs references (that needs a per-language parser -- use nvime.tree_sitter_symbols when one exists). Prefer this over reading files to answer `where is X used/defined?`.",
+    inputSchema = {
+      type = "object",
+      properties = {
+        name = { type = "string", description = "Identifier (or pattern, with regex=true) to locate." },
+        regex = {
+          type = "boolean",
+          description = "Treat `name` as an extended regex instead of a fixed whole word (default false).",
+        },
+        path = { type = "string", description = "Optional repo-relative subtree to scope the search to." },
+        limit = { type = "integer", description = "Max total hits to return (default 40, max 200)." },
+        per_file = { type = "integer", description = "Max hits per file (default 8, max 50)." },
+      },
+      required = { "name" },
+    },
+  },
 }
 
 local function repo_root()
@@ -857,6 +875,113 @@ local function tool_check_policy(args)
   })
 end
 
+-- Bounded, language-agnostic "where does this identifier appear?" lookup.
+-- git grep (word-boundary, tracked files only -> .gitignore-aware, so build
+-- artifacts and vendored code stay out of the result) with a non-git
+-- fallback. Returns compact file:line:text rows capped per file AND overall
+-- so a caller can navigate an arbitrary repo WITHOUT reading whole files or
+-- flooding its context window. Deliberately does NOT classify definitions vs
+-- references -- that needs per-language parsing (use tree_sitter_symbols).
+local function parse_grep_hits(stdout, strip_dot_slash, total_cap, per_file_cap)
+  local per_file, hits, total, truncated = {}, {}, 0, false
+  for line in stdout:gmatch("([^\n]+)") do
+    local file, lineno, text = line:match("^(.-):(%d+):(.*)$")
+    if file then
+      if strip_dot_slash then
+        file = file:gsub("^%./", "")
+      end
+      local seen = per_file[file] or 0
+      if seen >= per_file_cap then
+        truncated = true
+      elseif total >= total_cap then
+        truncated = true
+        break
+      else
+        per_file[file] = seen + 1
+        total = total + 1
+        local snippet = text:gsub("^%s+", "")
+        if #snippet > 200 then
+          snippet = snippet:sub(1, 200) .. "..."
+        end
+        hits[#hits + 1] = { file = file, line = tonumber(lineno), text = snippet }
+      end
+    end
+  end
+  return hits, truncated
+end
+
+local function tool_find_symbol(args)
+  local name = args.name
+  if type(name) ~= "string" or name == "" then
+    return err_result("name is required")
+  end
+  local total_cap = math.min(math.max(tonumber(args.limit) or 40, 1), 200)
+  local per_file_cap = math.min(math.max(tonumber(args.per_file) or 8, 1), 50)
+  local use_regex = args.regex == true
+  local root = repo_root()
+  local pathspec
+  if args.path and args.path ~= "" then
+    local _, perr = safe_join(root, args.path)
+    if perr then
+      return err_result("invalid path: " .. perr)
+    end
+    pathspec = args.path
+  end
+
+  -- git grep exit codes: 0 = matches, 1 = no matches (NOT an error), >1 = fail.
+  local gargs = { "git", "-C", root, "grep", "-n", "-I", "--no-color" }
+  if use_regex then
+    gargs[#gargs + 1] = "-E"
+  else
+    gargs[#gargs + 1] = "-F"
+    gargs[#gargs + 1] = "-w"
+  end
+  gargs[#gargs + 1] = "-e"
+  gargs[#gargs + 1] = name
+  if pathspec then
+    gargs[#gargs + 1] = "--"
+    gargs[#gargs + 1] = pathspec
+  end
+
+  local res = vim.system(gargs, { text = true }):wait()
+  if res.code == 0 then
+    local hits, truncated = parse_grep_hits(res.stdout or "", false, total_cap, per_file_cap)
+    return ok_json({ name = name, regex = use_regex, source = "git", count = #hits, truncated = truncated, hits = hits })
+  elseif res.code == 1 and (res.stderr == nil or res.stderr == "") then
+    return ok_json({ name = name, regex = use_regex, source = "git", count = 0, truncated = false, hits = {} })
+  end
+
+  -- Not a git repo (or git unavailable): bounded recursive grep fallback.
+  local fb = {
+    "grep",
+    "-rInH",
+    "--binary-files=without-match",
+    "--exclude-dir=.git",
+    "--exclude-dir=node_modules",
+    "--exclude-dir=.venv",
+    "--exclude-dir=target",
+    "--exclude-dir=build",
+    "--exclude-dir=dist",
+  }
+  if use_regex then
+    fb[#fb + 1] = "-E"
+  else
+    fb[#fb + 1] = "-F"
+    fb[#fb + 1] = "-w"
+  end
+  fb[#fb + 1] = "-e"
+  fb[#fb + 1] = name
+  fb[#fb + 1] = "--"
+  fb[#fb + 1] = pathspec or "."
+  local fres = vim.system(fb, { text = true, cwd = root }):wait()
+  if fres.code ~= 0 and fres.code ~= 1 then
+    local err = (fres.stderr ~= nil and fres.stderr ~= "" and fres.stderr) or ("exit " .. tostring(fres.code))
+    return err_result("search failed (no git, fallback grep): " .. err)
+  end
+  local hits, truncated = parse_grep_hits(fres.stdout or "", true, total_cap, per_file_cap)
+  return ok_json({ name = name, regex = use_regex, source = "grep", count = #hits, truncated = truncated, hits = hits })
+end
+
 local TOOL_HANDLERS = {
   ["nvime.search_attribution"] = tool_search_attribution,
   ["nvime.list_plans"] = tool_list_plans,
@@ -872,6 +997,7 @@ local TOOL_HANDLERS = {
   ["nvime.recent_diffs"] = tool_recent_diffs,
   ["nvime.verify_file"] = tool_verify_file,
   ["nvime.check_policy"] = tool_check_policy,
+  ["nvime.find_symbol"] = tool_find_symbol,
 }
 
 local function jsonrpc_response(id, result)

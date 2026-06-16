@@ -4363,6 +4363,7 @@ end)(); -- ---------------------------------------------------------------------
   assert(names["nvime.session_recent"], "mcp: session_recent tool advertised")
   assert(names["nvime.recent_diffs"], "mcp: recent_diffs tool advertised")
   assert(names["nvime.check_policy"], "mcp: check_policy tool advertised")
+  assert(names["nvime.find_symbol"], "mcp: find_symbol tool advertised")
 
   local plans = send({
     jsonrpc = "2.0",
@@ -4616,6 +4617,70 @@ end)(); -- ---------------------------------------------------------------------
     params = { name = "nvime.check_policy", arguments = { file = "../../etc/passwd" } },
   })
   assert(pol_traversal.result and pol_traversal.result.isError, "mcp: check_policy rejects parent-traversal paths")
+
+  -- find_symbol: bounded, language-agnostic git-grep navigation. Searched
+  -- against the project itself (a git repo). `repo_root` is defined and used
+  -- many times inside mcp_server.lua, so a path-scoped word search must hit it.
+  local fs_call = send({
+    jsonrpc = "2.0",
+    id = 70,
+    method = "tools/call",
+    params = { name = "nvime.find_symbol", arguments = { name = "repo_root", path = "lua/nvime/mcp_server.lua" } },
+  })
+  assert(fs_call.result and fs_call.result.content, "mcp: find_symbol returns content")
+  assert(
+    not fs_call.result.isError,
+    "mcp: find_symbol succeeds in a git repo (got: " .. (fs_call.result.content[1].text or ""):sub(1, 200) .. ")"
+  )
+  local fs_payload = vim.json.decode(fs_call.result.content[1].text)
+  assert_eq(fs_payload.source, "git", "mcp: find_symbol uses git grep inside a git repo")
+  assert(fs_payload.count > 0, "mcp: find_symbol locates a known identifier")
+  assert(
+    fs_payload.hits[1].file and fs_payload.hits[1].line and fs_payload.hits[1].text,
+    "mcp: find_symbol hits carry file+line+text"
+  )
+  assert_eq(fs_payload.hits[1].file, "lua/nvime/mcp_server.lua", "mcp: find_symbol respects the path scope")
+
+  -- Word-boundary matching: "repo_roo" (a strict prefix) must NOT match the
+  -- whole word "repo_root" in fixed-word mode -> zero hits, no error.
+  local fs_prefix = send({
+    jsonrpc = "2.0",
+    id = 71,
+    method = "tools/call",
+    params = { name = "nvime.find_symbol", arguments = { name = "repo_roo", path = "lua/nvime/mcp_server.lua" } },
+  })
+  local fs_prefix_payload = vim.json.decode(fs_prefix.result.content[1].text)
+  assert_eq(fs_prefix_payload.count, 0, "mcp: find_symbol word-boundary rejects a strict prefix")
+
+  -- A genuinely-absent identifier returns an empty, non-error result. The
+  -- needle is assembled from parts so the literal string never appears in
+  -- this test file (git grep searches the working tree, which includes it).
+  local absent = "zzz" .. "nosuch" .. "symbol" .. "qqq"
+  local fs_none = send({
+    jsonrpc = "2.0",
+    id = 72,
+    method = "tools/call",
+    params = { name = "nvime.find_symbol", arguments = { name = absent } },
+  })
+  assert(not fs_none.result.isError, "mcp: find_symbol no-match is not an error")
+  assert_eq(vim.json.decode(fs_none.result.content[1].text).count, 0, "mcp: find_symbol returns 0 hits for an absent symbol")
+
+  -- Missing name and path traversal are rejected.
+  local fs_missing = send({
+    jsonrpc = "2.0",
+    id = 73,
+    method = "tools/call",
+    params = { name = "nvime.find_symbol", arguments = {} },
+  })
+  assert(fs_missing.result and fs_missing.result.isError, "mcp: find_symbol rejects a missing name")
+
+  local fs_traversal = send({
+    jsonrpc = "2.0",
+    id = 74,
+    method = "tools/call",
+    params = { name = "nvime.find_symbol", arguments = { name = "x", path = "../../etc" } },
+  })
+  assert(fs_traversal.result and fs_traversal.result.isError, "mcp: find_symbol rejects parent-traversal paths")
 
   vim.env.NVIME_REPO_ROOT = nil
   pcall(vim.api.nvim_set_current_dir, prior_cwd)

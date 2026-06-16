@@ -27,6 +27,28 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = "python -m unittest -q"
 
 
+def runner_for(exercise: dict[str, Any]) -> str:
+    """Per-exercise test runner, defaulting to the Python harness.
+
+    Lets a fixture be written in ANY language: it just declares its own
+    `runner` shell command (e.g. "sh test.sh", "node --test"). Grading only
+    cares about the runner's exit code, never its language — so the framework
+    stays completely language-agnostic.
+    """
+    return exercise.get("runner") or RUNNER
+
+
+def runner_available(runner: str) -> bool:
+    """True if the runner's executable is on PATH.
+
+    A multi-language fixture may need a toolchain the current machine lacks; a
+    missing runner yields a clean `skipped` result instead of a spurious
+    failure that would pollute the pass-rate comparison.
+    """
+    parts = runner.split()
+    return bool(parts) and shutil.which(parts[0]) is not None
+
+
 EXERCISES: dict[str, dict[str, Any]] = {
     "easy_slugify": {
         "difficulty": "easy",
@@ -721,6 +743,171 @@ EXERCISES: dict[str, dict[str, Any]] = {
             """,
         },
     },
+    "cross_file_progressive_tax": {
+        "difficulty": "hard",
+        "title": "Compute progressive marginal tax across sibling tables",
+        "target": "payroll.py",
+        "intent": (
+            "Fix net_pay so it computes income tax for `country` using the MARGINAL "
+            "brackets in brackets.py (each rate applies only to the income within that "
+            "band, not to the whole gross), subtracts the tax from gross, and rounds the "
+            "result with money.round_money. Raise ValueError for an unknown country. A "
+            "gross of 0 or less costs 0.0. Read brackets.py and money.py — do not "
+            "hardcode the rates, bands, or rounding rule."
+        ),
+        "files": {
+            "payroll.py": """
+                from brackets import BRACKETS
+                from money import round_money
+
+
+                def net_pay(gross, country):
+                    # NVIME_SELECT_START
+                    return gross
+                    # NVIME_SELECT_END
+            """,
+            "brackets.py": """
+                # Progressive MARGINAL tax brackets per country: (lower_bound, rate),
+                # ascending. A bracket's rate applies only to income ABOVE its lower
+                # bound and up to the next bracket's bound; the last bracket has no
+                # upper bound. Total tax is the sum across the bands.
+                BRACKETS = {
+                    "US": [(0, 0.10), (10000, 0.20), (40000, 0.30)],
+                    "DE": [(0, 0.0), (12000, 0.25), (60000, 0.42)],
+                }
+            """,
+            "money.py": """
+                from decimal import Decimal, ROUND_HALF_UP
+
+
+                def round_money(amount):
+                    # Round to 2 decimal places, half-up, returning a float.
+                    return float(Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+            """,
+            "test_payroll.py": """
+                import unittest
+
+                from payroll import net_pay
+
+
+                class PayrollTests(unittest.TestCase):
+                    def test_single_bracket(self):
+                        self.assertEqual(net_pay(5000, "US"), 4500.0)
+
+                    def test_spans_multiple_brackets(self):
+                        self.assertEqual(net_pay(50000, "US"), 40000.0)
+
+                    def test_unknown_country_raises(self):
+                        with self.assertRaises(ValueError):
+                            net_pay(1000, "ZZ")
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+        "hidden_files": {
+            "test_hidden_payroll.py": """
+                import unittest
+
+                from payroll import net_pay
+
+
+                class HiddenPayrollTests(unittest.TestCase):
+                    def test_bracket_boundary(self):
+                        # Exactly at the 10000 bound: nothing falls in the higher band.
+                        self.assertEqual(net_pay(10000, "US"), 9000.0)
+
+                    def test_other_country_marginal(self):
+                        self.assertEqual(net_pay(70000, "DE"), 53800.0)
+
+                    def test_zero_gross(self):
+                        self.assertEqual(net_pay(0, "US"), 0.0)
+
+
+                if __name__ == "__main__":
+                    unittest.main()
+            """,
+        },
+    },
+    "cross_file_shell_discount": {
+        "difficulty": "medium",
+        "title": "Apply a sibling-defined discount tier in POSIX shell",
+        "target": "price.sh",
+        "runner": "sh -ec 'for t in test*.sh; do sh \"$t\"; done'",
+        "intent": (
+            "Fix total_cost so it computes subtotal = unit_price * qty, then subtracts "
+            "the discount: discount_percent(qty) percent of the subtotal (integer "
+            "arithmetic), and prints the resulting integer. discount_percent is defined "
+            "in rates.sh — call it, do not hardcode the tiers."
+        ),
+        "files": {
+            "rates.sh": """
+                # Integer discount PERCENT by quantity. Read by price.sh.
+                discount_percent() {
+                  if [ "$1" -ge 100 ]; then
+                    echo 20
+                  elif [ "$1" -ge 10 ]; then
+                    echo 10
+                  else
+                    echo 0
+                  fi
+                }
+            """,
+            "price.sh": """
+                . "$(dirname "$0")/rates.sh"
+
+
+                # total_cost UNIT_PRICE QTY: subtotal minus the qty-tier discount
+                # percent (from rates.sh), printed as an integer.
+                total_cost() {
+                  unit_price="$1"
+                  qty="$2"
+                  # NVIME_SELECT_START
+                  echo $(( unit_price * qty ))
+                  # NVIME_SELECT_END
+                }
+            """,
+            "test.sh": """
+                . "$(dirname "$0")/price.sh"
+
+                fail=0
+                check() {
+                  if [ "$1" != "$2" ]; then
+                    echo "FAIL $3: got=$1 want=$2"
+                    fail=1
+                  fi
+                }
+
+                check "$(total_cost 5 4)" 20 no_discount
+                check "$(total_cost 5 20)" 90 tier1
+                check "$(total_cost 10 100)" 800 tier2
+
+                [ "$fail" -eq 0 ] && echo OK
+                exit "$fail"
+            """,
+        },
+        "hidden_files": {
+            "test_hidden.sh": """
+                . "$(dirname "$0")/price.sh"
+
+                fail=0
+                check() {
+                  if [ "$1" != "$2" ]; then
+                    echo "FAIL $3: got=$1 want=$2"
+                    fail=1
+                  fi
+                }
+
+                check "$(total_cost 1 10)" 9 boundary_qty10
+                check "$(total_cost 3 100)" 240 tier2_again
+                check "$(total_cost 7 9)" 63 no_discount_again
+
+                [ "$fail" -eq 0 ] && echo OK
+                exit "$fail"
+            """,
+        },
+    },
 }
 
 
@@ -1253,7 +1440,7 @@ def default_prompt(exercise: dict[str, Any]) -> str:
 
         Implement the requested change directly in the source file. Keep the
         change minimal, do not edit tests, and do not touch unrelated files.
-        Run `{RUNNER}` before the final answer.
+        Run `{runner_for(exercise)}` before the final answer.
 
         Difficulty: {exercise["difficulty"]}
         Target file: {exercise["target"]}
@@ -1262,17 +1449,27 @@ def default_prompt(exercise: dict[str, Any]) -> str:
     ).strip()
 
 
-def prompt_checks(prompt: str, mode: str, baseline_exit: int) -> dict[str, bool]:
+def prompt_checks(prompt: str, mode: str, baseline_exit: int, runner: str = RUNNER) -> dict[str, bool]:
     checks = {"baseline_tests_pass": baseline_exit == 0} if mode == "plan" else {"baseline_fails": baseline_exit != 0}
     if mode == "nvime":
         checks.update(
             {
                 "has_precomputed_context": "Precomputed nvime project context" in prompt,
-                "has_unittest_runner": "Detected test runner: python -m unittest -q" in prompt,
-                "has_related_test_excerpt": "Related test file:" in prompt,
                 "has_machine_response_contract": "Return exactly one machine-readable response block" in prompt,
             }
         )
+        # Python-only prompt assertions: nvime's precomputed context detects the
+        # unittest runner + a related test_*.py excerpt. A non-Python fixture
+        # uses a different runner and has no such excerpt — that is correct, not
+        # a failure — so only assert these for the default Python harness. The
+        # framework itself stays language-agnostic.
+        if runner == RUNNER:
+            checks.update(
+                {
+                    "has_unittest_runner": "Detected test runner: python -m unittest -q" in prompt,
+                    "has_related_test_excerpt": "Related test file:" in prompt,
+                }
+            )
     elif mode == "general":
         checks.update(
             {
@@ -1336,7 +1533,41 @@ def parse_codex(stdout: str) -> str:
     return "\n".join(chunks).strip()
 
 
-def call_provider(provider: str, mode: str, prompt: str, workspace: Path, timeout: int) -> tuple[subprocess.CompletedProcess[str], str]:
+def write_mcp_config(workspace: Path) -> Path:
+    """Materialize a Claude mcp-config that attaches nvime's OWN MCP server,
+    scoped (via NVIME_REPO_ROOT) to the fixture workspace.
+
+    This is what makes nvime's low-context navigation tools (nvime.find_symbol,
+    tree_sitter_symbols, git_*, verify_file, ...) reachable inside a run, so we
+    can A/B whether exposing them improves agent performance. The file is an
+    untracked dotfile, so it never affects `scope_ok` (git diff --name-only).
+    """
+    nvim_bin = shutil.which("nvim") or "nvim"
+    config = {
+        "mcpServers": {
+            "nvime": {
+                "type": "stdio",
+                "command": nvim_bin,
+                "args": [
+                    "--headless",
+                    "--clean",
+                    "--cmd",
+                    f"set rtp+={REPO_ROOT}",
+                    "--cmd",
+                    "lua require('nvime.mcp_server').run()",
+                ],
+                "env": {"NVIME_REPO_ROOT": str(workspace)},
+            }
+        }
+    }
+    path = workspace / ".mcp-config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def call_provider(
+    provider: str, mode: str, prompt: str, workspace: Path, timeout: int, with_mcp: bool = False
+) -> tuple[subprocess.CompletedProcess[str], str]:
     if provider == "codex":
         sandbox = "workspace-write" if mode in {"default", "plan"} else "read-only"
         cmd = [
@@ -1365,6 +1596,16 @@ def call_provider(provider: str, mode: str, prompt: str, workspace: Path, timeou
             tools = "Read,Grep,Glob,LS,Bash,Edit,Write,MultiEdit"
             allowed = tools
             disallowed = "NotebookEdit"
+        # A/B lever: when --with-mcp is set, attach nvime's MCP server and grant
+        # its tools. Built-in tools are kept identical, so the ONLY difference
+        # between a with/without run is whether nvime's low-context navigation
+        # helpers are reachable — a clean measurement of their effect.
+        mcp_flags: list[str] = []
+        if with_mcp:
+            cfg_path = write_mcp_config(workspace)
+            tools = tools + ",mcp__nvime"
+            allowed = allowed + ",mcp__nvime"
+            mcp_flags = ["--mcp-config", str(cfg_path), "--strict-mcp-config"]
         cmd = [
             "claude",
             "-p",
@@ -1374,6 +1615,7 @@ def call_provider(provider: str, mode: str, prompt: str, workspace: Path, timeou
             "--permission-mode",
             "dontAsk",
             "--no-session-persistence",
+            *mcp_flags,
             "--tools",
             tools,
             "--allowedTools",
@@ -1990,14 +2232,37 @@ def run_plan_one(name: str, provider: str, live: bool, keep: bool, timeout: int)
             shutil.rmtree(workspace, ignore_errors=True)
 
 
-def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout: int, fix_attempts: int) -> dict[str, Any]:
+def run_one(
+    name: str,
+    provider: str,
+    mode: str,
+    live: bool,
+    keep: bool,
+    timeout: int,
+    fix_attempts: int,
+    with_mcp: bool = False,
+) -> dict[str, Any]:
     workspace = Path(tempfile.mkdtemp(prefix=f"nvime-agent-{name}-"))
     exercise = EXERCISES[name]
+    runner = runner_for(exercise)
     try:
+      if not runner_available(runner):
+          return {
+              "exercise": name,
+              "difficulty": exercise["difficulty"],
+              "title": exercise.get("title", name),
+              "mode": mode,
+              "provider": provider,
+              "skipped": True,
+              "skip_reason": f"runner not available on PATH: {runner!r}",
+              "runner": runner,
+              "success": None,
+              "live": live,
+          }
       selection = prepare_exercise(name, workspace)
-      baseline = run(RUNNER, workspace, timeout=120)
+      baseline = run(runner, workspace, timeout=120)
       prompt = build_nvime_prompt(workspace, exercise, selection) if mode == "nvime" else default_prompt(exercise)
-      checks = prompt_checks(prompt, mode, baseline.returncode)
+      checks = prompt_checks(prompt, mode, baseline.returncode, runner)
       prompt_ok = all(checks.values())
       if not live:
           return {
@@ -2043,7 +2308,7 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
       attempts: list[dict[str, Any]] = []
       result: dict[str, Any] | None = None
       for attempt_no in range(fix_attempts + 1):
-          proc, final_text = call_provider(provider, mode, prompt, workspace, timeout)
+          proc, final_text = call_provider(provider, mode, prompt, workspace, timeout, with_mcp=with_mcp)
           applied = "direct"
           apply_error = None
           if mode == "nvime":
@@ -2052,7 +2317,7 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
               except Exception as exc:  # noqa: BLE001 - surfaced in JSON result
                   applied = "apply_failed"
                   apply_error = str(exc)
-          tests = run(RUNNER, workspace, timeout=120)
+          tests = run(runner, workspace, timeout=120)
           files = changed_files(workspace)
           scope_ok = files == [exercise["target"]]
           hidden_files: list[str] = []
@@ -2062,7 +2327,7 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
           if proc.returncode == 0 and tests.returncode == 0 and scope_ok and applied not in {"unparsed", "no_change", "apply_failed"}:
               hidden_files = write_hidden_files(workspace, exercise)
               if hidden_files:
-                  hidden = run(RUNNER, workspace, timeout=120)
+                  hidden = run(runner, workspace, timeout=120)
                   hidden_exit = hidden.returncode
                   hidden_stdout = hidden.stdout[-2000:]
                   hidden_stderr = hidden.stderr[-2000:]
@@ -2098,7 +2363,7 @@ def run_one(name: str, provider: str, mode: str, live: bool, keep: bool, timeout
               workspace,
               exercise,
               selection,
-              feedback_intent(exercise["intent"], RUNNER, attempt),
+              feedback_intent(exercise["intent"], runner, attempt),
           )
 
       assert result is not None
@@ -2196,6 +2461,8 @@ def compare_runs(before_path: str, after_path: str) -> int:
     def mark(r: dict[str, Any] | None) -> str:
         if r is None:
             return "  -  "
+        if r.get("skipped"):
+            return "SKIP "
         return "PASS " if r.get("success") else "FAIL "
 
     regressions: list[str] = []
@@ -2206,6 +2473,10 @@ def compare_runs(before_path: str, after_path: str) -> int:
         b, a = before.get(key), after.get(key)
         label = f"{key[0]}/{key[1]}"
         print(f"{label:45} {mark(b):>7} {mark(a):>7}")
+        # A skipped run (missing toolchain) is not a data point — never count it
+        # as a regression or improvement.
+        if (b and b.get("skipped")) or (a and a.get("skipped")):
+            continue
         bs = bool(b and b.get("success"))
         as_ = bool(a and a.get("success"))
         if bs and not as_:
@@ -2214,8 +2485,9 @@ def compare_runs(before_path: str, after_path: str) -> int:
             improvements.append(label)
 
     def rate(m: dict[str, Any]) -> str:
-        total = len(m)
-        passed = sum(1 for r in m.values() if r.get("success"))
+        graded = [r for r in m.values() if not r.get("skipped")]
+        total = len(graded)
+        passed = sum(1 for r in graded if r.get("success"))
         return f"{passed}/{total}" if total else "0/0"
 
     print("-" * 61)
@@ -2251,6 +2523,11 @@ def main() -> int:
         default="all",
     )
     parser.add_argument("--live", action="store_true", help="actually call the provider CLI")
+    parser.add_argument(
+        "--with-mcp",
+        action="store_true",
+        help="attach nvime's MCP server (low-context nav tools) so you can A/B their effect (nvime/default mode, claude only)",
+    )
     parser.add_argument("--keep", action="store_true", help="keep temporary workspaces")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--fix-attempts", type=int, default=0, help="nvime-mode test-feedback retries after a failed attempt")
@@ -2277,6 +2554,11 @@ def main() -> int:
         help="compare two --live result JSON files: per-exercise pass/fail, pass rate, regressions",
     )
     args = parser.parse_args()
+
+    if args.with_mcp and args.provider != "claude":
+        parser.error("--with-mcp is currently wired for the claude provider only")
+    if args.with_mcp and args.mode not in {"nvime", "default"}:
+        parser.error("--with-mcp applies to nvime/default edit modes")
 
     if args.compare:
         return compare_runs(args.compare[0], args.compare[1])
@@ -2323,7 +2605,16 @@ def main() -> int:
         if unknown:
             parser.error(f"{args.mode} mode does not include exercises: {', '.join(unknown)}")
         results = [
-            run_one(name, args.provider, args.mode, args.live, args.keep, args.timeout, max(args.fix_attempts, 0))
+            run_one(
+                name,
+                args.provider,
+                args.mode,
+                args.live,
+                args.keep,
+                args.timeout,
+                max(args.fix_attempts, 0),
+                with_mcp=args.with_mcp,
+            )
             for name in selected
         ]
     elif args.mode == "general":
@@ -2348,9 +2639,10 @@ def main() -> int:
             for name in selected
         ]
     print(json.dumps({"results": results}, indent=2, sort_keys=True))
-    if any(not item.get("prompt_ok", True) for item in results):
+    graded = [item for item in results if not item.get("skipped")]
+    if any(not item.get("prompt_ok", True) for item in graded):
         return 1
-    if args.live and any(not item.get("success") for item in results):
+    if args.live and any(not item.get("success") for item in graded):
         return 1
     return 0
 
