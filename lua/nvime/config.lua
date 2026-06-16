@@ -254,6 +254,18 @@ M.defaults = {
     max_days = 90,
     statusline = true,
     rates = {},
+    -- Spend budgets. Each is advisory: when crossed, nvime warns ONCE (per day
+    -- for daily; per session for total/lane) — it never blocks a run. All nil/
+    -- empty by default (no budget).
+    --   daily_usd  : warn when today's cost crosses this
+    --   total_usd  : warn when the lifetime cost crosses this
+    --   lane_usd   : { ["edit"] = 5.0, ... } — warn when a lane's cumulative
+    --                cost crosses its threshold
+    budgets = {
+      daily_usd = nil,
+      total_usd = nil,
+      lane_usd = {},
+    },
   },
   test_loop = {
     -- After every diff session resolves with at least one accepted block,
@@ -403,6 +415,9 @@ local optional_types = {
   ["edit.recent_diff_limit"] = { "number" },
   ["usage.path"] = { "string", "nil" },
   ["usage.rates"] = { "table" },
+  ["usage.budgets.daily_usd"] = { "number", "nil" },
+  ["usage.budgets.total_usd"] = { "number", "nil" },
+  ["usage.budgets.lane_usd"] = { "table" },
   ["test_loop.runner"] = { "string", "nil" },
   ["mcp.config_path"] = { "string", "nil" },
   ["mcp.self_command"] = { "string", "nil" },

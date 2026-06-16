@@ -5573,10 +5573,47 @@ end)();
   assert(attribution._relative_age(os.time() - 2 * 7 * 86400) == "2w", "relative_age: weeks")
   assert(attribution._relative_age(nil) == nil, "relative_age: nil ts → nil")
 
+  -- Wave 3: #17 per-lane/daily cost budgets warn (advisory) when crossed.
+  local usage = require("nvime.usage")
+  local state = require("nvime.state")
+  local saved_usage = state.config.usage
+  state.config.usage = {
+    enabled = true,
+    path = tmp .. "/usage-budget.json",
+    max_days = 90,
+    statusline = false,
+    rates = {},
+    budgets = { daily_usd = 0.0001 },
+  }
+  usage._reset_budget_warnings()
+  usage.reset()
+  local notes = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, ...)
+    notes[#notes + 1] = tostring(msg)
+    return orig_notify(msg, ...)
+  end
+  usage.record({
+    lane = "edit",
+    provider = "claude",
+    sample = { input = 1000000, output = 0, model = "claude-opus-4-8" },
+  })
+  vim.wait(100, function()
+    return #notes > 0
+  end)
+  vim.notify = orig_notify
+  local saw_budget = false
+  for _, m in ipairs(notes) do
+    if m:find("budget", 1, true) then
+      saw_budget = true
+    end
+  end
+  assert(saw_budget, "#17: crossing a daily cost budget warns")
+  state.config.usage = saved_usage
+
   -- Wave 3: pre-flight setup validation — keymap conflict detection (#8).
   -- Bind a user mapping where a fresh-prefix nvime install will land, force a
   -- re-setup onto that prefix, and assert nvime records that it clobbered it.
-  local state = require("nvime.state")
   local orig_prefix = (state.config.keys or {}).prefix or "<leader>n"
   vim.keymap.set("n", "<leader>Zc", "<Cmd>echo 'user-owned'<CR>", { silent = true })
   local cfg = vim.deepcopy(state.config)

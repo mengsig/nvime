@@ -318,6 +318,37 @@ local function today()
   return os.date("!%Y-%m-%d")
 end
 
+-- Budget warnings are advisory and fire at most once per key per nvim session
+-- (kept in memory, NOT persisted, so a new session re-reminds when a budget is
+-- still over). Daily keys include the date so each new day re-arms.
+local budget_warned = {}
+
+local function notify_budget(message)
+  vim.schedule(function()
+    vim.notify("nvime usage budget: " .. message, vim.log.levels.WARN)
+  end)
+end
+
+local function check_budgets(ledger, lane, day)
+  local budgets = usage_config().budgets or {}
+  local function over(key, spent, limit, label)
+    limit = tonumber(limit)
+    if not limit or limit <= 0 or (spent or 0) < limit then
+      return
+    end
+    if budget_warned[key] then
+      return
+    end
+    budget_warned[key] = true
+    notify_budget(string.format("%s spend $%.4f crossed budget $%.4f", label, spent or 0, limit))
+  end
+  over("daily:" .. day, (ledger.by_day[day] or {}).cost_usd, budgets.daily_usd, "today's")
+  over("total", (ledger.totals or {}).cost_usd, budgets.total_usd, "lifetime")
+  if type(budgets.lane_usd) == "table" then
+    over("lane:" .. lane, (ledger.by_lane[lane] or {}).cost_usd, budgets.lane_usd[lane], "lane '" .. lane .. "'")
+  end
+end
+
 function M.record(opts)
   if state.disabled then
     return nil
@@ -349,9 +380,15 @@ function M.record(opts)
     model = sample.model,
     sample = sample,
   }
+  check_budgets(ledger, lane, day)
   trim_days(ledger)
   schedule_save()
   return ledger.last_run
+end
+
+-- Test/diagnostic hook: clear the per-session budget-warning latches.
+function M._reset_budget_warnings()
+  budget_warned = {}
 end
 
 function M.read()
