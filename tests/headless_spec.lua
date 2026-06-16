@@ -1949,7 +1949,7 @@ assert(
 )
 assert(
   require("nvime.state").selection.last_edit_prompt:find(
-    "ONLY prose allowed before the block is a single `RATIONALE:`",
+    "only prose allowed before it is one `RATIONALE:`",
     1,
     true
   ),
