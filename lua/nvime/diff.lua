@@ -43,6 +43,26 @@ local original_lines = session.original_lines
 local proposed_lines = session.proposed_lines
 M.current_session = session.current_session
 
+-- A PROTOCOL.md-referencing hint for a malformed response. For the HUMAN and
+-- the audit log only — it is never fed back to the provider as an automatic
+-- correction (no self-healing retry loop).
+local function protocol_hint(mode)
+  if mode == "NVIME_DIFF" then
+    return "NVIME_DIFF needs '--- a/<file>', '+++ b/<file>', and '@@ -l,c +l,c @@' headers (see PROTOCOL.md NVIME_DIFF)"
+  end
+  return "see PROTOCOL.md for the expected NVIME_* response block"
+end
+
+local function audit_protocol_violation(selection, mode, reason, provider)
+  pcall(audit.write, {
+    event = "protocol_violation",
+    file = selection and selection.path,
+    mode = mode,
+    reason = reason,
+    provider = provider,
+  })
+end
+
 function M.start_session(selection, response, provider, prompt)
   local rationale = extract_rationale(response)
   local verify_attestation = extract_verify_line(response)
@@ -58,6 +78,7 @@ function M.start_session(selection, response, provider, prompt)
   end
 
   local diff_lines = nil
+  local unranged_anchor = nil
   if mode == "NVIME_REPLACEMENT" then
     local no_change_reason
     diff_lines, no_change_reason = build_single_hunk(selection, body)
@@ -71,18 +92,20 @@ function M.start_session(selection, response, provider, prompt)
     diff_lines = extract_unified(body)
     if mode == "NVIME_DIFF" and (not diff_lines or not has_ranged_hunk(diff_lines)) then
       local anchor_error
-      diff_lines, anchor_error = build_unranged_hunk(selection, body)
+      diff_lines, anchor_error, unranged_anchor = build_unranged_hunk(selection, body)
       if not diff_lines then
+        audit_protocol_violation(selection, mode, anchor_error, provider)
         return {
           status = "no_change",
-          message = anchor_error,
+          message = anchor_error .. " — " .. protocol_hint(mode),
         }
       end
     elseif not diff_lines then
       if mode == "NVIME_DIFF" then
+        audit_protocol_violation(selection, mode, "NVIME_DIFF without a unified diff", provider)
         return {
           status = "no_change",
-          message = "agent returned NVIME_DIFF without a unified diff",
+          message = "agent returned NVIME_DIFF without a unified diff — " .. protocol_hint(mode),
         }
       end
       if not mode and not has_fence(body) then
@@ -104,13 +127,21 @@ function M.start_session(selection, response, provider, prompt)
 
   local valid, validation_error = validate_current_file(diff_lines, selection.path)
   if not valid then
-    error(validation_error)
+    audit_protocol_violation(selection, mode, validation_error, provider)
+    error(validation_error .. " — " .. protocol_hint(mode))
   end
 
   local header, hunks = parse_hunks(diff_lines)
   hunks = dedupe_hunks(hunks)
   if #hunks == 0 then
     error("nvime could not find any hunks in the proposed diff")
+  end
+  -- Carry the unranged-build anchor provenance onto the parsed hunk before
+  -- reanchor (which won't relocate an already-matching unranged hunk, so this
+  -- survives).
+  if unranged_anchor and hunks[1] then
+    hunks[1].anchor_confidence = unranged_anchor.confidence
+    hunks[1].anchor_candidates = unranged_anchor.candidates
   end
   reanchor_hunks(selection, hunks)
   if not hunks_have_changes(hunks) then
@@ -153,6 +184,27 @@ function M.start_session(selection, response, provider, prompt)
   if response_likely_truncated(response) then
     session.response_truncated = true
     warnings[#warnings + 1] = "agent response did not close its diff fence; output may be truncated"
+  end
+  -- Anchor ambiguity: a hunk whose old text matched more than one location was
+  -- applied at a best guess. Surface it as a warning (which rides the existing
+  -- banner + SUSPICIOUS-PATCH notify and gates `gA`) and audit it, so it is
+  -- never a silent first-match apply.
+  for _, hunk in ipairs(hunks) do
+    if hunk.anchor_confidence == "ambiguous" then
+      local count = hunk.anchor_candidates and #hunk.anchor_candidates or 0
+      warnings[#warnings + 1] = string.format(
+        "anchor ambiguous — old text matched %d locations; applied at line %d, verify before accepting",
+        count,
+        hunk.old_start or -1
+      )
+      audit.write({
+        event = "anchor_ambiguous",
+        file = selection.path,
+        candidate_count = count,
+        chosen_line = hunk.old_start,
+        confidence = hunk.anchor_confidence,
+      })
+    end
   end
   session.warnings = warnings
 

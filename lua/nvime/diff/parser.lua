@@ -255,12 +255,16 @@ local function has_ranged_hunk(lines)
   return false
 end
 
-local function locate_sequence(haystack, needle)
+-- All 1-based starts where `needle` occurs in `haystack`, in order. Used to
+-- detect when an anchor is NON-UNIQUE (more than one match) so it can't be
+-- applied silently to the first hit.
+local function locate_all_sequences(haystack, needle)
+  local starts = {}
   if #needle == 0 then
-    return 1
+    return { 1 }
   end
   if #needle > #haystack then
-    return nil
+    return starts
   end
   for start = 1, #haystack - #needle + 1 do
     local matched = true
@@ -271,10 +275,44 @@ local function locate_sequence(haystack, needle)
       end
     end
     if matched then
-      return start
+      starts[#starts + 1] = start
     end
   end
-  return nil
+  return starts
+end
+
+local function locate_sequence(haystack, needle)
+  local starts = locate_all_sequences(haystack, needle)
+  return starts[1]
+end
+
+-- Resolve where `needle` anchors in `haystack`, surfacing ambiguity instead of
+-- silently taking the first match. Returns (best_start, confidence, candidates):
+--   * no match  -> (nil, "none", nil)
+--   * one match -> (start, "unique", nil)
+--   * many      -> (nearest-to-recorded_start, "ambiguous", {all starts})
+-- The nearest-to-recorded tie-break mirrors the plan re-anchor heuristic; we do
+-- NOT invent context-overlap scoring.
+local function anchor_matches(haystack, needle, recorded_start)
+  local starts = locate_all_sequences(haystack, needle)
+  if #starts == 0 then
+    return nil, "none", nil
+  end
+  if #starts == 1 then
+    return starts[1], "unique", nil
+  end
+  local best = starts[1]
+  if recorded_start then
+    local best_dist = math.huge
+    for _, s in ipairs(starts) do
+      local d = math.abs(s - recorded_start)
+      if d < best_dist then
+        best_dist = d
+        best = s
+      end
+    end
+  end
+  return best, "ambiguous", starts
 end
 
 local function unranged_diff_lines(text)
@@ -324,7 +362,7 @@ local function build_unranged_hunk(selection, text)
   end
 
   local selected = vim.api.nvim_buf_get_lines(selection.bufnr, selection.line1 - 1, selection.line2, false)
-  local offset = locate_sequence(selected, old_lines)
+  local offset, confidence, candidate_starts = anchor_matches(selected, old_lines, nil)
   if not offset then
     return nil, "agent returned an unranged diff that could not be anchored in the selected range"
   end
@@ -336,7 +374,18 @@ local function build_unranged_hunk(selection, text)
     string.format("@@ -%d,%d +%d,%d @@", start_line, #old_lines, start_line, #new_lines),
   }
   vim.list_extend(hunk, diff_body)
-  return hunk
+  -- Anchor provenance for the caller to attach to the parsed hunk + warn on.
+  -- A non-unique match means the agent's unranged diff could have applied in
+  -- more than one place; we pick one but say so loudly rather than silently.
+  local anchor = { confidence = confidence }
+  if candidate_starts and #candidate_starts > 1 then
+    anchor.candidates = {}
+    for _, s in ipairs(candidate_starts) do
+      local buf_line = selection.line1 + s - 1
+      anchor.candidates[#anchor.candidates + 1] = { buf_line, buf_line + #old_lines - 1 }
+    end
+  end
+  return hunk, nil, anchor
 end
 
 local function parse_hunks(lines)
@@ -370,6 +419,16 @@ local function parse_hunks(lines)
       hunk.old_count = olds
       hunk.new_count = news
     end
+    -- Record how far the agent's DECLARED @@ counts drifted from what it
+    -- actually emitted. The corrected counts above keep apply correct; this
+    -- preserves the drift so the review banner / audit can surface a miscount
+    -- the leniency would otherwise hide. declared_* are stamped at creation and
+    -- never mutated, so this stays accurate.
+    local declared_new = tonumber(hunk.declared_new) or hunk.new_count or 0
+    local declared_old = tonumber(hunk.declared_old) or hunk.old_count or 0
+    local div_new = math.abs(declared_new - (hunk.new_count or 0))
+    local div_old = math.abs(declared_old - (hunk.old_count or 0))
+    hunk.count_divergence = math.max(div_new, div_old)
   end
 
   for _, line in ipairs(lines) do
@@ -383,6 +442,11 @@ local function parse_hunks(lines)
         old_count = tonumber(old_count ~= "" and old_count or "1"),
         new_start = tonumber(new_start),
         new_count = tonumber(new_count ~= "" and new_count or "1"),
+        -- Immutable copy of the agent's declared counts (recount mutates
+        -- old_count/new_count to the true values for apply; these stay as-is
+        -- so count drift remains computable).
+        declared_old = tonumber(old_count ~= "" and old_count or "1"),
+        declared_new = tonumber(new_count ~= "" and new_count or "1"),
         lines = { line },
         status = "pending",
       }
@@ -515,11 +579,35 @@ local function reanchor_hunks(selection, hunks)
   for _, hunk in ipairs(hunks or {}) do
     local old_lines = hunk_old_new_lines(hunk)
     if #old_lines > 0 and not sequence_at(all_lines, hunk.old_start, old_lines) then
-      local offset = locate_sequence(selected, old_lines)
-      local start_line = offset and (selection.line1 + offset - 1) or locate_sequence(all_lines, old_lines)
+      -- The recorded position no longer matches (the file drifted under the
+      -- agent). Relocate, but record when the match is non-unique instead of
+      -- silently taking the first hit.
+      local start_line, confidence, candidates
+      local sel_offset, sel_conf, sel_cands = anchor_matches(selected, old_lines, nil)
+      if sel_offset then
+        start_line = selection.line1 + sel_offset - 1
+        confidence = sel_conf
+        candidates = sel_cands
+          and vim.tbl_map(function(s)
+            local bl = selection.line1 + s - 1
+            return { bl, bl + #old_lines - 1 }
+          end, sel_cands)
+      else
+        local file_start, file_conf, file_cands = anchor_matches(all_lines, old_lines, hunk.old_start)
+        if file_start then
+          start_line = file_start
+          confidence = file_conf
+          candidates = file_cands
+            and vim.tbl_map(function(s)
+              return { s, s + #old_lines - 1 }
+            end, file_cands)
+        end
+      end
       if start_line then
         hunk.old_start = start_line
         hunk.new_start = start_line
+        hunk.anchor_confidence = confidence
+        hunk.anchor_candidates = candidates
       end
     end
   end
@@ -660,6 +748,8 @@ M.fenced_diff_body = fenced_diff_body
 M.extract_unified = extract_unified
 M.has_ranged_hunk = has_ranged_hunk
 M.locate_sequence = locate_sequence
+M.locate_all_sequences = locate_all_sequences
+M.anchor_matches = anchor_matches
 M.unranged_diff_lines = unranged_diff_lines
 M.build_unranged_hunk = build_unranged_hunk
 M.parse_hunks = parse_hunks

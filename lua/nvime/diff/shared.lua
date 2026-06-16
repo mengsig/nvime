@@ -231,20 +231,60 @@ local function accepted_delta(block)
   return #(block.new_lines or {}) - (block.old_count or 0)
 end
 
-local function deletion_context_matches(session, block, live_lines, start_index)
+-- Above this fraction of matching surrounding context, a deletion is trusted
+-- as applied; below it (but with *some* matching context) the deletion is
+-- ambiguous and escalates to a conflict for the human to resolve, instead of
+-- being silently accepted at a possibly-wrong location.
+local DELETION_CONFIDENCE_THRESHOLD = 0.7
+
+-- Confidence in [0,1] that the deletion described by `block` actually happened
+-- at `start_index` in the live buffer. Checks the original lines immediately
+-- BEFORE the deleted block (leading context) and immediately AFTER it
+-- (trailing context): a deletion whose trailing context recurs elsewhere could
+-- otherwise match the wrong location and be accepted silently. Confidence is
+-- the fraction of available context lines (both sides combined) that match.
+-- When the original has no surrounding context at all (e.g. the whole file was
+-- deleted) only a deletion landing at the true end of the buffer scores 1.0.
+local function deletion_confidence(session, block, live_lines, start_index)
   local original = (session and session.original_lines) or {}
   if #original == 0 and session and session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
     original = vim.api.nvim_buf_get_lines(session.target_bufnr, 0, -1, false)
   end
-  local context = {}
-  local first_context_line = (block.old_start or 1) + math.max(block.old_count or 0, 1)
-  for index = first_context_line, math.min(#original, first_context_line + 2) do
-    context[#context + 1] = original[index]
+
+  local old_count = math.max(block.old_count or 0, 1)
+  local del_start = block.old_start or 1
+
+  local trailing = {}
+  local first_trailing = del_start + old_count
+  for index = first_trailing, math.min(#original, first_trailing + 2) do
+    trailing[#trailing + 1] = original[index]
   end
-  if #context == 0 then
-    return start_index >= #live_lines
+
+  local leading = {}
+  for index = math.max(1, del_start - 3), del_start - 1 do
+    leading[#leading + 1] = original[index]
   end
-  return lines_match_at(live_lines, start_index, context)
+
+  local available = #leading + #trailing
+  if available == 0 then
+    return (start_index >= #live_lines) and 1.0 or 0.0
+  end
+
+  local matched = 0
+  -- Trailing context must appear starting exactly at the deletion point.
+  if #trailing > 0 and lines_match_at(live_lines, start_index, trailing) then
+    matched = matched + #trailing
+  end
+  -- Leading context must appear ending exactly at the deletion point.
+  if #leading > 0 and lines_match_at(live_lines, start_index - #leading, leading) then
+    matched = matched + #leading
+  end
+  return matched / available
+end
+
+-- Backwards-compatible boolean view used by callers that only need a yes/no.
+local function deletion_context_matches(session, block, live_lines, start_index)
+  return deletion_confidence(session, block, live_lines, start_index) >= DELETION_CONFIDENCE_THRESHOLD
 end
 
 local function live_block_status(session, block, live_lines, offset)
@@ -269,8 +309,17 @@ local function live_block_status(session, block, live_lines, offset)
   if lines_match_at(live_lines, start_index, old_lines) then
     return "pending"
   end
-  if #new_lines == 0 and deletion_context_matches(session, block, live_lines, start_index) then
-    return "accepted"
+  if #new_lines == 0 then
+    -- The original lines are gone from this spot. Decide whether the deletion
+    -- truly landed here (accept), might be misplaced (conflict → human), or
+    -- left no trace (nil → unchanged status).
+    local confidence = deletion_confidence(session, block, live_lines, start_index)
+    if confidence >= DELETION_CONFIDENCE_THRESHOLD then
+      return "accepted"
+    elseif confidence > 0 then
+      return "conflict"
+    end
+    return nil
   end
 
   return nil
@@ -354,6 +403,17 @@ local function reconcile_live_state(session)
       end
       block.mark_id = nil
       changed = true
+      -- An ambiguous deletion (some but not enough matching context) lands here
+      -- as a conflict instead of a silent accept. Record it so the digest's
+      -- risky bucket and the audit trail surface the human decision point.
+      if status == "conflict" then
+        audit.write({
+          event = "block_conflict",
+          reason = "ambiguous_deletion",
+          file = session.file,
+          block_id = block.id,
+        })
+      end
     end
     if (status or block.status) == "accepted" then
       offset = offset + accepted_delta(block)
@@ -416,6 +476,7 @@ M.current_changedtick = current_changedtick
 M.mark_model_synced = mark_model_synced
 M.accepted_delta = accepted_delta
 M.deletion_context_matches = deletion_context_matches
+M.deletion_confidence = deletion_confidence
 M.live_block_status = live_block_status
 M.rebuild_applied_tracking = rebuild_applied_tracking
 M.reconcile_live_state = reconcile_live_state

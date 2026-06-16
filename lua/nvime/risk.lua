@@ -249,6 +249,40 @@ function M.score(session)
   return out
 end
 
+-- Public: explain WHY a risk result breached, as up to 2 short strings derived
+-- from its breaches + inputs. The whole point of the high-risk gA! friction is
+-- that the human knows what tripped it, so the banner shows this for `high`.
+function M.explain_level(r)
+  if not r or not r.breaches then
+    return {}
+  end
+  local thr = thresholds()
+  local out = {}
+  for _, breach in ipairs(r.breaches) do
+    if breach == "lines" then
+      local total = (r.lines_added or 0) + (r.lines_removed or 0)
+      local high = (thr.lines and thr.lines.high) or 0
+      if high > 0 then
+        out[#out + 1] = string.format("%d lines = %.1fx threshold", total, total / high)
+      else
+        out[#out + 1] = string.format("%d lines", total)
+      end
+    elseif breach == "ai_share" then
+      local pct = math.floor((r.ai_share or 0) * 100 + 0.5)
+      local hi = math.floor(((thr.ai_share and thr.ai_share.high) or 0) * 100 + 0.5)
+      out[#out + 1] = string.format("ai %d%% over %d%%", pct, hi)
+    elseif breach == "sensitive" then
+      out[#out + 1] = "sensitive path"
+    elseif breach == "bracket_drift" then
+      out[#out + 1] = r.bracket_drift_summary or "delimiter drift"
+    end
+    if #out >= 2 then
+      break
+    end
+  end
+  return out
+end
+
 -- Public: render a single banner row { text, highlight } for the diff
 -- review header. Always returns one row; the caller decides whether to
 -- display it. icon_fn is the existing ui.icon helper.
@@ -271,6 +305,14 @@ function M.banner_row(session, icon_fn)
     or (r.level == "medium" and "NvimeStatusWarn")
     or "NvimeMuted"
   local text = string.format("  %s risk %s · %s", icon_fn and icon_fn(icon_name) or "", r.level, table.concat(parts, " · "))
+  -- On a high-risk diff, say WHY it is high right in the row (the gA! prompt is
+  -- the friction; the explanation is what makes that friction meaningful).
+  if r.level == "high" then
+    local why = M.explain_level(r)
+    if #why > 0 then
+      text = text .. " · why: " .. table.concat(why, ", ")
+    end
+  end
   return { text, hl }
 end
 

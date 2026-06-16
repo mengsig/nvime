@@ -5364,6 +5364,164 @@ end)();
   else
     print("[nvime-test] SKIP: cross-process fslock concurrency test (could not spawn child Neovim)")
   end
+end)();
+
+(function()
+  -- Wave 2: visible uncertainty — silent parser/diff ambiguity becomes a
+  -- review event (banner / conflict / audit) instead of landing quietly.
+  local shared = require("nvime.diff.shared")
+  local parser = require("nvime.diff.parser")
+  local hunkmeta = require("nvime.diff.hunkmeta")
+  local risk = require("nvime.risk")
+  local verify = require("nvime.verify")
+  local diff = require("nvime.diff")
+  local state = require("nvime.state")
+
+  -- #7: deletion-context confidence (both leading + trailing).
+  local del_session = { original_lines = { "A", "B", "DEL1", "DEL2", "C", "D" } }
+  local del_block = { old_start = 3, old_count = 2, old_lines = { "DEL1", "DEL2" }, new_lines = {} }
+  assert(
+    shared.deletion_confidence(del_session, del_block, { "A", "B", "C", "D" }, 2) >= 0.7,
+    "deletion_confidence: unique leading+trailing context scores high"
+  )
+  assert(
+    shared.deletion_confidence(del_session, del_block, { "X", "Y", "C", "D" }, 2) < 0.7,
+    "deletion_confidence: broken leading context lowers confidence"
+  )
+  assert_eq(
+    shared.live_block_status(del_session, del_block, { "A", "B", "C", "D" }, 0),
+    "accepted",
+    "live_block_status: a confident deletion is accepted"
+  )
+  assert_eq(
+    shared.live_block_status(del_session, del_block, { "X", "Y", "C", "D" }, 0),
+    "conflict",
+    "live_block_status: an ambiguous deletion escalates to conflict (not a silent accept)"
+  )
+  local eof_session = { original_lines = { "keep", "GONE" } }
+  local eof_block = { old_start = 2, old_count = 1, old_lines = { "GONE" }, new_lines = {} }
+  assert(
+    shared.deletion_confidence(eof_session, eof_block, { "keep" }, 1) >= 0.7,
+    "deletion_confidence: an end-of-file deletion still resolves confidently"
+  )
+
+  -- #9: hunk @@-count drift is recorded (apply still uses the corrected count).
+  local drift_lines = { "@@ -1,1 +1,3 @@", "-old" }
+  for i = 1, 10 do
+    drift_lines[#drift_lines + 1] = "+new" .. i
+  end
+  local _, drift_hunks = parser.parse_hunks(drift_lines)
+  assert_eq(drift_hunks[1].declared_new, 3, "hunk: declared_new preserved verbatim")
+  assert_eq(drift_hunks[1].new_count, 10, "hunk: recount still corrects new_count for apply")
+  assert(drift_hunks[1].count_divergence >= 7, "hunk: count_divergence computed")
+  assert(
+    hunkmeta.exceeds(drift_hunks[1].declared_new, drift_hunks[1].count_divergence),
+    "hunk: drift exceeds tolerance"
+  )
+  local drift_row = hunkmeta.banner_row({ hunks = drift_hunks }, nil)
+  assert(drift_row and drift_row[1]:find("count drift", 1, true), "hunk: banner row reports the drift")
+  local _, ok_hunks = parser.parse_hunks({ "@@ -1,1 +1,3 @@", "-old", "+n1", "+n2", "+n3" })
+  assert_eq(ok_hunks[1].count_divergence, 0, "hunk: matching counts show no divergence")
+  assert(
+    not hunkmeta.exceeds(ok_hunks[1].declared_new, ok_hunks[1].count_divergence),
+    "hunk: in-tolerance is not flagged"
+  )
+
+  -- #3: anchor ambiguity primitives + an end-to-end non-unique unranged apply.
+  assert_eq(#parser.locate_all_sequences({ "x", "a", "b", "a", "b", "y" }, { "a", "b" }), 2, "locate_all: finds both")
+  local best, conf, cands = parser.anchor_matches({ "a", "b", "a", "b" }, { "a", "b" }, 3)
+  assert(conf == "ambiguous" and cands and #cands == 2, "anchor_matches: flags >1 match as ambiguous")
+  assert_eq(best, 3, "anchor_matches: picks the match nearest the recorded start")
+  local ub, uconf = parser.anchor_matches({ "x", "a", "b", "y" }, { "a", "b" }, nil)
+  assert(uconf == "unique" and ub == 2, "anchor_matches: a single match is unique")
+
+  local abuf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_name(abuf, tmp .. "/anchor_target.lua")
+  vim.api.nvim_buf_set_lines(
+    abuf,
+    0,
+    -1,
+    false,
+    { "local x = 1", "dup_line", "local y = 2", "dup_line", "local z = 3" }
+  )
+  vim.api.nvim_set_current_buf(abuf)
+  local anchor_before = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  local anchor_result = diff.start_session({
+    bufnr = abuf,
+    line1 = 1,
+    line2 = 5,
+    path = tmp .. "/anchor_target.lua",
+    source = "test",
+  }, table.concat({ "NVIME_DIFF", "```diff", "@@", "-dup_line", "+CHANGED", "```" }, "\n"), "claude", "anchor-test")
+  assert(anchor_result.session, "anchor: session opened for ambiguous unranged diff")
+  assert_eq(anchor_result.session.hunks[1].anchor_confidence, "ambiguous", "anchor: hunk flagged ambiguous")
+  local saw_anchor_warning = false
+  for _, w in ipairs(anchor_result.session.warnings or {}) do
+    if w:find("anchor ambiguous", 1, true) then
+      saw_anchor_warning = true
+    end
+  end
+  assert(saw_anchor_warning, "anchor: ambiguity surfaced as a session warning (rides the SUSPICIOUS-PATCH banner)")
+  local saw_anchor_audit = false
+  for _, line in ipairs(vim.fn.readfile(audit_path)) do
+    local ok_d, d = pcall(vim.json.decode, line)
+    if ok_d and type(d) == "table" and d.event == "anchor_ambiguous" then
+      saw_anchor_audit = true
+    end
+  end
+  assert(saw_anchor_audit, "anchor: anchor_ambiguous audit event written")
+  assert(anchor_before >= 0, "anchor: audit baseline captured")
+
+  -- #13: risk why-explainer, verify per-tool breakdown, protocol-violation audit.
+  local why = risk.explain_level({ level = "high", breaches = { "lines" }, lines_added = 150, lines_removed = 0 })
+  assert(#why >= 1 and why[1]:find("threshold", 1, true), "risk.explain_level: explains the line breach with a ratio")
+
+  local saved_verify = state.config.verify
+  state.config.verify = vim.tbl_extend("force", {}, saved_verify or {}, { detail_in_banner = true })
+  local vrows = verify.banner_rows({
+    verify = {
+      status = "issues",
+      summary = "3 issues",
+      findings = {
+        { source = "ruff", message = "E501 line too long" },
+        { source = "ruff", message = "E502 x" },
+        { source = "shellcheck", message = "SC2086 y" },
+      },
+    },
+  }, nil)
+  local vtext = ""
+  for _, row in ipairs(vrows) do
+    vtext = vtext .. row[1] .. "\n"
+  end
+  assert(vtext:find("ruff 2", 1, true), "verify: per-tool breakdown lists the ruff finding count")
+  state.config.verify = saved_verify
+
+  local pbuf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_name(pbuf, tmp .. "/proto_target.lua")
+  vim.api.nvim_buf_set_lines(pbuf, 0, -1, false, { "local a = 1" })
+  vim.api.nvim_set_current_buf(pbuf)
+  local proto_before = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  local proto_result = diff.start_session({
+    bufnr = pbuf,
+    line1 = 1,
+    line2 = 1,
+    path = tmp .. "/proto_target.lua",
+    source = "test",
+  }, "NVIME_DIFF\n(no diff here)", "claude", "proto-test")
+  assert_eq(proto_result.status, "no_change", "protocol: a malformed NVIME_DIFF yields no_change")
+  assert(
+    proto_result.message:find("PROTOCOL.md", 1, true),
+    "protocol: the no_change message carries a PROTOCOL.md hint"
+  )
+  local saw_proto = false
+  local proto_after = vim.fn.readfile(audit_path)
+  for i = proto_before + 1, #proto_after do
+    local ok_d, d = pcall(vim.json.decode, proto_after[i])
+    if ok_d and type(d) == "table" and d.event == "protocol_violation" then
+      saw_proto = true
+    end
+  end
+  assert(saw_proto, "protocol: a malformed response writes a protocol_violation audit event")
 end)()
 
 print("nvime headless spec passed")

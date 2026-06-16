@@ -86,6 +86,14 @@ M.defaults = {
   },
   diff = {
     max_visual_block_lines = 12,
+    -- Hunk @@-count drift detection. parse_hunks tolerates agent miscounts so
+    -- the patch still applies, but a header that declares far fewer/more lines
+    -- than it emits is surfaced (review banner + a hunk_count_mismatch audit
+    -- event) instead of being absorbed silently. Drift is flagged when it
+    -- exceeds max(hunk_count_tolerance_lines, ceil(hunk_count_tolerance_pct *
+    -- declared)). Set hunk_count_tolerance_lines = 0 to disable.
+    hunk_count_tolerance_lines = 3,
+    hunk_count_tolerance_pct = 0.2,
     -- Devil's-advocate critic. When true, every accepted-into-review patch
     -- triggers a separate read-only agent that returns APPROVE / FLAG /
     -- REJECT in one sentence. The verdict is advisory and never blocks the
@@ -118,6 +126,10 @@ M.defaults = {
     -- false, only the tree-sitter parse gate runs; lint/type findings are
     -- suppressed entirely.
     external_checks = false,
+    -- When true, the diff banner adds a collapsed per-tool breakdown row under
+    -- the verify summary (e.g. "ruff 2 (E501) · shellcheck 1"). Off by default
+    -- so the banner stays one line; only meaningful with external_checks = true.
+    detail_in_banner = false,
   },
   risk = {
     -- Blast-radius badge in the diff banner. Computes lines added/removed,

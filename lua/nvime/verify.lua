@@ -745,6 +745,48 @@ function M.should_block_accept(session)
   return false, nil
 end
 
+-- Collapsed per-tool breakdown of verify findings, e.g.
+-- "    ruff 2 (E501) · shellcheck 1". Groups findings by source (skipping the
+-- parse gate, which has its own row), takes a representative leading rule code
+-- per source, caps at 3 tools. Returns nil when there is nothing to show.
+local function per_tool_summary(v)
+  local counts = {}
+  local codes = {}
+  local order = {}
+  for _, f in ipairs((v and v.findings) or {}) do
+    local src = f.source or "?"
+    if src ~= "parse" then
+      if counts[src] == nil then
+        counts[src] = 0
+        order[#order + 1] = src
+      end
+      counts[src] = counts[src] + 1
+      if not codes[src] and type(f.message) == "string" then
+        codes[src] = f.message:match("^%s*([A-Z]+%d+)")
+      end
+    end
+  end
+  if #order == 0 then
+    return nil
+  end
+  table.sort(order, function(a, b)
+    return counts[a] > counts[b]
+  end)
+  local rendered = {}
+  for i = 1, math.min(3, #order) do
+    local src = order[i]
+    if codes[src] then
+      rendered[#rendered + 1] = string.format("%s %d (%s)", src, counts[src], codes[src])
+    else
+      rendered[#rendered + 1] = string.format("%s %d", src, counts[src])
+    end
+  end
+  if #order > 3 then
+    rendered[#rendered + 1] = string.format("(+%d more)", #order - 3)
+  end
+  return "    " .. table.concat(rendered, " · ")
+end
+
 -- Public: render rows for the diff banner. Returns a list of
 -- { text, highlight }, ready for virt_lines.
 function M.banner_rows(session, icon_fn)
@@ -773,6 +815,12 @@ function M.banner_rows(session, icon_fn)
     hl = "NvimeStatusSuccess"
   end
   rows[#rows + 1] = { "  " .. label, hl }
+  if cfg().detail_in_banner and v.status == "issues" then
+    local detail = per_tool_summary(v)
+    if detail then
+      rows[#rows + 1] = { detail, "NvimeMuted" }
+    end
+  end
   return rows
 end
 

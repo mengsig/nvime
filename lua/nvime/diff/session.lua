@@ -828,6 +828,17 @@ local function render_visual_group(session, group)
         }
       end
     end
+    -- Hunk @@-count drift: the agent declared one line count and emitted
+    -- another. Advisory; apply still uses the corrected counts.
+    local ok_hm, hunkmeta = pcall(require, "nvime.diff.hunkmeta")
+    if ok_hm and hunkmeta and type(hunkmeta.banner_row) == "function" then
+      local row = hunkmeta.banner_row(session, ui.icon)
+      if row then
+        virt_lines[#virt_lines + 1] = {
+          { clip_review_text(session, row[1]), row[2] },
+        }
+      end
+    end
   end
   if (group.index or 1) == 1 and session.verdict_pending then
     virt_lines[#virt_lines + 1] = {
@@ -1018,6 +1029,23 @@ render_session = function(session, opts)
     if session.rationale and session.rationale ~= "" and not session.rationale_announced then
       session.rationale_announced = true
       vim.notify("nvime rationale — " .. session.rationale, vim.log.levels.INFO)
+    end
+  end
+  -- Audit hunk @@-count drift once per session (outside the silent guard so it
+  -- is recorded even for non-interactive sessions). One event per session, not
+  -- per hunk, to avoid noise.
+  if not session.hunk_count_audited then
+    session.hunk_count_audited = true
+    local ok_hm, hunkmeta = pcall(require, "nvime.diff.hunkmeta")
+    if ok_hm and hunkmeta then
+      local mism = hunkmeta.mismatches(session.hunks or {})
+      if #mism > 0 then
+        require("nvime.audit").write({
+          event = "hunk_count_mismatch",
+          file = session.file,
+          hunks = mism,
+        })
+      end
     end
   end
   refresh_review_view(session)
