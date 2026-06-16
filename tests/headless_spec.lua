@@ -4793,10 +4793,25 @@ end)();
   assert(probe_result, "verify_path returns a result")
   assert(not probe_result.parse_error, "verify_path on clean file: no parse error")
 
-  -- MCP path: synthetic content with explicit lang derivation works
-  local broken_probe = verify.verify_path("nonexistent.py", "def f(:\n    pass", { wait_ms = 0 })
-  assert(broken_probe.parse_error, "verify_path on broken python: parse_error is true")
-  assert(broken_probe.status == "error", "verify_path on broken python: status=error")
+  -- MCP path: synthetic content with explicit lang derivation. Anchor the
+  -- parse-error assertion on Lua, whose tree-sitter parser ships with every
+  -- Neovim, so the contract is exercised on every machine. Stock Neovim does
+  -- NOT bundle the Python parser, so the Python case runs only where it is
+  -- actually installed; otherwise it skips (visibly) rather than failing here.
+  local broken_lua = verify.verify_path("nonexistent.lua", "local a = = 1", { wait_ms = 0 })
+  assert(broken_lua.parse_error, "verify_path on broken lua: parse_error is true")
+  assert(broken_lua.status == "error", "verify_path on broken lua: status=error")
+
+  local function ts_lang_available(lang)
+    return pcall(vim.treesitter.get_string_parser, "x", lang)
+  end
+  if ts_lang_available("python") then
+    local broken_probe = verify.verify_path("nonexistent.py", "def f(:\n    pass", { wait_ms = 0 })
+    assert(broken_probe.parse_error, "verify_path on broken python: parse_error is true")
+    assert(broken_probe.status == "error", "verify_path on broken python: status=error")
+  else
+    print("[nvime-test] SKIP: python tree-sitter parser unavailable; broken-python parse-error case not exercised")
+  end
 
   local clean_probe = verify.verify_path("nonexistent.lua", "local a = 1", { wait_ms = 0 })
   assert(not clean_probe.parse_error, "verify_path on clean lua: no parse error")
@@ -5167,6 +5182,188 @@ end)();
   assert(body:find("README.md", 1, true), "pr.render lists changed file")
 
   vim.api.nvim_set_current_dir(prior_cwd)
+end)();
+
+(function()
+  -- Wave 1: ledger integrity — fslock, schema versioning, audit rotation, and
+  -- the verify/user-rationale provenance that accept used to discard.
+  local fslock = require("nvime.fslock")
+  local attribution = require("nvime.attribution")
+  local schema = require("nvime.schema")
+  local state = require("nvime.state")
+  local uv = vim.uv or vim.loop
+
+  -- fslock.atomic_write replaces the file and leaves no scratch behind.
+  local awpath = tmp .. "/atomic.json"
+  assert(fslock.atomic_write(awpath, vim.json.encode({ a = 1 }) .. "\n") == true, "fslock.atomic_write returns true")
+  assert(
+    vim.fn.filereadable(awpath .. ".tmp." .. vim.fn.getpid()) ~= 1,
+    "fslock.atomic_write leaves no per-pid .tmp on success"
+  )
+  assert_eq(vim.json.decode(table.concat(vim.fn.readfile(awpath), "\n")).a, 1, "fslock.atomic_write content decodes")
+
+  -- with_lock runs fn, returns its result, and cleans the lock file.
+  local ran = false
+  local r = fslock.with_lock(awpath, function()
+    ran = true
+    return "done"
+  end)
+  assert(ran and r == "done", "fslock.with_lock runs fn and returns its result")
+  assert(vim.fn.filereadable(awpath .. ".lock") ~= 1, "fslock.with_lock removes its lock after running")
+
+  -- A stale lock (old mtime) is stolen so a crashed holder can't wedge writes.
+  local lp = awpath .. ".lock"
+  vim.fn.writefile({ "99999 1" }, lp)
+  local long_ago = os.time() - 3600
+  uv.fs_utime(lp, long_ago, long_ago)
+  assert_eq(
+    fslock.with_lock(awpath, function()
+      return "stole"
+    end, { stale_seconds = 10 }),
+    "stole",
+    "fslock.with_lock steals a stale lock"
+  )
+
+  -- A fresh lock soft-fails (no hang, no corruption of the target).
+  vim.fn.writefile({ tostring(vim.fn.getpid()) .. " " .. tostring(os.time()) }, lp)
+  uv.fs_utime(lp, os.time(), os.time())
+  local before = table.concat(vim.fn.readfile(awpath), "\n")
+  local start = uv.hrtime()
+  local res, err = fslock.with_lock(awpath, function()
+    return fslock.atomic_write(awpath, "CLOBBERED")
+  end, { stale_seconds = 600 })
+  local elapsed_ms = (uv.hrtime() - start) / 1e6
+  assert(res == nil and err == "locked", "fslock.with_lock soft-fails on a fresh lock")
+  assert(elapsed_ms < 2000, "fslock.with_lock does not hang on contention")
+  assert_eq(
+    table.concat(vim.fn.readfile(awpath), "\n"),
+    before,
+    "fslock.with_lock leaves the target intact when locked"
+  )
+  vim.fn.delete(lp)
+
+  -- #2: the pre-accept verify snapshot + user rationale persist and surface.
+  local vpath = tmp .. "/verify-attribution.json"
+  vim.fn.delete(vpath)
+  state.config.attribution = { enabled = true, path = vpath, max = 500 }
+  local stored = attribution.record({
+    file = "z.lua",
+    line1 = 1,
+    line2 = 2,
+    lines = { "alpha", "beta" },
+    rationale = "fix the thing",
+    user_rationale = "I read this and it is correct",
+    verdict = { decision = "APPROVE", justification = "looks right" },
+    verify = { status = "issues", parse_ok = true, forced = false, checks = { ruff = 2, mypy = 0 } },
+    provider = "claude",
+  })
+  assert(stored, "attribution.record returns the stored entry")
+  local vledger = vim.json.decode(table.concat(vim.fn.readfile(vpath), "\n"))
+  local ve = vledger.entries[#vledger.entries]
+  assert_eq(ve.verify.checks.ruff, 2, "attribution: verify check count persisted")
+  assert_eq(ve.verify.parse_ok, true, "attribution: verify parse_ok persisted")
+  assert_eq(ve.user_rationale, "I read this and it is correct", "attribution: user_rationale persisted")
+  local blame = attribution._build_blame_lines("z.lua", 1, {
+    vim.tbl_extend("keep", { match_line1 = 1, match_line2 = 2 }, ve),
+  })
+  local joined = table.concat(blame, "\n")
+  assert(joined:find("user:", 1, true), "attribution: blame surfaces the user rationale")
+  assert(joined:find("verify:", 1, true), "attribution: blame surfaces the verify summary")
+  assert(joined:find("ruff 2", 1, true), "attribution: blame verify summary lists the ruff finding count")
+  assert(
+    attribution._verify_summary(nil) == nil,
+    "attribution: absent verify renders as nil, not a fabricated clean bill"
+  )
+  local forced_sum = attribution._verify_summary({ status = "error", parse_ok = false, forced = true, checks = {} })
+  assert(
+    forced_sum:find("parse ERROR", 1, true) and forced_sum:find("forced", 1, true),
+    "attribution: a gate-forced accept is annotated"
+  )
+  state.config.attribution = { enabled = true, path = nil, max = 500 }
+
+  -- #4: schema reconcile never silently downgrades a newer ledger.
+  schema._reset()
+  local fv, is_future = schema.reconcile({ version = 999 }, 1, "test")
+  assert(fv == 999 and is_future == true, "schema.reconcile flags + preserves a future version")
+  local cv, is_cur = schema.reconcile({ version = 1 }, 1, "test")
+  assert(cv == 1 and is_cur == false, "schema.reconcile normalizes the current version")
+  assert((schema.reconcile({}, 1, "test")) == 1, "schema.reconcile treats an unversioned ledger as current")
+
+  -- attribution refuses to rewrite a future-versioned ledger on disk.
+  local future_ledger = tmp .. "/future-attribution.json"
+  vim.fn.writefile(
+    { vim.json.encode({ version = 999, entries = { { file = "x", note = "from-newer-nvime" } } }) },
+    future_ledger
+  )
+  state.config.attribution = { enabled = true, path = future_ledger, max = 500 }
+  attribution.record({ file = "y.lua", lines = { "a" }, rationale = "r", provider = "claude" })
+  local after = vim.json.decode(table.concat(vim.fn.readfile(future_ledger), "\n"))
+  assert_eq(after.version, 999, "attribution: future-versioned ledger left at v999 (not downgraded)")
+  assert_eq(#after.entries, 1, "attribution: future-versioned ledger not appended to")
+  assert_eq(after.entries[1].note, "from-newer-nvime", "attribution: future ledger contents preserved intact")
+  state.config.attribution = { enabled = true, path = nil, max = 500 }
+
+  -- #16: size-based audit rotation keeps one backup and bounds disk use.
+  local saved_audit = state.config.audit
+  local rotpath = tmp .. "/rotate-audit.jsonl"
+  vim.fn.delete(rotpath)
+  vim.fn.delete(rotpath .. ".1")
+  state.audit_write_disabled = false
+  state.config.audit = { enabled = true, path = rotpath, log_prompts = true, max_bytes = 200 }
+  local audit = require("nvime.audit")
+  for i = 1, 8 do
+    audit.write({ event = "rotate_probe", i = i, pad = string.rep("x", 60) })
+  end
+  assert(vim.fn.filereadable(rotpath .. ".1") == 1, "audit: log rotates to .1 once it exceeds max_bytes")
+  assert(vim.fn.getfsize(rotpath) < 4096, "audit: live log stays bounded after rotation")
+  state.config.audit = saved_audit
+  state.audit_write_disabled = false
+
+  -- #1: real cross-process concurrency — 3 separate Neovim instances appending
+  -- to one audit log produce every line intact (the lock prevents interleaving
+  -- and lost appends). This is the corruption the whole module exists to stop.
+  local cpath = tmp .. "/concurrent-audit.jsonl"
+  vim.fn.delete(cpath)
+  local child_lua = string.format(
+    "require('nvime').setup({ audit = { path = %q, max_bytes = 0, log_prompts = true }, guard = { enabled = false } }) "
+      .. "local a = require('nvime.audit') for i = 1, 15 do a.write({ event = 'concur', i = i }) end",
+    cpath
+  )
+  local ok_spawn, procs = pcall(function()
+    local handles = {}
+    for _ = 1, 3 do
+      handles[#handles + 1] = vim.system({
+        vim.v.progpath,
+        "--headless",
+        "-u",
+        "NONE",
+        "-c",
+        "set rtp^=" .. root,
+        "-c",
+        "lua " .. child_lua,
+        "-c",
+        "qa!",
+      }, { text = true })
+    end
+    for _, h in ipairs(handles) do
+      h:wait(30000)
+    end
+    return handles
+  end)
+  if ok_spawn and procs and vim.fn.filereadable(cpath) == 1 then
+    local cl = vim.fn.readfile(cpath)
+    assert_eq(#cl, 45, "fslock: 3 concurrent writers produce 45 audit lines (no lost appends)")
+    local all_valid = true
+    for _, line in ipairs(cl) do
+      if not pcall(vim.json.decode, line) then
+        all_valid = false
+        break
+      end
+    end
+    assert(all_valid, "fslock: every concurrent audit line is valid JSON (no interleaving)")
+  else
+    print("[nvime-test] SKIP: cross-process fslock concurrency test (could not spawn child Neovim)")
+  end
 end)()
 
 print("nvime headless spec passed")

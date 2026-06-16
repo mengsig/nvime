@@ -3,4 +3,12 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 chmod +x "$repo_root/tests/fixtures/claude"
-nvim --headless -u NONE -c "set rtp^=$repo_root" -c "lua dofile('$repo_root/tests/headless_spec.lua')" -c "qa!"
+
+# Run the headless spec under pcall and translate a Lua error (a failed
+# assertion) into a non-zero process exit. A bare `qa!` always exits 0, which
+# silently masked test failures from CI; `cquit 1` makes a failure observable
+# to `set -e` here and to the CI step.
+nvim --headless -u NONE \
+  -c "set rtp^=$repo_root" \
+  -c "lua local ok, err = pcall(dofile, '$repo_root/tests/headless_spec.lua'); if not ok then io.stderr:write('\n[nvime-test] FAIL: ' .. tostring(err) .. '\n'); vim.cmd('cquit 1') end" \
+  -c "qa!"

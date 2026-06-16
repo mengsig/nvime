@@ -34,6 +34,11 @@ M.defaults = {
     enabled = true,
     path = nil,
     log_prompts = false,
+    -- Size-based rotation cap for the append-only audit log. When the live
+    -- .nvime/audit.jsonl exceeds this many bytes, it is rotated to
+    -- audit.jsonl.1 (one backup) and a fresh file is started, bounding disk
+    -- use at ~2x this value. Set to 0 to disable rotation.
+    max_bytes = 5 * 1024 * 1024,
   },
   attribution = {
     -- Per-line ledger: every accepted nvime diff block writes one entry to

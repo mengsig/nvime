@@ -1,5 +1,7 @@
 local git = require("nvime.git")
 local state = require("nvime.state")
+local fslock = require("nvime.fslock")
+local schema = require("nvime.schema")
 
 -- Per-line attribution ledger.
 --
@@ -57,48 +59,48 @@ local function read_ledger()
   if not decoded_ok or type(decoded) ~= "table" or type(decoded.entries) ~= "table" then
     return { version = SCHEMA_VERSION, entries = {} }
   end
-  decoded.version = SCHEMA_VERSION
+  decoded.version = (schema.reconcile(decoded, SCHEMA_VERSION, "attribution"))
   return decoded
 end
 
-local function write_ledger(ledger)
+local function trim_entries(entries, cap)
+  if #entries <= cap then
+    return entries
+  end
+  local trimmed = {}
+  local first = #entries - cap + 1
+  for i = first, #entries do
+    trimmed[#trimmed + 1] = entries[i]
+  end
+  return trimmed
+end
+
+-- Append one new entry to the ledger under a file lock, re-reading the
+-- on-disk state INSIDE the lock before merging. Reading-then-writing without
+-- the lock loses updates when two Neovim instances record concurrently: each
+-- reads the same ledger, appends its own entry, and the second write drops the
+-- first entry. Re-reading under the lock makes the append a true read-modify-
+-- write. The file itself is replaced atomically (tmp + rename).
+local function append_entry(stored)
   local path = attribution_path()
   ensure_dir(path)
-  -- Trim oldest entries so the file does not grow unbounded.
-  local cap = max_entries()
-  if #ledger.entries > cap then
-    local trimmed = {}
-    local first = #ledger.entries - cap + 1
-    for i = first, #ledger.entries do
-      trimmed[#trimmed + 1] = ledger.entries[i]
+  return fslock.with_lock(path, function()
+    local ledger = read_ledger()
+    -- Never rewrite a ledger written by a newer nvime; that would downgrade
+    -- its schema and drop fields. Skip the append instead (entry is lost, file
+    -- stays intact) — the rare, safe failure mode.
+    if (tonumber(ledger.version) or SCHEMA_VERSION) > SCHEMA_VERSION then
+      return false, "schema too new"
     end
-    ledger.entries = trimmed
-  end
-  local ok, encoded = pcall(vim.json.encode, ledger)
-  if not ok then
-    return false, encoded
-  end
-  local fd, err = io.open(path, "w")
-  if not fd then
-    return false, err
-  end
-  local write_ok, write_err = pcall(function()
-    fd:write(encoded)
-    fd:write("\n")
+    ledger.entries = ledger.entries or {}
+    ledger.entries[#ledger.entries + 1] = stored
+    ledger.entries = trim_entries(ledger.entries, max_entries())
+    local ok, encoded = pcall(vim.json.encode, ledger)
+    if not ok then
+      return false, encoded
+    end
+    return fslock.atomic_write(path, encoded .. "\n")
   end)
-  local close_ok, closed, close_err = pcall(function()
-    return fd:close()
-  end)
-  if not write_ok then
-    return false, write_err
-  end
-  if not close_ok then
-    return false, closed
-  end
-  if not closed then
-    return false, close_err
-  end
-  return true
 end
 
 local function build_anchor(lines)
@@ -180,8 +182,6 @@ function M.record(entry)
   if cfg.enabled == false then
     return
   end
-  local ledger = read_ledger()
-  ledger.entries = ledger.entries or {}
   local stored = {
     id = generate_id(),
     file = entry.file,
@@ -191,6 +191,10 @@ function M.record(entry)
     rationale = entry.rationale,
     user_rationale = entry.user_rationale,
     verdict = entry.verdict,
+    -- Compact snapshot of the pre-accept verify gate (parse status + per-check
+    -- finding counts + whether the gate was force-bypassed). Absent when verify
+    -- was disabled/unavailable, so a missing field reads as "n/a", never "ok".
+    verify = entry.verify,
     provider = entry.provider,
     plan_id = entry.plan_id,
     step_id = entry.step_id,
@@ -199,8 +203,7 @@ function M.record(entry)
     ts = entry.ts or os.time(),
     iso_ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
   }
-  ledger.entries[#ledger.entries + 1] = stored
-  write_ledger(ledger)
+  append_entry(stored)
   return stored
 end
 
@@ -241,6 +244,38 @@ function M.for_file(file)
   return out
 end
 
+-- One-line summary of the persisted verify gate snapshot, or nil when none
+-- was recorded (verify disabled/unavailable at accept time). Never fabricates
+-- a clean result from absence.
+local function verify_summary(v)
+  if type(v) ~= "table" then
+    return nil
+  end
+  local parts = { tostring(v.status or "?") }
+  if v.parse_ok == false then
+    parts[#parts + 1] = "parse ERROR"
+  elseif v.parse_ok == true then
+    parts[#parts + 1] = "parse ok"
+  end
+  local checks = {}
+  for name, count in pairs(v.checks or {}) do
+    if (tonumber(count) or 0) > 0 then
+      checks[#checks + 1] = string.format("%s %d", name, count)
+    end
+  end
+  table.sort(checks)
+  if #checks > 0 then
+    parts[#parts + 1] = table.concat(checks, ", ")
+  end
+  local text = table.concat(parts, " · ")
+  if v.forced then
+    text = text .. " (forced past gate)"
+  end
+  return text
+end
+
+M._verify_summary = verify_summary
+
 local function format_entry(entry)
   local lines = {}
   local id = entry.plan_id and (entry.plan_id .. " · step " .. tostring(entry.step_id or "?")) or "edit"
@@ -249,8 +284,15 @@ local function format_entry(entry)
   if entry.rationale and entry.rationale ~= "" then
     lines[#lines + 1] = "rationale: " .. entry.rationale
   end
+  if entry.user_rationale and entry.user_rationale ~= "" then
+    lines[#lines + 1] = "user: " .. entry.user_rationale
+  end
   if type(entry.verdict) == "table" and entry.verdict.decision then
     lines[#lines + 1] = string.format("critic %s: %s", entry.verdict.decision, entry.verdict.justification or "")
+  end
+  local vsum = verify_summary(entry.verify)
+  if vsum then
+    lines[#lines + 1] = "verify: " .. vsum
   end
   lines[#lines + 1] = "ts: " .. (entry.iso_ts or os.date("!%Y-%m-%dT%H:%M:%SZ", entry.ts or 0))
   return lines

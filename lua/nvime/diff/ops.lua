@@ -345,6 +345,27 @@ local function apply_block(session, block, start_line_override, opts)
   -- file so a later edit that shifts line numbers doesn't lose the link.
   local ok_attr, attribution = pcall(require, "nvime.attribution")
   if ok_attr and attribution and #replacement > 0 then
+    -- Compact snapshot of the pre-accept verify gate, so the permanent ledger
+    -- records what the gate found (and whether it was force-bypassed) rather
+    -- than discarding it. nil when verify never ran for this session, so a
+    -- missing field reads as "n/a", not a fabricated clean result.
+    local v = session.verify
+    local verify_snapshot = nil
+    if v then
+      local checks = {}
+      for name, c in pairs(v.by_check or {}) do
+        checks[name] = (c and c.count) or 0
+      end
+      verify_snapshot = {
+        status = v.status,
+        parse_ok = not v.parse_error,
+        -- "forced" here means this accept bypassed the verify gate (gA!) — a
+        -- different force from the top-level `forced` (live-content conflict
+        -- bypass). Kept distinct so a reviewer is never misled.
+        forced = (opts.force == true) and (v.parse_error == true),
+        checks = checks,
+      }
+    end
     pcall(attribution.record, {
       file = session.file,
       line1 = start_index + 1,
@@ -353,6 +374,7 @@ local function apply_block(session, block, start_line_override, opts)
       rationale = session.rationale,
       user_rationale = session.user_rationale,
       verdict = session.verdict,
+      verify = verify_snapshot,
       provider = session.provider,
       plan_id = session.plan_id,
       step_id = session.plan_step_id,

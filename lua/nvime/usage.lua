@@ -26,6 +26,8 @@
 
 local git = require("nvime.git")
 local state = require("nvime.state")
+local fslock = require("nvime.fslock")
+local schema = require("nvime.schema")
 
 local M = {}
 
@@ -149,7 +151,7 @@ local function read_ledger_from_disk()
   if not decoded_ok or type(decoded) ~= "table" then
     return blank_ledger()
   end
-  decoded.version = SCHEMA_VERSION
+  decoded.version = (schema.reconcile(decoded, SCHEMA_VERSION, "usage"))
   decoded.totals = decoded.totals or blank_bucket()
   decoded.by_lane = decoded.by_lane or vim.empty_dict()
   decoded.by_day = decoded.by_day or vim.empty_dict()
@@ -199,25 +201,21 @@ end
 local function save_ledger(ledger)
   local path = usage_path()
   ensure_dir(path)
+  -- Never downgrade a ledger written by a newer nvime (see nvime.schema).
+  if (tonumber(ledger.version) or SCHEMA_VERSION) > SCHEMA_VERSION then
+    return false, "schema too new"
+  end
   local ok, encoded = pcall(vim.json.encode, ledger)
   if not ok then
     return false, encoded
   end
-  local fd, err = io.open(path, "w")
-  if not fd then
-    return false, err
-  end
-  local write_ok, write_err = pcall(function()
-    fd:write(encoded)
-    fd:write("\n")
+  -- Atomic, lock-serialized full-file rewrite: a reader never sees a partial
+  -- file and a second writer cannot clobber this one mid-rewrite. On lock
+  -- contention with_lock returns nil, "locked"; the debounced flusher simply
+  -- retries on the next schedule_save (and VimLeavePre flushes a final time).
+  return fslock.with_lock(path, function()
+    return fslock.atomic_write(path, encoded .. "\n")
   end)
-  pcall(function()
-    fd:close()
-  end)
-  if not write_ok then
-    return false, write_err
-  end
-  return true
 end
 
 local function flush_now()

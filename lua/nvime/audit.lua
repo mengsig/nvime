@@ -1,5 +1,6 @@
 local git = require("nvime.git")
 local state = require("nvime.state")
+local fslock = require("nvime.fslock")
 
 local M = {}
 
@@ -93,6 +94,33 @@ local function redact(event)
   return copy
 end
 
+local MAX_BYTES_DEFAULT = 5 * 1024 * 1024
+
+local function max_bytes()
+  local audit = (state.config or {}).audit or {}
+  local n = tonumber(audit.max_bytes)
+  if n == nil then
+    return MAX_BYTES_DEFAULT
+  end
+  return n
+end
+
+-- Size-based rotation, run inside the write lock. When the live log exceeds
+-- the byte cap, rename it to "<path>.1" (overwriting any previous backup) and
+-- start a fresh file. Bounds disk use at ~2x the cap and keeps the most recent
+-- events in the live file the digest reads.
+local function maybe_rotate(path)
+  local cap = max_bytes()
+  if cap <= 0 then
+    return
+  end
+  local st = uv.fs_stat(path)
+  if not st or (st.size or 0) < cap then
+    return
+  end
+  pcall(uv.fs_rename, path, path .. ".1")
+end
+
 local function disable_writes(reason)
   state.audit_write_disabled = true
   if state.audit_write_warned then
@@ -144,31 +172,46 @@ function M.write(event)
     return
   end
 
-  local fd, open_err = io.open(path, "a")
-  if not fd then
-    disable_writes(open_err)
+  -- Serialize the append (and any rotation) against other Neovim instances so
+  -- concurrent writers cannot interleave a half-written JSON line.
+  local result, lock_err = fslock.with_lock(path, function()
+    maybe_rotate(path)
+    local fd, open_err = io.open(path, "a")
+    if not fd then
+      return false, open_err
+    end
+    local write_ok, write_err = pcall(function()
+      local ok, err = fd:write(encoded)
+      if not ok then
+        error(err or "write failed")
+      end
+      ok, err = fd:write("\n")
+      if not ok then
+        error(err or "write failed")
+      end
+    end)
+    local close_pcall_ok, closed, close_err = pcall(function()
+      return fd:close()
+    end)
+    if not write_ok then
+      return false, write_err
+    elseif not close_pcall_ok then
+      return false, closed
+    elseif not closed then
+      return false, close_err
+    end
+    return true
+  end)
+
+  if result == true then
     return
   end
-
-  local write_ok, write_err = pcall(function()
-    local ok, err = fd:write(encoded)
-    if not ok then
-      error(err or "write failed")
-    end
-    ok, err = fd:write("\n")
-    if not ok then
-      error(err or "write failed")
-    end
-  end)
-  local close_pcall_ok, closed, close_err = pcall(function()
-    return fd:close()
-  end)
-  if not write_ok then
-    disable_writes(write_err)
-  elseif not close_pcall_ok then
-    disable_writes(closed)
-  elseif not closed then
-    disable_writes(close_err)
+  -- A contended lock (lock_err == "locked") is transient — drop this single
+  -- event rather than disabling the whole session's audit trail; the next
+  -- write almost certainly succeeds. A genuine I/O failure is persistent, so
+  -- fall back to the existing one-shot disable path.
+  if lock_err and lock_err ~= "locked" then
+    disable_writes(lock_err)
   end
 end
 

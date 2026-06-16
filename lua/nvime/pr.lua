@@ -11,6 +11,7 @@
 local audit = require("nvime.audit")
 local git = require("nvime.git")
 local state = require("nvime.state")
+local attribution = require("nvime.attribution")
 
 local M = {}
 
@@ -141,9 +142,16 @@ local function format_entry(entry)
   if entry.rationale and entry.rationale ~= "" then
     lines[#lines + 1] = "  - rationale: " .. entry.rationale
   end
+  if entry.user_rationale and entry.user_rationale ~= "" then
+    lines[#lines + 1] = "  - human rationale: " .. entry.user_rationale
+  end
   if type(entry.verdict) == "table" and entry.verdict.decision then
     lines[#lines + 1] = string.format("  - critic %s: %s",
       entry.verdict.decision, entry.verdict.justification or "")
+  end
+  local vsum = attribution._verify_summary(entry.verify)
+  if vsum then
+    lines[#lines + 1] = "  - verify: " .. vsum
   end
   if entry.iso_ts or entry.ts then
     lines[#lines + 1] = "  - " .. (entry.iso_ts or os.date("!%Y-%m-%dT%H:%M:%SZ", entry.ts or 0))
