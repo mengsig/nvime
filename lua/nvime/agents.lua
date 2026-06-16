@@ -898,6 +898,19 @@ local function consume_chunks(provider, on_text, on_progress, on_session_id, opt
   end
 end
 
+-- Per-run wall-clock timeout (ms) for a lane, or nil when unbounded. A
+-- lane-specific value wins over the global agents.timeout_ms.
+local function resolve_timeout(lane)
+  local cfg = (state.config or {}).agents or {}
+  local value = tonumber((cfg.lane_timeouts or {})[lane]) or tonumber(cfg.timeout_ms)
+  if value and value > 0 then
+    return value
+  end
+  return nil
+end
+
+M._resolve_timeout = resolve_timeout
+
 function M.run(opts)
   opts = opts or {}
   if state.disabled then
@@ -908,6 +921,7 @@ function M.run(opts)
   end
   local provider, cfg = provider_config(opts.provider)
   local lane = opts.lane or "review"
+  local timeout_ms = resolve_timeout(lane)
   local prompt = opts.prompt or ""
   local input = opts.input
   local on_text = opts.on_text or function() end
@@ -989,6 +1003,7 @@ function M.run(opts)
     markdown_workspace = workspace and workspace.cwd or nil,
     persist_session = run_opts.persist_session,
     resume_session_id = run_opts.resume_session_id,
+    timeout_ms = timeout_ms,
     prompt = prompt,
     input = stdin,
   })
@@ -1001,6 +1016,9 @@ function M.run(opts)
       stderr = stderr,
       cwd = cwd,
       env = shellguard.build_env(),
+      -- vim.system kills the process (SIGTERM) and reports code 124 on timeout;
+      -- nil leaves the run unbounded (the default).
+      timeout = timeout_ms,
     }
     if stdin ~= nil then
       system_opts.stdin = stdin
@@ -1039,6 +1057,22 @@ function M.run(opts)
             lane = lane,
           })
         end
+        -- vim.system reports code 124 when our configured timeout fired (a
+        -- distinct value from a clean exit or a user cancel), so a bounded run
+        -- that overran is recorded as its own reviewable event.
+        local timed_out = timeout_ms ~= nil and result.code == 124
+        if timed_out then
+          audit.write({
+            event = "agent_timeout",
+            lane = lane,
+            provider = provider,
+            timeout_ms = timeout_ms,
+          })
+          vim.notify(
+            string.format("nvime: %s %s run exceeded its %dms timeout and was stopped", provider, lane, timeout_ms),
+            vim.log.levels.WARN
+          )
+        end
         audit.write({
           event = "agent_exit",
           lane = lane,
@@ -1046,11 +1080,14 @@ function M.run(opts)
           tool = args[1],
           code = result.code,
           signal = result.signal,
+          timed_out = timed_out,
+          timeout_ms = timeout_ms,
           provider_session_id = observed_session_id,
           synced_markdown = synced,
           synced_plan_files = synced_plans,
           usage = observed_usage,
         })
+        result.nvime_timed_out = timed_out
         result.nvime_synced_markdown = synced
         result.nvime_synced_plan_files = synced_plans
         result.nvime_provider_session_id = observed_session_id

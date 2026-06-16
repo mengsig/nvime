@@ -187,6 +187,15 @@ M.defaults = {
   chat = {
     max_history_messages = 24,
   },
+  agents = {
+    -- Per-run wall-clock timeout (milliseconds) so a hung provider can't hang
+    -- the lane forever. nil/0 = no timeout (the default — agent turns can
+    -- legitimately run for minutes, so this is opt-in). `lane_timeouts` overrides
+    -- per lane, e.g. { edit = 120000, review = 600000 }. On timeout the process
+    -- is killed (SIGTERM) and an `agent_timeout` audit event is written.
+    timeout_ms = nil,
+    lane_timeouts = {},
+  },
   bigchange = {
     -- Forced-comprehension review relaxation for self-evident blocks. When a
     -- review block is only imports/requires, documentation/markdown prose,
@@ -419,6 +428,8 @@ local optional_types = {
   ["usage.budgets.daily_usd"] = { "number", "nil" },
   ["usage.budgets.total_usd"] = { "number", "nil" },
   ["usage.budgets.lane_usd"] = { "table" },
+  ["agents.timeout_ms"] = { "number", "nil" },
+  ["agents.lane_timeouts"] = { "table" },
   ["test_loop.runner"] = { "string", "nil" },
   ["mcp.config_path"] = { "string", "nil" },
   ["mcp.self_command"] = { "string", "nil" },

@@ -5669,6 +5669,21 @@ end)();
   assert_eq(hits[1].id, 7, "search: returns the matching session id")
   assert(hits[1].snippet:find("refresh", 1, true), "search: result carries a snippet around the match")
   assert_eq(#empty, 0, "search: no matches for an absent term")
+end)();
+
+(function()
+  -- #15: per-lane agent run timeout resolution (opt-in, lane override wins).
+  local agents = require("nvime.agents")
+  local state = require("nvime.state")
+  local saved = state.config.agents
+  state.config.agents = { timeout_ms = 5000, lane_timeouts = { edit = 120000 } }
+  assert_eq(agents._resolve_timeout("edit"), 120000, "timeout: lane override wins")
+  assert_eq(agents._resolve_timeout("review"), 5000, "timeout: falls back to the global timeout")
+  state.config.agents = { timeout_ms = nil, lane_timeouts = {} }
+  assert(agents._resolve_timeout("review") == nil, "timeout: unbounded by default")
+  state.config.agents = { timeout_ms = 0, lane_timeouts = {} }
+  assert(agents._resolve_timeout("review") == nil, "timeout: 0 disables (treated as unbounded)")
+  state.config.agents = saved
 end)()
 
 print("nvime headless spec passed")
