@@ -88,7 +88,7 @@ local function build_recap_prompt(diff_body, label, recap_id)
     "  - Bash — to inspect git history (git log, git blame), to confirm",
     "    line numbers, to run cheap checks.",
     "  - Web — only if explicitly relevant.",
-    "  - Write/Edit/MultiEdit — ONLY under `.nvime/plans/" .. recap_id .. "/`.",
+    "  - Write/Edit — ONLY under `.nvime/plans/" .. recap_id .. "/`.",
     "",
     "Workflow:",
     "  1. Read the unified diff at the bottom of this prompt CAREFULLY.",

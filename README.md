@@ -600,7 +600,7 @@ claude -p "<prompt>" --output-format stream-json --verbose \
   --resume "$CLAUDE_SESSION_ID" --permission-mode dontAsk \
   --tools Read,Glob,Grep,LS,WebFetch,WebSearch,Bash \
   --allowedTools Read,Glob,Grep,LS,WebFetch,WebSearch,Bash \
-  --disallowedTools Edit,Write,MultiEdit,NotebookEdit
+  --disallowedTools Edit,Write,NotebookEdit
 ```
 
 Claude starts a persistent selection turn without `--no-session-persistence`,

@@ -913,7 +913,7 @@ assert(
   "claude selection allow-list is explicit"
 )
 assert(
-  first_native_claude:find("--disallowedTools Edit,Write,MultiEdit,NotebookEdit", 1, true),
+  first_native_claude:find("--disallowedTools Edit,Write,NotebookEdit", 1, true),
   "claude selection lane blocks direct write tools"
 )
 assert(
@@ -995,7 +995,7 @@ assert(
   "claude selection omits WebFetch from the allowed tool list when selection web is disabled"
 )
 assert(
-  no_web_native_claude:find("--disallowedTools Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch", 1, true),
+  no_web_native_claude:find("--disallowedTools Edit,Write,NotebookEdit,WebFetch,WebSearch", 1, true),
   "claude selection explicitly disallows web tools when disabled"
 )
 require("nvime.state").config.providers.claude.cmd = old_claude_cmd

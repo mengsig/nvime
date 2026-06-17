@@ -2806,7 +2806,7 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "You MUST NOT modify any source code under the repository root EXCEPT under `.nvime/plans/<plan-id>/`.",
   "nvime synchronizes ONLY files under `.nvime/plans/` back to the user's repository when you exit; anything else you write is silently dropped.",
   "",
-  "Tools: Read/Grep/LS/Glob to study the codebase; Bash to run tests, lints, ./scripts/test, git log and ground claims in real evidence; web fetch/search for external context; Write/Edit/MultiEdit ONLY for paths under `.nvime/plans/<plan-id>/`.",
+  "Tools: Read/Grep/LS/Glob to study the codebase; Bash to run tests, lints, ./scripts/test, git log and ground claims in real evidence; web fetch/search for external context; Write/Edit ONLY for paths under `.nvime/plans/<plan-id>/`.",
   "",
   "Workflow:",
   "  1. Read the user's intent.",

@@ -67,7 +67,10 @@ local function claude_read_tools(opts)
 end
 
 local function claude_disallowed_tools()
-  return "Edit,Write,MultiEdit,NotebookEdit"
+  -- MultiEdit was merged into Edit in current Claude Code; listing it makes the
+  -- CLI warn "Permission deny rule MultiEdit matches no known tool" on every
+  -- run. Disallow only tools the CLI actually knows.
+  return "Edit,Write,NotebookEdit"
 end
 
 local function claude_web_disallowed_tools()
@@ -107,7 +110,7 @@ local function claude_review_tools(markdown_writes)
     allow_web = review_allows_web(),
   })
   if markdown_writes then
-    tools = tools .. ",Write,Edit,MultiEdit"
+    tools = tools .. ",Write,Edit"
   end
   return tools
 end
@@ -117,7 +120,7 @@ local function claude_plan_tools()
     allow_shell = true,
     allow_web = review_allows_web(),
   })
-  return tools .. ",Write,Edit,MultiEdit"
+  return tools .. ",Write,Edit"
 end
 
 local function claude_plan_disallowed()
@@ -216,7 +219,7 @@ local function claude_args(cfg, lane, prompt, run_opts)
       "--allowedTools",
       tools,
       "--disallowedTools",
-      "Edit,Write,MultiEdit,NotebookEdit,Bash,WebFetch,WebSearch",
+      "Edit,Write,NotebookEdit,Bash,WebFetch,WebSearch",
     })
   else
     local tools = claude_selection_tools()
