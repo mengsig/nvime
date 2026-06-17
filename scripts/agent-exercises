@@ -1554,7 +1554,11 @@ def prompt_checks(prompt: str, mode: str, baseline_exit: int, runner: str = RUNN
                 "ordered_steps": "Decompose into ORDERED steps" in prompt,
                 "range_anchor": "range_anchor" in prompt,
                 "test_requirements": "Every step that changes runtime behavior MUST have" in prompt,
-                "minimum_runtime_steps": "For runtime behavior changes, produce at least 3 steps" in prompt,
+                # The prompt deliberately adopted a right-sizing philosophy (match
+                # step count to scope, never pad) and removed the old "at least 3
+                # steps" floor — assert the CURRENT rule, not the contradictory
+                # stale one that left plan-mode prompt_ok permanently False.
+                "step_count_right_sizing": "Match the NUMBER of steps to the ACTUAL scope" in prompt,
                 "step_coherence_rule": "Step coherence (tests vs implementation)" in prompt,
             }
         )
