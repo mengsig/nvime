@@ -1948,11 +1948,7 @@ assert(
   "edit prompt uses a strict machine-readable patch contract"
 )
 assert(
-  require("nvime.state").selection.last_edit_prompt:find(
-    "only prose allowed before it is one `RATIONALE:`",
-    1,
-    true
-  ),
+  require("nvime.state").selection.last_edit_prompt:find("only prose allowed before it is one `RATIONALE:`", 1, true),
   "edit prompt allows exactly one RATIONALE line and forbids any other prose"
 )
 assert(
@@ -4663,7 +4659,11 @@ end)(); -- ---------------------------------------------------------------------
     params = { name = "nvime.find_symbol", arguments = { name = absent } },
   })
   assert(not fs_none.result.isError, "mcp: find_symbol no-match is not an error")
-  assert_eq(vim.json.decode(fs_none.result.content[1].text).count, 0, "mcp: find_symbol returns 0 hits for an absent symbol")
+  assert_eq(
+    vim.json.decode(fs_none.result.content[1].text).count,
+    0,
+    "mcp: find_symbol returns 0 hits for an absent symbol"
+  )
 
   -- Missing name and path traversal are rejected.
   local fs_missing = send({
