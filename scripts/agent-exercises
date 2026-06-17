@@ -1710,9 +1710,11 @@ def call_provider(
     if provider == "claude":
         tools = "Read,Grep,Glob,LS,Bash"
         allowed = tools
-        disallowed = "Edit,Write,MultiEdit,NotebookEdit"
+        # MultiEdit was merged into Edit in current Claude Code; omit it so the
+        # CLI does not warn "matches no known tool" on every benchmark run.
+        disallowed = "Edit,Write,NotebookEdit"
         if mode in {"default", "plan"}:
-            tools = "Read,Grep,Glob,LS,Bash,Edit,Write,MultiEdit"
+            tools = "Read,Grep,Glob,LS,Bash,Edit,Write"
             allowed = tools
             disallowed = "NotebookEdit"
         # A/B lever: when --with-mcp is set, attach nvime's MCP server and grant
