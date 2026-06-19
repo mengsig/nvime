@@ -1,6 +1,7 @@
 local agents = require("nvime.agents")
 local audit = require("nvime.audit")
 local git = require("nvime.git")
+local keyhelp = require("nvime.keyhelp")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
 
@@ -12,6 +13,54 @@ local PICKER_NS = vim.api.nvim_create_namespace("nvime.plan.picker")
 local BACKDROP_NS = vim.api.nvim_create_namespace("nvime.plan.backdrop")
 local STATUS_ORDER = { pending = 1, in_progress = 2, blocked = 3, done = 4, abandoned = 5 }
 local STATUSES = { "pending", "in_progress", "done", "blocked", "abandoned" }
+
+-- The g? / ? cheat-sheet for the plan view, grouped by intent. Mirrors the keys
+-- bound in install_plan_view_keymaps so the help tracks the real mappings.
+local function plan_help_sections()
+  return {
+    {
+      heading = "Run",
+      rows = {
+        { "<CR>", "execute the step under the cursor" },
+        { "gA", "run the next pending step" },
+        { "gT", "run the step's tests" },
+        { "gW", "scaffold a regression test" },
+        { "gE", "edit the intent before firing" },
+      },
+    },
+    {
+      heading = "Step status",
+      rows = {
+        { "gx", "mark the step done" },
+        { "gp", "mark the step pending" },
+        { "gB", "mark the step blocked" },
+      },
+    },
+    {
+      heading = "Navigate",
+      rows = {
+        { "]s  [s", "next / previous step" },
+        { "o", "open the step's file" },
+        { "c", "copy the step intent" },
+      },
+    },
+    {
+      heading = "Plan",
+      rows = {
+        { "gd", "refine / discuss the plan" },
+        { "gr", "replan from here" },
+        { "gN", "reset the provider session" },
+      },
+    },
+    {
+      heading = "Window",
+      rows = {
+        { "q  <Esc>", "close the plan view" },
+        { "g?  ?", "toggle this help" },
+      },
+    },
+  }
+end
 
 local function plan_config()
   return (state.config or {}).plan or {}
@@ -2769,17 +2818,15 @@ install_plan_view_keymaps = function(bufnr, plan_id, step_index)
 
   vim.keymap.set("n", "q", close_plan_view, vim.tbl_extend("force", opts, { desc = "nvime plan: close" }))
   vim.keymap.set("n", "<Esc>", close_plan_view, vim.tbl_extend("force", opts, { desc = "nvime plan: close" }))
-  vim.keymap.set("n", "?", function()
-    vim.notify(
-      table.concat({
-        "nvime plan keys:",
-        "<CR> execute step    gx mark done       gp mark pending     gB mark blocked",
-        "gT run step tests   ]s/[s next/prev    gA run next pending  gd refine/discuss",
-        "gr replan          o open file        c copy intent       q close",
-      }, "\n"),
-      vim.log.levels.INFO
-    )
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: help" }))
+  local function show_plan_help()
+    keyhelp.toggle({
+      title = "plan keys",
+      sections = plan_help_sections(),
+      parent_winid = vim.api.nvim_get_current_win(),
+    })
+  end
+  vim.keymap.set("n", "?", show_plan_help, vim.tbl_extend("force", opts, { desc = "nvime plan: help" }))
+  vim.keymap.set("n", "g?", show_plan_help, vim.tbl_extend("force", opts, { desc = "nvime plan: help" }))
 end
 
 function M.open(plan_id)

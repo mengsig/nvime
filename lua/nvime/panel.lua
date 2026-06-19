@@ -19,6 +19,7 @@
 
 local buffer_guard = require("nvime.buffer_guard")
 local git = require("nvime.git")
+local keyhelp = require("nvime.keyhelp")
 local progress = require("nvime.progress")
 local provider_api = require("nvime.provider")
 local render = require("nvime.render")
@@ -31,6 +32,46 @@ local M = {}
 
 local INPUT_PROMPT_LINE = 1
 local SESSION_VERSION = 1
+
+-- The g? cheat-sheet for a conversation panel. Built from the same keys that
+-- attach_panel() binds below, so the help and the bindings stay in lock-step.
+-- Selection lanes (ask/edit) add the mode-toggle row.
+local function panel_help_sections(policy)
+  local agent_rows = {
+    { "p  <Tab>", "cycle provider" },
+    { "P", "choose provider" },
+    { "m", "cycle model" },
+    { "M", "choose model" },
+    { "?", "insert a prompt template" },
+  }
+  if policy.supports_mode_toggle then
+    agent_rows[#agent_rows + 1] = { "e", "toggle ask ⇄ edit" }
+  end
+  agent_rows[#agent_rows + 1] = { "<C-c>", "cancel the running agent" }
+  return {
+    {
+      heading = "Compose",
+      rows = {
+        { "i  a  o", "start typing in the prompt" },
+        { "<CR>", "send the prompt" },
+        { "<C-j>  <S-CR>", "newline without sending" },
+        { "<C-u>", "clear the prompt line" },
+        { "<Esc>", "leave input, back to the transcript" },
+      },
+    },
+    {
+      heading = "Agent",
+      rows = agent_rows,
+    },
+    {
+      heading = "Window",
+      rows = {
+        { "q", "close this panel" },
+        { "g?", "toggle this help" },
+      },
+    },
+  }
+end
 
 function M.create(policy)
   assert(type(policy) == "table", "panel.create requires a policy table")
@@ -936,6 +977,14 @@ function M.create(policy)
       focus_scrollback()
     end, opts)
     vim.keymap.set("n", "q", close_panel, opts)
+    vim.keymap.set("n", "g?", function()
+      local p = state.panels[state_key]
+      keyhelp.toggle({
+        title = policy.help_title or (policy.kind .. " keys"),
+        sections = panel_help_sections(policy),
+        parent_winid = p and p.winid,
+      })
+    end, opts)
   end
 
   -- ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ local store = require("nvime.bigchange.store")
 local uikit = require("nvime.bigchange.uikit")
 local ui = require("nvime.ui")
 local audit = require("nvime.audit")
+local keyhelp = require("nvime.keyhelp")
 
 local M = {}
 
@@ -249,7 +250,7 @@ local function render_left()
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
     lines[#lines + 1] = "  a approve · r request-changes"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
-    lines[#lines + 1] = "  <C-s> submit · M merge · q close"
+    lines[#lines + 1] = "  <C-s> submit · M merge · q close · g? keys"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
   end
 
@@ -978,6 +979,38 @@ local function explain_anyway()
   render()
 end
 
+-- The g? cheat-sheet for the Big Change review's left control tree. Mirrors the
+-- keys bound in install_left_keymaps so the help tracks the real mappings.
+local function review_help_sections()
+  return {
+    {
+      heading = "Blocks",
+      rows = {
+        { "<CR>  o", "open the block under the cursor" },
+        { "a", "approve — then explain the code" },
+        { "r", "request changes — write a critique" },
+        { "X", "re-lock a trivial auto-cleared block" },
+      },
+    },
+    {
+      heading = "Round",
+      rows = {
+        { "<C-s>", "submit the round to the agent" },
+        { "M", "merge (unlocks once every block is cleared)" },
+      },
+    },
+    {
+      heading = "Window",
+      rows = {
+        { "t", "toggle inline / file-view mode" },
+        { "<Tab>", "jump to the file pane" },
+        { "q", "close the review" },
+        { "g?", "toggle this help" },
+      },
+    },
+  }
+end
+
 -- Control keys live on the LEFT tree only — the right pane is a real file, so
 -- clobbering a/r/o/q there would break normal editing and navigation.
 local function install_left_keymaps(bufnr)
@@ -993,6 +1026,13 @@ local function install_left_keymaps(bufnr)
   map("M", merge)
   map("q", M.close)
   map("t", toggle_mode)
+  map("g?", function()
+    keyhelp.toggle({
+      title = "big change keys",
+      sections = review_help_sections(),
+      parent_winid = vim.api.nvim_get_current_win(),
+    })
+  end)
   -- Convenience: hop to the file pane to navigate / find definitions.
   map("<Tab>", function()
     if R.right_win and vim.api.nvim_win_is_valid(R.right_win) then
@@ -1039,5 +1079,6 @@ end
 -- Test-only export.
 M._overall_grade = overall_grade
 M._apply_results = apply_results
+M._help_sections = review_help_sections
 
 return M

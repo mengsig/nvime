@@ -10,6 +10,7 @@
 
 local audit = require("nvime.audit")
 local git = require("nvime.git")
+local keyhelp = require("nvime.keyhelp")
 local state = require("nvime.state")
 local ui = require("nvime.ui")
 
@@ -343,12 +344,64 @@ local function register_session(session)
   return "active"
 end
 
+-- The g? cheat-sheet for the diff review. `review` selects the dual-pane
+-- workspace variant (adds the pane keys, drops the inline-only undo); the
+-- inline variant documents the same canonical accept/reject verbs that live in
+-- the file buffer. Aliases (gr/gR/gX) are intentionally omitted so the card
+-- shows one obvious key per action.
+local function diff_help_sections(review)
+  local resolve_rows = {
+    { "ga", "accept the block (visual: the selection)" },
+    { "ga!", "force-accept (override a conflict)" },
+    { "gb", "reject the block (visual: the selection)" },
+  }
+  if not review then
+    resolve_rows[#resolve_rows + 1] = { "gu", "undo the last accept" }
+  end
+  resolve_rows[#resolve_rows + 1] = { "gc", "discuss the rest with the agent" }
+
+  local window_rows = {}
+  if review then
+    window_rows[#window_rows + 1] = { "e", "focus the editable pane" }
+    window_rows[#window_rows + 1] = { "r", "refresh the review" }
+    window_rows[#window_rows + 1] = { "q", "close the review" }
+  end
+  window_rows[#window_rows + 1] = { "g?", "toggle this help" }
+
+  return {
+    {
+      heading = "Navigate",
+      rows = {
+        { "]b  [b", "next / previous change block" },
+        { "]n  [n", "next / previous change line" },
+      },
+    },
+    { heading = "Resolve", rows = resolve_rows },
+    {
+      heading = "All blocks",
+      rows = {
+        { "gA", "accept all" },
+        { "gA!", "force-accept all" },
+        { "gB", "reject all" },
+      },
+    },
+    { heading = "Window", rows = window_rows },
+  }
+end
+
 local function install_buffer_maps(session)
   if session.maps_installed then
     return
   end
   session.maps_installed = true
   local opts = { buffer = session.target_bufnr, silent = true }
+  vim.keymap.set("n", "g?", function()
+    keyhelp.toggle({
+      title = "diff keys",
+      sections = diff_help_sections(false),
+      parent_winid = current_file_window(session.target_bufnr),
+    })
+  end, opts)
   vim.keymap.set("n", "]n", function()
     require("nvime.diff").next_change()
   end, opts)
@@ -775,6 +828,13 @@ local function install_review_maps(bufnr)
   vim.keymap.set("n", "q", function()
     require("nvime.diff").close_view()
   end, opts)
+  vim.keymap.set("n", "g?", function()
+    keyhelp.toggle({
+      title = "diff review keys",
+      sections = diff_help_sections(true),
+      parent_winid = vim.api.nvim_get_current_win(),
+    })
+  end, opts)
 end
 
 local function render_visual_group(session, group)
@@ -863,7 +923,7 @@ local function render_visual_group(session, group)
   virt_lines[#virt_lines + 1] = { { clip_review_text(session, group_summary(group)), "NvimeDiffHunk" } }
   virt_lines[#virt_lines + 1] = {
     {
-      clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gA! force all  gc discuss  q close"),
+      clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gc discuss  g? keys"),
       "NvimeMuted",
     },
   }
@@ -1015,7 +1075,7 @@ render_session = function(session, opts)
       local hint = session.review and "  press q to close" or ""
       vim.notify("nvime diff: resolved" .. hint, vim.log.levels.INFO)
     else
-      vim.notify("nvime diff: " .. pending .. " pending  ]b/[b ga gb gA gB gc  q close", vim.log.levels.INFO)
+      vim.notify("nvime diff: " .. pending .. " pending  ]b/[b move  ga gb resolve  g? keys", vim.log.levels.INFO)
     end
     if session.warnings and #session.warnings > 0 and not session.warnings_announced then
       session.warnings_announced = true

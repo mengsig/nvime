@@ -215,6 +215,20 @@ do
   assert_eq(scored, 2, "grade counts only non-trivial graded blocks")
   assert_eq(gradeable, 2, "grade denominator is the non-trivial count")
 
+  -- The Big Change review advertises its left-tree keys through the shared g?
+  -- overlay; verify the sections the binding feeds keyhelp render as expected.
+  do
+    local keyhelp = require("nvime.keyhelp")
+    keyhelp.close()
+    keyhelp.open({ title = "big change keys", sections = review._help_sections() })
+    assert(keyhelp.is_open(), "big change help renders through keyhelp")
+    local bc_help = table.concat(vim.api.nvim_buf_get_lines(state.panels.keyhelp.bufnr, 0, -1, false), "\n")
+    assert(bc_help:find("approve", 1, true), "big change help documents approve")
+    assert(bc_help:find("submit the round", 1, true), "big change help documents submit round")
+    assert(bc_help:find("toggle this help", 1, true), "big change help documents g? itself")
+    keyhelp.close()
+  end
+
   -- #10: every grading attempt is recorded to per-block history + audit.
   local gsession = {
     id = "proj-grade",
@@ -2504,6 +2518,27 @@ assert(
   "normal ga accepts the whole visual block"
 )
 assert(vim.fn.maparg("gu", "n") ~= "", "undo accepted block mapping is installed")
+do
+  -- The inline diff buffer advertises its keys through the shared g? overlay.
+  local keyhelp = require("nvime.keyhelp")
+  keyhelp.close()
+  local g_help
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(group_target, "n")) do
+    if m.lhs == "g?" then
+      g_help = m
+    end
+  end
+  assert(g_help and g_help.callback, "inline diff binds g? to a help callback")
+  g_help.callback()
+  assert(keyhelp.is_open(), "diff g? opens the keyhelp overlay")
+  local diff_help =
+    table.concat(vim.api.nvim_buf_get_lines(require("nvime.state").panels.keyhelp.bufnr, 0, -1, false), "\n")
+  assert(diff_help:find("Navigate", 1, true), "diff help shows the Navigate section")
+  assert(diff_help:find("accept the block", 1, true), "diff help documents accept")
+  assert(diff_help:find("undo the last accept", 1, true), "inline diff help includes gu undo")
+  keyhelp.close()
+  vim.api.nvim_set_current_win(vim.fn.bufwinid(group_target))
+end
 require("nvime.diff").undo_last_accept()
 assert_eq(
   table.concat(vim.api.nvim_buf_get_lines(group_target, 0, -1, false), "\n"),
@@ -3068,6 +3103,26 @@ end
     end
   end
   assert(saw_steps_header, "plan: view renders STEPS header")
+
+  -- Plan view advertises its keys through the shared g? overlay.
+  do
+    local keyhelp = require("nvime.keyhelp")
+    keyhelp.close()
+    local g_help
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(view_buf, "n")) do
+      if m.lhs == "g?" then
+        g_help = m
+      end
+    end
+    assert(g_help and g_help.callback, "plan view binds g? to a help callback")
+    g_help.callback()
+    assert(keyhelp.is_open(), "plan g? opens the keyhelp overlay")
+    local plan_help = table.concat(vim.api.nvim_buf_get_lines(state.panels.keyhelp.bufnr, 0, -1, false), "\n")
+    assert(plan_help:find("Run", 1, true), "plan help shows the Run section")
+    assert(plan_help:find("execute the step", 1, true), "plan help documents step execution")
+    assert(plan_help:find("Step status", 1, true), "plan help shows the Step status section")
+    keyhelp.close()
+  end
 
   -- Critic verdict parsing — robust against markdown emphasis, list
   -- markers, headers, em/en dashes, mixed case, bare verbs.
@@ -5802,6 +5857,89 @@ end)();
   state.config.agents = { timeout_ms = 0, lane_timeouts = {} }
   assert(agents._resolve_timeout("review") == nil, "timeout: 0 disables (treated as unbounded)")
   state.config.agents = saved
+end)();
+
+(function()
+  -- keyhelp: the shared, themed g? cheat-sheet overlay.
+  local keyhelp = require("nvime.keyhelp")
+  local state = require("nvime.state")
+
+  keyhelp.close()
+  assert(not keyhelp.is_open(), "keyhelp starts closed")
+
+  local sections = {
+    { heading = "Compose", rows = { { "i", "type in the prompt" }, { "<CR>", "send" } } },
+    { heading = "Window", rows = { { "g?", "toggle this help" } } },
+  }
+  keyhelp.open({ title = "demo keys", sections = sections })
+  assert(keyhelp.is_open(), "keyhelp.open shows the overlay")
+  local kh = state.panels.keyhelp
+  assert(kh and kh.bufnr and vim.api.nvim_buf_is_valid(kh.bufnr), "keyhelp tracks a live buffer")
+  local body = table.concat(vim.api.nvim_buf_get_lines(kh.bufnr, 0, -1, false), "\n")
+  assert(body:find("Compose", 1, true), "keyhelp renders the section heading")
+  assert(body:find("type in the prompt", 1, true), "keyhelp renders the key description")
+  assert(body:find("toggle this help", 1, true), "keyhelp renders every section")
+  -- The overlay buffer is non-editable scratch chrome, not content to mutate.
+  assert(vim.bo[kh.bufnr].modifiable == false, "keyhelp overlay is read-only")
+
+  keyhelp.toggle({ title = "demo", sections = sections })
+  assert(not keyhelp.is_open(), "keyhelp.toggle closes an open overlay")
+  keyhelp.toggle({ title = "demo", sections = sections })
+  assert(keyhelp.is_open(), "keyhelp.toggle reopens a closed overlay")
+  keyhelp.close()
+  assert(not keyhelp.is_open(), "keyhelp.close tears the overlay down")
+  assert(state.panels.keyhelp == nil, "keyhelp clears its panel slot on close")
+end)();
+
+(function()
+  -- The conversation panel (chat lane) advertises its keys via a buffer-local
+  -- g? that opens the themed overlay — built from the same keymaps the panel
+  -- binds, so the help can't drift from the bindings.
+  local keyhelp = require("nvime.keyhelp")
+  local state = require("nvime.state")
+  keyhelp.close()
+
+  local chat_buf = require("nvime.chat").open()
+  local function buf_map(bufnr, lhs)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+      if m.lhs == lhs then
+        return m
+      end
+    end
+    return nil
+  end
+
+  local g_help = buf_map(chat_buf, "g?")
+  assert(g_help and g_help.callback, "chat panel binds g? to a help callback")
+  g_help.callback()
+  assert(keyhelp.is_open(), "chat g? opens the keyhelp overlay")
+  local chat_help = table.concat(vim.api.nvim_buf_get_lines(state.panels.keyhelp.bufnr, 0, -1, false), "\n")
+  assert(chat_help:find("Compose", 1, true), "chat help shows the Compose section")
+  assert(chat_help:find("cycle provider", 1, true), "chat help documents provider cycling")
+  assert(chat_help:find("toggle this help", 1, true), "chat help documents g? itself")
+  assert(not chat_help:find("ask ⇄ edit", 1, true), "chat (no mode toggle) omits the ask/edit row")
+  g_help.callback()
+  assert(not keyhelp.is_open(), "chat g? toggles the overlay closed")
+  require("nvime.chat").close()
+
+  -- The selection lane (ask/edit) adds the mode-toggle row to the same overlay.
+  local sel_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(sel_buf, 0, -1, false, { "local x = 1" })
+  require("nvime.selection").open({
+    provider = "claude",
+    mode = "ask",
+    selection = { bufnr = sel_buf, line1 = 1, line2 = 1, path = "keyhelp-probe.lua", source = "test" },
+    new_session = true,
+  })
+  local sel_panel = state.panels.selection
+  local sel_help_map = buf_map(sel_panel.bufnr, "g?")
+  assert(sel_help_map and sel_help_map.callback, "selection panel binds g? to a help callback")
+  sel_help_map.callback()
+  assert(keyhelp.is_open(), "selection g? opens the keyhelp overlay")
+  local sel_help = table.concat(vim.api.nvim_buf_get_lines(state.panels.keyhelp.bufnr, 0, -1, false), "\n")
+  assert(sel_help:find("ask ⇄ edit", 1, true), "selection help documents the ask/edit mode toggle")
+  keyhelp.close()
+  require("nvime.selection").close()
 end)()
 
 print("nvime headless spec passed")

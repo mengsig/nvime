@@ -413,7 +413,10 @@ than being written into the transcript, so the buffer stays clean: messages,
 responses, and the active `[provider]$` prompt. nvime guards the buffer so only
 the live prompt line can be changed while typing.
 Press `i` or `o` from anywhere in the chat to jump back to the prompt. Press
-`<CR>` on the prompt to submit a review/docs chat message.
+`<CR>` on the prompt to submit a review/docs chat message. Press `g?` anywhere
+in the panel for a themed cheat-sheet of every control — the same `g?` overlay
+is available in the diff review and the plan view, so the keys are always one
+keystroke from discoverable.
 
 The chat/review lane keeps a transcript and native provider session id per
 general conversation. Same-provider follow-ups resume the native Claude/Codex
@@ -566,6 +569,8 @@ Inline diff mappings in the target file:
 - visual `gb`: reject every unresolved changed line touched by the visual range
 - `gB`: reject all unresolved blocks
 - `gc`: discuss the active diff state with the edit agent
+- `g?`: open a themed cheat-sheet of every diff-review key (works in both the
+  inline diff and the dual-pane workspace)
 
 Inside the review workspace, the left pane shows the full proposed result and
 the right pane is the live source buffer with inline diff overlays. The right
