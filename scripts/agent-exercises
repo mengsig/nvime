@@ -92,6 +92,63 @@ EXERCISES: dict[str, dict[str, Any]] = {
             """,
         },
     },
+    "js_roman_numerals": {
+        "difficulty": "hard",
+        "title": "Convert integers to Roman numerals (JavaScript)",
+        "target": "roman.js",
+        "runner": "node --test",
+        "intent": (
+            "Implement romanize(n) so it returns the Roman numeral string for a "
+            "positive integer n in the range 1..3999, using standard subtractive "
+            "notation (4=IV, 9=IX, 40=XL, 90=XC, 400=CD, 900=CM). Return an "
+            "uppercase string."
+        ),
+        "files": {
+            "roman.js": """
+                // romanize(n): Roman numeral for a positive integer n in 1..3999.
+                function romanize(n) {
+                  // NVIME_SELECT_START
+                  return String(n);
+                  // NVIME_SELECT_END
+                }
+
+                module.exports = { romanize };
+            """,
+            "roman.test.js": """
+                const test = require("node:test");
+                const assert = require("node:assert");
+                const { romanize } = require("./roman.js");
+
+                test("units and subtractive ones", () => {
+                  assert.strictEqual(romanize(1), "I");
+                  assert.strictEqual(romanize(3), "III");
+                  assert.strictEqual(romanize(4), "IV");
+                  assert.strictEqual(romanize(9), "IX");
+                });
+
+                test("tens and compounds", () => {
+                  assert.strictEqual(romanize(40), "XL");
+                  assert.strictEqual(romanize(58), "LVIII");
+                  assert.strictEqual(romanize(90), "XC");
+                });
+            """,
+        },
+        "hidden_files": {
+            "hidden.test.js": """
+                const test = require("node:test");
+                const assert = require("node:assert");
+                const { romanize } = require("./roman.js");
+
+                test("hundreds, thousands, and boundaries", () => {
+                  assert.strictEqual(romanize(400), "CD");
+                  assert.strictEqual(romanize(900), "CM");
+                  assert.strictEqual(romanize(1994), "MCMXCIV");
+                  assert.strictEqual(romanize(3888), "MMMDCCCLXXXVIII");
+                  assert.strictEqual(romanize(3999), "MMMCMXCIX");
+                });
+            """,
+        },
+    },
     "medium_duration_parser": {
         "difficulty": "medium",
         "title": "Fix compact duration parsing",
@@ -1854,6 +1911,31 @@ def non_harness_status_paths(workspace: Path) -> list[str]:
     ]
 
 
+def marker_payload_parseable(final_text: str) -> bool:
+    """Mirror nvime's real contract (plan.lua parse_marker_payload): nvime finds
+    NVIME_PLAN ANYWHERE and discards anything before it, then parses a JSON object
+    from the tail. So the contract is "a JSON payload is parseable after the
+    marker", NOT "the marker is the literal first byte of stdout". Models
+    intermittently prepend a one-line tooling note that nvime strips harmlessly;
+    grading that as failure tested a stricter rule than nvime enforces.
+    """
+    idx = final_text.find("NVIME_PLAN")
+    if idx < 0:
+        return False
+    tail = final_text[idx + len("NVIME_PLAN") :]
+    m = re.search(r"```json\s*(.+?)```", tail, re.S) or re.search(r"```\s*(.+?)```", tail, re.S)
+    body = m.group(1) if m else None
+    if body is None:
+        b = re.search(r"\{.*\}", tail, re.S)  # first top-level-ish JSON object
+        body = b.group(0) if b else None
+    if body is None:
+        return False
+    try:
+        return isinstance(json.loads(body), dict)
+    except Exception:  # noqa: BLE001 - any decode failure means not parseable
+        return False
+
+
 def validate_plan_output(workspace: Path, final_text: str) -> tuple[dict[str, bool], dict[str, Any]]:
     plan_jsons = sorted((workspace / ".nvime" / "plans").glob("*/plan.json"))
     details: dict[str, Any] = {
@@ -1861,7 +1943,7 @@ def validate_plan_output(workspace: Path, final_text: str) -> tuple[dict[str, bo
     }
     checks: dict[str, bool] = {
         "emits_marker": "NVIME_PLAN" in final_text,
-        "marker_is_first_output": final_text.lstrip().startswith("NVIME_PLAN"),
+        "marker_payload_parseable": marker_payload_parseable(final_text),
         "writes_one_plan_json": len(plan_jsons) == 1,
     }
     if len(plan_jsons) != 1:
