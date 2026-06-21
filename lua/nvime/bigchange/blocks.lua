@@ -81,7 +81,7 @@ local function group_prompt(hunks)
     "- Each block groups hunks from ONE file only.",
     "- Every hunk must belong to exactly one block.",
     "- Give each block a SHORT descriptive title (<= 60 chars). Do NOT explain the code.",
-    '- Mark a block "trivial": true ONLY when it is self-evident and needs no comprehension check — import/require/use lines, documentation/markdown prose, comment-only edits, or version/config value bumps. Otherwise omit it or set false.',
+    '- Mark a block "trivial": true ONLY when it is self-evident and needs no comprehension check — import/require/use lines, documentation/markdown prose, comment-only edits, docstrings, or version/config value bumps. Otherwise omit it or set false.',
     "- Output ONLY a JSON array wrapped in <JSON></JSON>, no prose:",
     '  [{"title": "...", "file": "path", "hunk_ids": ["path#1"], "trivial": false}]',
     "",

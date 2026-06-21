@@ -2,9 +2,11 @@
 --
 -- Pure, side-effect-free classifier for the Big Change forced-comprehension
 -- review. It decides whether a review block is SELF-EVIDENT — imports/requires,
--- documentation/markdown prose, comment-only edits, or version/config value
--- bumps — and therefore needs no graded explanation. Such blocks are
--- auto-cleared by blocks.lua; everything else keeps the usual grading bar.
+-- documentation/markdown prose, comment-only edits, docstrings, or
+-- version/config value bumps — and therefore needs no graded explanation. Such
+-- blocks are auto-cleared by blocks.lua; everything else keeps the usual
+-- grading bar. A docstring inherently restates the functional change it
+-- documents, so editing one is never a substantive change on its own.
 --
 -- This module NEVER requires blocks.lua (which requires it): the caller passes
 -- the already-resolved hunks via blocks.block_hunks(session, block).
@@ -114,6 +116,20 @@ local IMPORT_PATTERNS = {
   java = { "^import%s" },
 }
 
+-- Triple-quoted docstring delimiters by file extension. Only languages whose
+-- docstrings are bare string literals (not comments) need an entry — comment
+-- style docs (Lua ---, JS /** */) are already covered by is_comment. Detection
+-- is stateful: a changed line that BEGINS with one of these opens a docstring
+-- region whose content is self-evident until the matching delimiter closes it.
+local DOCSTRING_DELIMS = {
+  py = { '"""', "'''" },
+  pyi = { '"""', "'''" },
+}
+
+-- Optional Python string-literal prefixes (raw/bytes/format/unicode) allowed
+-- before a docstring delimiter, so r"""...""" still reads as a docstring open.
+local STR_PREFIX = "^[rRbBuUfF]?[rRbBuUfF]?"
+
 -- ---------------------------------------------------------------------------
 -- config accessors
 -- ---------------------------------------------------------------------------
@@ -185,6 +201,27 @@ local function is_import(trimmed, file)
   return false
 end
 
+-- When `trimmed` (a leading-trimmed line) begins a triple-quoted docstring for
+-- `file`, return the matched delimiter and the number of times it occurs on the
+-- line (>= 2 means the docstring also closes on this same line). Returns nil
+-- when the line does not open a docstring. A line that merely contains a triple
+-- quote mid-expression (e.g. `q = """..."""`) is NOT a docstring open: by
+-- convention a docstring line starts with the delimiter.
+local function docstring_open(trimmed, file)
+  local delims = DOCSTRING_DELIMS[ext_of(file)]
+  if not delims then
+    return nil
+  end
+  local rest = (trimmed:gsub(STR_PREFIX, "", 1))
+  for _, d in ipairs(delims) do
+    if vim.startswith(rest, d) then
+      local _, n = rest:gsub(vim.pesc(d), "")
+      return d, n
+    end
+  end
+  return nil
+end
+
 -- Classify a single changed line into a trivial kind, or nil when the line is
 -- substantive (executable / meaningful code). doc and config are file-level:
 -- ANY line in such a file is trivial.
@@ -223,49 +260,81 @@ local function each_changed(hunks, fn)
   return any
 end
 
--- True when ANY changed line is substantive (trivial_kind == nil).
-function M._has_substantive_code(hunks, file)
-  local substantive = false
-  each_changed(hunks, function(text)
-    if M._trivial_kind(text, file) == nil then
-      substantive = true
+-- Scan the changed lines IN ORDER, tracking triple-quoted docstring state so a
+-- multi-line docstring's interior prose is recognised even though only its
+-- opening line carries the delimiter. Returns { kinds = set, substantive = bool,
+-- any = bool } where `kinds` keys are trivial categories (doc/config/comment/
+-- import/docstring/blank) seen across the block.
+local function scan_changed(hunks, file)
+  local kinds, substantive, any = {}, false, false
+  -- Docstring state is tracked PER STREAM (added vs deleted) because a hunk
+  -- interleaves the old and new line versions; sharing one state would let a
+  -- new docstring's opening line read as the close of the deleted one.
+  local doc = { add = { open = false, delim = nil }, del = { open = false, delim = nil } }
+  for _, h in ipairs(hunks or {}) do
+    for _, l in ipairs(h.lines or {}) do
+      if l.kind == "add" or l.kind == "del" then
+        any = true
+        local text = l.text or ""
+        local trimmed = vim.trim(text)
+        local st = doc[l.kind]
+        if st.open then
+          kinds.docstring = true
+          if st.delim and trimmed:find(vim.pesc(st.delim)) then
+            st.open = false
+          end
+        else
+          local d, n = docstring_open(trimmed, file)
+          if d then
+            kinds.docstring = true
+            if n < 2 then
+              st.open, st.delim = true, d
+            end
+          else
+            local k = M._trivial_kind(text, file)
+            if k then
+              kinds[k] = true
+            else
+              substantive = true
+            end
+          end
+        end
+      end
     end
-  end)
-  return substantive
+  end
+  return { kinds = kinds, substantive = substantive, any = any }
 end
 
--- The single pure category name when every changed line maps to it, else nil.
--- docs/config require the file to match their globs; imports/comments allow
--- interleaved blank lines.
+-- True when ANY changed line is substantive (no trivial kind, not docstring).
+function M._has_substantive_code(hunks, file)
+  return scan_changed(hunks, file).substantive
+end
+
+-- The single pure category name when every changed line maps to ONE trivial
+-- kind (blank lines may interleave freely), else nil. doc/config are file-level;
+-- comments, imports, and docstrings allow interleaved blanks only.
 function M._pure_category(hunks, file)
-  local kinds = {}
-  local any = each_changed(hunks, function(text)
-    local k = M._trivial_kind(text, file)
-    if k then
-      kinds[k] = true
-    else
-      kinds.__substantive = true
-    end
-  end)
-  if not any or kinds.__substantive then
+  local res = scan_changed(hunks, file)
+  if not res.any or res.substantive then
     return nil
   end
-  -- doc / config are file-level: every line maps to the one kind.
-  if kinds.doc and not (kinds.config or kinds.comment or kinds.import) then
-    return "docs"
+  local CATEGORY = {
+    doc = "docs",
+    config = "config",
+    import = "imports",
+    comment = "comments",
+    docstring = "docstrings",
+  }
+  local found
+  for k in pairs(res.kinds) do
+    if k ~= "blank" then
+      if found then
+        return nil -- more than one non-blank kind: not category-pure
+      end
+      found = k
+    end
   end
-  if kinds.config and not (kinds.doc or kinds.comment or kinds.import) then
-    return "config"
-  end
-  if kinds.import and not (kinds.doc or kinds.config or kinds.comment) then
-    -- imports + interleaved blanks only.
-    return "imports"
-  end
-  if kinds.comment and not (kinds.doc or kinds.config or kinds.import) then
-    -- comments + interleaved blanks only.
-    return "comments"
-  end
-  return nil
+  return found and CATEGORY[found] or nil
 end
 
 -- ---------------------------------------------------------------------------

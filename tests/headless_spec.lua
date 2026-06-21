@@ -144,6 +144,37 @@ do
     "comment-only block is comments"
   )
 
+  -- docstrings: bare triple-quoted strings are self-evident, single- or
+  -- multi-line, and never count as substantive code on their own.
+  assert_eq(
+    classify("app/x.py", { { "add", '"""Return the widget."""' } }).category,
+    "docstrings",
+    "single-line python docstring is docstrings"
+  )
+  local multiline_doc = classify("app/x.py", {
+    { "del", '    """Old summary.' },
+    { "add", '    """New summary.' },
+    { "add", "" },
+    { "add", "    Explains the new behaviour." },
+    { "add", '    """' },
+  })
+  assert_eq(multiline_doc.category, "docstrings", "multi-line python docstring body is docstrings")
+  -- r"""...""" raw-prefixed docstrings still read as a docstring open
+  assert_eq(
+    classify("app/x.py", { { "add", 'r"""Raw docstring."""' } }).category,
+    "docstrings",
+    "raw-prefixed python docstring is docstrings"
+  )
+  -- a triple quote mid-expression is NOT a docstring: it stays substantive
+  local sql = classify("app/x.py", { { "add", 'q = """SELECT 1"""' } })
+  assert_eq(sql.trivial, false, "mid-expression triple quote is not a docstring")
+  -- docstring + executable code in one block never auto-clears
+  local doc_plus_code = classify("app/x.py", {
+    { "add", '"""Do the thing."""' },
+    { "add", "do_the_thing()" },
+  })
+  assert_eq(doc_plus_code.trivial, false, "docstring mixed with executable code is not trivial")
+
   -- version / config value bumps
   assert_eq(classify("Cargo.toml", { { "add", 'version = "0.4.0"' } }).category, "config", "toml is config")
   assert_eq(
