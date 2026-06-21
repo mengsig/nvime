@@ -1887,7 +1887,12 @@ def validate_plan_output(workspace: Path, final_text: str) -> tuple[dict[str, bo
             "id_matches_directory": plan.get("id") == plan_json.parent.name,
             "has_title_and_why": bool(plan.get("title")) and bool(plan.get("why")),
             "has_acceptance": isinstance(plan.get("acceptance"), list) and len(plan.get("acceptance")) >= 2,
-            "has_reasonable_step_count": isinstance(plan.get("steps"), list) and 3 <= len(plan.get("steps")) <= 12,
+            # Right-sizing philosophy (see prompt + prompt_checks above): the
+            # step count must match the ACTUAL scope and is never padded. A
+            # localized single-file change is legitimately 1-2 steps (implement
+            # + test), so the floor is 1 — the old floor of 3 contradicted the
+            # prompt and kept correctly right-sized plans permanently "unreasonable".
+            "has_reasonable_step_count": isinstance(plan.get("steps"), list) and 1 <= len(plan.get("steps")) <= 12,
         }
     )
 
