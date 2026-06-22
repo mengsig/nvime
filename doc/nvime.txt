@@ -225,7 +225,12 @@ COMMANDS                                                        *nvime-commands*
 
                                                         *:NvimeUsage*
 :NvimeUsage [summary|reset]
-        Open the token and cost dashboard. `summary` prints the same aggregate
+        Open the token and cost dashboard (also <leader>nu / <leader>nD): a
+        runway/burn-rate hero with a calendar run-out date (when
+        usage.budgets.total_usd is set), a heat-mapped daily-cost plot,
+        per-lane cost bars, cache efficiency, and stats. In the dashboard: r
+        refresh, t toggle cost/tokens, ] / [ cycle the plot window
+        (7/14/30/max days), q close. `summary` prints the same aggregate
         through vim.notify; `reset` clears the usage ledger. Usage data is
         stored in .nvime/usage.json by default and is collected from provider
         result envelopes when available.
@@ -347,6 +352,8 @@ Default keymaps use <leader>n:
                        @path (lines 10-25)
         <leader>np     choose Claude or Codex
         <leader>nP     open the plan picker
+        <leader>nu     open the token + cost usage dashboard
+        <leader>nD     open the token + cost usage dashboard
 
 Command center mappings:
         <CR>, o, i      open the cursor row

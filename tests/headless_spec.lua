@@ -4361,6 +4361,90 @@ end)(); -- ---------------------------------------------------------------------
   local summary = usage.summary_text()
   assert(summary:find("totals", 1, true), "usage: summary_text mentions totals")
   assert(summary:find("review", 1, true) and summary:find("plan", 1, true), "usage: summary lists per-lane")
+end)(); -- --------------------------------------------------------------------------- -- nvime.usage: dashboard render -- ---------------------------------------------------------------------------
+(function()
+  local state = require("nvime.state")
+  local dash_path = tmp .. "/usage-dash.json"
+  vim.fn.delete(dash_path)
+  local saved_usage = state.config.usage
+  state.config.usage = {
+    enabled = true,
+    path = dash_path,
+    max_days = 90,
+    statusline = false,
+    rates = {},
+    budgets = { total_usd = 50.0 },
+  }
+  package.loaded["nvime.usage"] = nil
+  local usage = require("nvime.usage")
+  usage.reset()
+
+  -- Empty ledger → a friendly empty state, never an error or fabricated zeros.
+  local ebuf = usage.open_panel()
+  assert(ebuf and vim.api.nvim_buf_is_valid(ebuf), "usage dashboard: empty render returns a buffer")
+  local empty_joined = table.concat(vim.api.nvim_buf_get_lines(ebuf, 0, -1, false), "\n")
+  assert(empty_joined:find("No usage recorded yet", 1, true), "usage dashboard: empty state message")
+  usage.close_panel()
+
+  usage.record({
+    lane = "edit",
+    provider = "claude",
+    sample = { input = 2000, output = 6000, cache_read = 200000, cache_creation = 30000, model = "claude-opus-4-8" },
+  })
+  usage.record({
+    lane = "review",
+    provider = "claude",
+    sample = { input = 1000, output = 3000, cache_read = 90000, cache_creation = 10000, model = "claude-opus-4-8" },
+  })
+
+  local buf, win = usage.open_panel()
+  assert(buf and vim.api.nvim_buf_is_valid(buf), "usage dashboard: render returns a valid buffer")
+  assert(win and vim.api.nvim_win_is_valid(win), "usage dashboard: opens a float window")
+  local joined = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+  for _, want in ipairs({ "RUNWAY", "DAILY COST", "COST BY LANE", "TOKENS & EFFICIENCY", "STATS", "edit", "cache hit" }) do
+    assert(joined:find(want, 1, true), "usage dashboard: section present — " .. want)
+  end
+  -- A total budget is set and is far from exhausted, so the runway hero shows a
+  -- days-left headline and a calendar run-out date.
+  assert(joined:find("DAYS LEFT", 1, true), "usage dashboard: runway shows days-left")
+  assert(joined:find("runs out", 1, true), "usage dashboard: runway shows a run-out date")
+  -- Palette highlight extmarks were applied to the rendered lines.
+  local dash_ns = vim.api.nvim_get_namespaces()["nvime.usage.dashboard"]
+  assert(dash_ns, "usage dashboard: namespace created")
+  assert(#vim.api.nvim_buf_get_extmarks(buf, dash_ns, 0, -1, {}) > 0, "usage dashboard: highlight extmarks applied")
+
+  -- The `t` key toggles the plot metric; the heading must follow it (cost view
+  -- says DAILY COST, token view says DAILY TOKENS — not a stale hardcoded label).
+  vim.cmd("normal t")
+  local toggled = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+  assert(toggled:find("DAILY TOKENS", 1, true), "usage dashboard: t toggles the plot to tokens")
+  vim.cmd("normal t") -- back to cost
+
+  -- A dimmed backdrop window is opened behind the float; it must be torn down
+  -- even when the float is closed by a path other than the q/<Esc> keymap
+  -- (e.g. :q / <C-w>c / programmatic close) — via the WinClosed autocmd.
+  local function backdrop_count()
+    local n = 0
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      local ok_wh, wh = pcall(function()
+        return vim.wo[w].winhighlight
+      end)
+      if ok_wh and tostring(wh):find("NvimeBackdrop", 1, true) then
+        n = n + 1
+      end
+    end
+    return n
+  end
+  assert(backdrop_count() >= 1, "usage dashboard: a backdrop window is open behind the float")
+  local float_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_close(float_win, true)
+  assert(backdrop_count() == 0, "usage dashboard: backdrop torn down on a non-keymap close")
+
+  usage.close_panel()
+  assert(not (win and vim.api.nvim_win_is_valid(win)), "usage dashboard: close tears down the window")
+
+  state.config.usage = saved_usage
+  package.loaded["nvime.usage"] = nil
 end)(); -- --------------------------------------------------------------------------- -- nvime.attribution: blame popup -- ---------------------------------------------------------------------------
 (function()
   local file = vim.fn.tempname() .. ".lua"

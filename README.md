@@ -280,6 +280,7 @@ require("nvime").setup({
       plan = "P",
       blame = "b",
       usage = "u",
+      usage_dashboard = "D",
       quick_fix = "f",
       send = "s",
     },
@@ -382,8 +383,8 @@ require("nvime").setup({
   plan UI float; `:NvimePlanClose` tears down every plan UI float and backdrop.
 - `:NvimeBlame [notify]` shows the agent attribution popup for the line under
   the cursor.
-- `:NvimeUsage [summary|reset]` opens the token + cost dashboard, prints a
-  summary, or resets counters.
+- `:NvimeUsage [summary|reset]` opens the token + cost dashboard (also
+  `<leader>nu` / `<leader>nD`), prints a summary, or resets counters.
 - `:NvimeHooks [install|uninstall|status]` installs or removes the `prepare-commit-msg` git hook; annotates commits with nvime attribution.
 - `:NvimePr [--dry-run] [<base>]` renders `.nvime/pr.md` — a reviewer-facing summary of AI-attributed changes on the current branch.
 - `:NvimePolicy [list|check <path> <lane>|edit]` lists, evaluates, or edits per-path policy rules (`.nvime/policy.json`).
@@ -477,7 +478,11 @@ Inside the chat window:
 - `<leader>nm`: choose model for the active provider
 - `<leader>nP`: open the plan picker (or refocus active plan UI)
 - `<leader>nb`: show agent attribution for the current line
-- `<leader>nu`: open the token + cost usage dashboard
+- `<leader>nu` / `<leader>nD`: open the token + cost usage dashboard — a
+  runway/burn-rate hero (with a calendar run-out date when `usage.budgets.total_usd`
+  is set), a heat-mapped daily-cost plot, per-lane cost bars, cache efficiency,
+  and stats. In the dashboard: `r` refresh, `t` toggle cost⇄tokens, `]`/`[`
+  cycle the plot window (7/14/30/max days), `q` close.
 - `<leader>nf`: quick fix at cursor
 - visual `<leader>nf`: quick fix visual selection
 - `<leader>ns`: send the current file (or netrw marked files / entry under the

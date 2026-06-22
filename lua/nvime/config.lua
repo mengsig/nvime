@@ -325,6 +325,7 @@ M.defaults = {
       plan = "P",
       blame = "b",
       usage = "u",
+      usage_dashboard = "D",
       quick_fix = "f",
       send = "s",
       bigchange = "B",

@@ -258,6 +258,18 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimePlanStepIndexDone", { fg = C.bg, bg = C.green, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanStepIndexBlocked", { fg = C.bg, bg = C.yellow, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanStepIndexPending", { fg = C.fg, bg = C.bg_band, default = true })
+  -- Usage dashboard. The daily-cost plot is a calm green field that flushes
+  -- warm only on spend spikes (a per-column heatmap by bar height), and the
+  -- runway budget gauge swaps fill severity green → yellow → red as the budget
+  -- (or days-left) crosses its thresholds. Fills reuse the diff washes
+  -- (add/warn/del backgrounds) so the gauge reads as a solid lit block.
+  vim.api.nvim_set_hl(0, "NvimePlotLow", { fg = C.green, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlotMid", { fg = C.yellow, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlotHigh", { fg = C.orange, default = true })
+  vim.api.nvim_set_hl(0, "NvimePlotPeak", { fg = C.red, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBudgetFillOk", { fg = C.green, bg = C.add_bg, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBudgetFillWarn", { fg = C.yellow, bg = C.warn_bg, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "NvimeBudgetFillCrit", { fg = C.red, bg = C.del_bg, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimePlanWhy", { fg = C.fg_dim, italic = true, default = true })
   -- Step intent lines wrap to multiple visual rows when long; bolding the
   -- whole sentence becomes a wall of bold and shouts. Use bright body fg
