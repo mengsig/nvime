@@ -298,6 +298,56 @@ local function configure_file_window(winid)
   vim.wo[winid].winhighlight = ""
 end
 
+-- Usable text width of the right pane, minus a reserve for the box prefix /
+-- padding. Used to wrap agent + user prose so it never clips at the window edge
+-- (virt_lines don't wrap, and the diff pane has wrap off).
+local function right_text_width(reserve)
+  local w = 80
+  if R.right_win and vim.api.nvim_win_is_valid(R.right_win) then
+    w = vim.api.nvim_win_get_width(R.right_win)
+  end
+  return math.max(24, w - (reserve or 6))
+end
+
+-- Word-wrap a (possibly multi-paragraph) string to `width` columns, preserving
+-- blank lines. Splits on whitespace; a token longer than the width is hard-split
+-- (e.g. a long path or URL). Always returns at least one line.
+local function wrap_lines(text, width)
+  local out = {}
+  for _, para in ipairs(vim.split(text or "", "\n", { plain = true })) do
+    if para == "" then
+      out[#out + 1] = ""
+    else
+      local line = ""
+      for word in para:gmatch("%S+") do
+        while #word > width do
+          if line ~= "" then
+            out[#out + 1] = line
+            line = ""
+          end
+          out[#out + 1] = word:sub(1, width)
+          word = word:sub(width + 1)
+        end
+        if line == "" then
+          line = word
+        elseif #line + 1 + #word <= width then
+          line = line .. " " .. word
+        else
+          out[#out + 1] = line
+          line = word
+        end
+      end
+      if line ~= "" then
+        out[#out + 1] = line
+      end
+    end
+  end
+  if #out == 0 then
+    out[1] = ""
+  end
+  return out
+end
+
 -- The status / comment / agent-reply box drawn as virtual lines above the
 -- block's first changed line, so the review feedback rides along with the code.
 local function overlay_lines(block)
@@ -315,9 +365,10 @@ local function overlay_lines(block)
     and block.draft ~= ""
     and block.state ~= "explaining"
     and block.state ~= "critiquing"
+  local body_width = right_text_width(6)
   if pending_draft then
     out[#out + 1] = { { "│ ", "NvimeAgent" }, { "draft (unsubmitted) — a/r to resume", "NvimeStatusWarn" } }
-    for _, cl in ipairs(vim.split(block.draft, "\n", { plain = true })) do
+    for _, cl in ipairs(wrap_lines(block.draft, body_width)) do
       out[#out + 1] = { { "│   ", "NvimeAgent" }, { cl, "NvimeUserText" } }
     end
   end
@@ -328,20 +379,23 @@ local function overlay_lines(block)
       or block.state == "critiquing" and " · ⏳ awaiting agent"
       or ""
     out[#out + 1] = { { "│ ", "NvimeAgent" }, { title .. foot, "NvimeSection" } }
-    for _, cl in ipairs(vim.split(block.comment, "\n", { plain = true })) do
+    for _, cl in ipairs(wrap_lines(block.comment, body_width)) do
       out[#out + 1] = { { "│   ", "NvimeAgent" }, { cl, "NvimeUserText" } }
     end
   end
 
   if block.agent_response and block.agent_response ~= "" then
     out[#out + 1] = { { "│ ", "NvimeAgent" }, { "agent", "NvimeAgent" } }
-    for _, cl in ipairs(vim.split(block.agent_response, "\n", { plain = true })) do
+    for _, cl in ipairs(wrap_lines(block.agent_response, body_width)) do
       out[#out + 1] = { { "│   ", "NvimeAgent" }, { cl, "NvimeNormal" } }
     end
   end
 
   if block.hint and block.hint ~= "" and block.state == "needs_explanation" then
-    out[#out + 1] = { { "│ hint: ", "NvimeAgent" }, { block.hint, "NvimeStatusWarn" } }
+    out[#out + 1] = { { "│ ", "NvimeAgent" }, { "hint", "NvimeStatusWarn" } }
+    for _, cl in ipairs(wrap_lines(block.hint, body_width)) do
+      out[#out + 1] = { { "│   ", "NvimeAgent" }, { cl, "NvimeStatusWarn" } }
+    end
   end
 
   -- Grading history: when a block took more than one attempt, show the trail of
@@ -455,11 +509,12 @@ local function show_diff(block, on_disk)
     and block.draft ~= ""
     and block.state ~= "explaining"
     and block.state ~= "critiquing"
+  local body_width = right_text_width(4)
   if pending_draft then
     lines[#lines + 1] = ""
     lines[#lines + 1] = "  ╭─ draft (unsubmitted) ──────────────────"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusWarn" }
-    for _, cl in ipairs(vim.split(block.draft, "\n", { plain = true })) do
+    for _, cl in ipairs(wrap_lines(block.draft, body_width)) do
       lines[#lines + 1] = "  │ " .. cl
       marks[#marks + 1] = { #lines, 0, -1, "NvimeUserText" }
     end
@@ -472,7 +527,7 @@ local function show_diff(block, on_disk)
     local title = block.action == "request_changes" and "your critique" or "your explanation"
     lines[#lines + 1] = "  ╭─ " .. title .. " ───────────────────────"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeSection" }
-    for _, cl in ipairs(vim.split(block.comment, "\n", { plain = true })) do
+    for _, cl in ipairs(wrap_lines(block.comment, body_width)) do
       lines[#lines + 1] = "  │ " .. cl
       marks[#marks + 1] = { #lines, 0, -1, "NvimeUserText" }
     end
@@ -488,7 +543,7 @@ local function show_diff(block, on_disk)
     lines[#lines + 1] =
       "  ╭─ agent ──────────────────────────────"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeAgent" }
-    for _, cl in ipairs(vim.split(block.agent_response, "\n", { plain = true })) do
+    for _, cl in ipairs(wrap_lines(block.agent_response, body_width)) do
       lines[#lines + 1] = "  │ " .. cl
       marks[#marks + 1] = { #lines, 0, -1, "NvimeNormal" }
     end
@@ -499,8 +554,10 @@ local function show_diff(block, on_disk)
 
   if block.hint and block.hint ~= "" and block.state == "needs_explanation" then
     lines[#lines + 1] = ""
-    lines[#lines + 1] = "  hint: " .. block.hint
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusWarn" }
+    for i, cl in ipairs(wrap_lines(block.hint, body_width - 6)) do
+      lines[#lines + 1] = (i == 1 and "  hint: " or "        ") .. cl
+      marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusWarn" }
+    end
   end
 
   vim.bo[buf].modifiable = true
