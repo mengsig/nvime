@@ -280,4 +280,124 @@ function M.choose_model(opts)
   end)
 end
 
+-- ---------------------------------------------------------------------------
+-- reasoning effort
+-- ---------------------------------------------------------------------------
+-- Unlike the model (a per-session choice), reasoning effort is one global
+-- per-provider setting applied to EVERY agent lane (edit, plan, big change, …).
+-- It maps to `claude --effort <level>` and codex `model_reasoning_effort`, so
+-- the level set must be valid for that provider.
+-- Claude's effort flag takes low|medium|high|xhigh|max. "ultracode" is a Claude
+-- Code mode = xhigh effort + dynamic workflow orchestration; nvime reproduces it
+-- non-interactively by passing `--effort xhigh` AND CLAUDE_CODE_WORKFLOWS=1 in the
+-- agent env (see agents.lua). Codex maps to model_reasoning_effort.
+local EFFORT_LEVELS = {
+  claude = { "low", "medium", "high", "xhigh", "max", "ultracode" },
+  codex = { "low", "medium", "high", "xhigh" },
+}
+
+-- Friendly aliases → a canonical level.
+local EFFORT_ALIASES = {
+  claude = { ultra = "ultracode", maximum = "max" },
+  codex = { ["extra high"] = "xhigh", ["extra-high"] = "xhigh", extrahigh = "xhigh", xh = "xhigh" },
+}
+
+function M.effort_levels(provider_name)
+  return EFFORT_LEVELS[provider_name or M.current()] or {}
+end
+
+local function provider_cfg(provider_name)
+  provider_name = provider_name or M.current()
+  state.config = state.config or {}
+  state.config.providers = state.config.providers or {}
+  state.config.providers[provider_name] = state.config.providers[provider_name] or {}
+  return state.config.providers[provider_name]
+end
+
+function M.current_effort(provider_name)
+  local cfg = state.config and state.config.providers and state.config.providers[provider_name or M.current()]
+  return cfg and cfg.reasoning_effort
+end
+
+-- level may be nil (→ provider default).
+function M.set_effort(level, provider_name)
+  provider_name = provider_name or M.current()
+  if level and level ~= "" then
+    -- Resolve a friendly alias (e.g. "ultracode" → "max") to the real CLI value.
+    local alias = (EFFORT_ALIASES[provider_name] or {})[tostring(level):lower()]
+    if alias then
+      level = alias
+    end
+    local valid = false
+    for _, l in ipairs(M.effort_levels(provider_name)) do
+      if l == level then
+        valid = true
+        break
+      end
+    end
+    if not valid then
+      vim.notify(
+        string.format(
+          "nvime: '%s' is not a valid effort for %s (%s)",
+          tostring(level),
+          provider_name,
+          table.concat(M.effort_levels(provider_name), ", ")
+        ),
+        vim.log.levels.WARN
+      )
+      return nil
+    end
+  else
+    level = nil
+  end
+  provider_cfg(provider_name).reasoning_effort = level
+  vim.notify(
+    string.format("nvime effort (%s) set to %s", provider_name, level or "(provider default)"),
+    vim.log.levels.INFO
+  )
+  return level
+end
+
+function M.cycle_effort(provider_name)
+  provider_name = provider_name or M.current()
+  local levels = M.effort_levels(provider_name)
+  if #levels == 0 then
+    vim.notify("nvime: no effort levels for " .. provider_name, vim.log.levels.WARN)
+    return nil
+  end
+  local current = M.current_effort(provider_name)
+  for index, l in ipairs(levels) do
+    if l == current then
+      return M.set_effort(levels[(index % #levels) + 1], provider_name)
+    end
+  end
+  return M.set_effort(levels[1], provider_name)
+end
+
+function M.choose_effort(provider_name)
+  provider_name = provider_name or M.current()
+  local levels = M.effort_levels(provider_name)
+  if #levels == 0 then
+    vim.notify("nvime: no effort levels for " .. provider_name, vim.log.levels.WARN)
+    return
+  end
+  local current = M.current_effort(provider_name)
+  local choices = { "(provider default)" }
+  for _, l in ipairs(levels) do
+    choices[#choices + 1] = l
+  end
+  vim.ui.select(choices, {
+    prompt = "nvime reasoning effort (" .. provider_name .. ")",
+    format_item = function(item)
+      local is_current = (item == current) or (item == "(provider default)" and not current)
+      return is_current and (item .. " (current)") or item
+    end,
+  }, function(choice)
+    if not choice then
+      return
+    end
+    M.set_effort(choice ~= "(provider default)" and choice or nil, provider_name)
+  end)
+end
+
 return M

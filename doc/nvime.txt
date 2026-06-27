@@ -266,6 +266,19 @@ COMMANDS                                                        *nvime-commands*
 :NvimeProvider [claude|codex]
         Show or set the default provider used by nvime commands and chat.
 
+                                                        *:NvimeEffort*
+:NvimeEffort [level]
+        Set the agent reasoning effort for the active provider (applies to every
+        lane: edit, plan, big change, …). With no argument, opens a picker;
+        <leader>nE does the same. Levels:
+          claude : low | medium | high | xhigh | max | ultracode
+          codex  : low | medium | high | xhigh
+        "ultracode" runs claude at xhigh effort AND enables Claude Code's dynamic
+        workflow orchestration (via --effort xhigh + CLAUDE_CODE_WORKFLOWS=1 in
+        the agent env) — the agent may spawn sub-agent workflows for complex
+        tasks (more capable, more tokens). `:NvimeEffort default` clears it back
+        to the CLI default. Stored on config.providers.<name>.reasoning_effort.
+
                                                         *:NvimePlan*
 :NvimePlan
 :NvimePlan new [intent]

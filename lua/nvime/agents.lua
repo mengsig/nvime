@@ -157,6 +157,16 @@ local function claude_args(cfg, lane, prompt, run_opts)
     vim.list_extend(args, { "--model", run_opts.model })
   end
 
+  -- Reasoning effort for this run. Set globally per provider
+  -- (state.config.providers.claude.reasoning_effort), changed via :NvimeEffort /
+  -- provider.choose_effort. The CLI flag only accepts low|medium|high|xhigh|max;
+  -- "ultracode" is xhigh effort PLUS dynamic workflows, so it maps to xhigh here
+  -- and the workflow half is enabled by CLAUDE_CODE_WORKFLOWS in the spawn env.
+  if cfg.reasoning_effort and cfg.reasoning_effort ~= "" then
+    local effort = cfg.reasoning_effort == "ultracode" and "xhigh" or cfg.reasoning_effort
+    vim.list_extend(args, { "--effort", effort })
+  end
+
   if run_opts.max_turns and run_opts.max_turns > 0 then
     vim.list_extend(args, { "--max-turns", tostring(math.floor(run_opts.max_turns)) })
   end
@@ -929,6 +939,8 @@ local function resolve_timeout(lane)
 end
 
 M._resolve_timeout = resolve_timeout
+M._claude_args = claude_args
+M._codex_args = codex_args
 
 function M.run(opts)
   opts = opts or {}
@@ -1028,13 +1040,22 @@ function M.run(opts)
   })
   on_progress("[nvime] " .. provider .. " started (" .. lane .. ")\n")
 
+  local spawn_env = shellguard.build_env()
+  -- Ultracode = xhigh effort (passed via --effort in claude_args) + Claude Code's
+  -- dynamic workflow orchestration. This env var is the workflows half — the same
+  -- toggle interactive `/effort ultracode` flips. Lets a claude agent spawn
+  -- sub-agent workflows for complex tasks (more tokens; opt-in per the effort UI).
+  if provider == "claude" and cfg.reasoning_effort == "ultracode" then
+    spawn_env.CLAUDE_CODE_WORKFLOWS = "1"
+  end
+
   return policy.with_trusted(function()
     local system_opts = {
       text = true,
       stdout = stdout,
       stderr = stderr,
       cwd = cwd,
-      env = shellguard.build_env(),
+      env = spawn_env,
       -- vim.system kills the process (SIGTERM) and reports code 124 on timeout;
       -- nil leaves the run unbounded (the default).
       timeout = timeout_ms,

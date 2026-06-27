@@ -6,10 +6,18 @@ M.defaults = {
     claude = {
       cmd = "claude",
       models = { "opus", "sonnet", "haiku" },
+      -- Reasoning effort passed as `claude --effort <level>`. nil = CLI default.
+      -- Levels: low | medium | high | xhigh | max | ultracode. "ultracode" runs
+      -- at xhigh effort + Claude Code's dynamic workflow orchestration (the agent
+      -- may spawn sub-agent workflows — more capable, more tokens). Change at
+      -- runtime with :NvimeEffort or <leader>n + the effort key.
+      reasoning_effort = nil,
     },
     codex = {
       cmd = "codex",
       models = { "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark" },
+      -- Passed as `-c model_reasoning_effort="<level>"`. nil = CLI default.
+      -- Levels: low | medium | high | xhigh.
       reasoning_effort = nil,
     },
   },
@@ -310,6 +318,7 @@ M.defaults = {
       last = "n",
       provider = "p",
       model = "m",
+      effort = "E",
       plan = "P",
       blame = "b",
       usage = "u",

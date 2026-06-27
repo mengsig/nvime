@@ -6205,6 +6205,71 @@ end)();
   assert(sel_help:find("ask ⇄ edit", 1, true), "selection help documents the ask/edit mode toggle")
   keyhelp.close()
   require("nvime.selection").close()
+end)();
+(function()
+  -- Reasoning effort: claude --effort + codex model_reasoning_effort, plus the
+  -- "ultracode" = xhigh effort + dynamic workflows mapping. (IIFE so these
+  -- locals don't add to the main chunk, which is near Lua's 200-local cap.)
+  local provider = require("nvime.provider")
+  local agents = require("nvime.agents")
+  state.config.providers = state.config.providers or {}
+  state.config.providers.claude = state.config.providers.claude or { cmd = "claude" }
+  state.config.providers.codex = state.config.providers.codex or { cmd = "codex" }
+  state.config.provider = "claude"
+
+  assert_eq(
+    table.concat(provider.effort_levels("claude"), ","),
+    "low,medium,high,xhigh,max,ultracode",
+    "effort: claude levels include ultracode"
+  )
+  assert_eq(table.concat(provider.effort_levels("codex"), ","), "low,medium,high,xhigh", "effort: codex levels")
+
+  provider.set_effort("xhigh", "claude")
+  assert_eq(provider.current_effort("claude"), "xhigh", "effort: set/current round-trips")
+  provider.set_effort("nonsense", "claude")
+  assert_eq(provider.current_effort("claude"), "xhigh", "effort: invalid value rejected")
+  provider.set_effort("ultra", "claude")
+  assert_eq(provider.current_effort("claude"), "ultracode", "effort: 'ultra' aliases to ultracode")
+  provider.set_effort(nil, "claude")
+  assert(provider.current_effort("claude") == nil, "effort: nil clears to provider default")
+
+  local function has_flag(args, flag, val)
+    for i, a in ipairs(args) do
+      if a == flag and (val == nil or args[i + 1] == val) then
+        return true
+      end
+    end
+    return false
+  end
+
+  state.config.providers.claude.reasoning_effort = "high"
+  assert(
+    has_flag(agents._claude_args(state.config.providers.claude, "plan", "hi", {}), "--effort", "high"),
+    "effort: claude_args passes --effort high"
+  )
+  -- ultracode → --effort xhigh (the flag itself can't take "ultracode")
+  state.config.providers.claude.reasoning_effort = "ultracode"
+  local ua = agents._claude_args(state.config.providers.claude, "plan", "hi", {})
+  assert(has_flag(ua, "--effort", "xhigh"), "effort: ultracode maps to --effort xhigh")
+  assert(not has_flag(ua, "--effort", "ultracode"), "effort: ultracode never reaches the flag")
+  state.config.providers.claude.reasoning_effort = nil
+  assert(
+    not has_flag(agents._claude_args(state.config.providers.claude, "plan", "hi", {}), "--effort"),
+    "effort: claude_args omits --effort when unset"
+  )
+
+  state.config.providers.codex.reasoning_effort = "xhigh"
+  local koargs = agents._codex_args(state.config.providers.codex, "plan", "hi", nil, {})
+  local saw_codex = false
+  for _, a in ipairs(koargs) do
+    if type(a) == "string" and a:find('model_reasoning_effort="xhigh"', 1, true) then
+      saw_codex = true
+    end
+  end
+  assert(saw_codex, "effort: codex passes model_reasoning_effort")
+  state.config.providers.codex.reasoning_effort = nil
+
+  assert(vim.fn.exists(":NvimeEffort") == 2, "effort: :NvimeEffort command exists")
 end)()
 
 print("nvime headless spec passed")

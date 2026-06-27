@@ -366,6 +366,7 @@ require("nvime").setup({
 - `:'<,'>NvimeEdit [claude|codex] <intent>` asks for a reviewed edit for the visual range.
 - `:NvimeEdit [claude|codex] <intent>` uses the Tree-sitter function at the cursor.
 - `:NvimeProvider [claude|codex]` shows or changes the default provider.
+- `:NvimeEffort [level]` sets the agent reasoning effort (claude: `low` `medium` `high` `xhigh` `max` `ultracode`; codex: `low` `medium` `high` `xhigh`), or `:NvimeEffort` / `<leader>nE` to pick interactively. `ultracode` runs claude at `xhigh` effort **plus** dynamic workflow orchestration (the agent may spawn sub-agent workflows — more capable, more tokens).
 - `:NvimeAccept` accepts the current inline diff block.
 - `:NvimeAccept!` force-accepts the current inline diff block when the live
   target text no longer matches the hunk nvime reviewed.
@@ -494,6 +495,7 @@ Inside the chat window:
 - `<leader>nn`: reopen the last used nvime conversation
 - `<leader>np`: choose Claude or Codex
 - `<leader>nm`: choose model for the active provider
+- `<leader>nE`: choose the agent reasoning effort (claude up to `ultracode`, codex up to `xhigh`)
 - `<leader>nP`: open the plan picker (or refocus active plan UI)
 - `<leader>nb`: show agent attribution for the current line
 - `<leader>nu` / `<leader>nD`: open the token + cost usage dashboard — a

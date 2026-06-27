@@ -212,6 +212,9 @@ local function install_keymaps()
   set_keymap("n", prefix .. (normal.last or "n"), M.open_last, "nvime reopen last conversation")
   set_keymap("n", prefix .. (normal.provider or "p"), provider.choose, "nvime choose provider")
   set_keymap("n", prefix .. (normal.model or "m"), provider.choose_model, "nvime choose model")
+  set_keymap("n", prefix .. (normal.effort or "E"), function()
+    provider.choose_effort()
+  end, "nvime choose reasoning effort")
   set_keymap("n", prefix .. (normal.plan or "P"), function()
     local plan = require("nvime.plan")
     -- If a plan UI float is already open but unfocused, refocus it instead of
@@ -497,6 +500,25 @@ function M.setup(opts)
       return provider.names
     end,
     desc = "Show or set the nvime provider",
+  })
+
+  vim.api.nvim_create_user_command("NvimeEffort", function(args)
+    if args.args and args.args ~= "" then
+      provider.set_effort(args.args == "default" and nil or args.args)
+    else
+      provider.choose_effort()
+    end
+  end, {
+    nargs = "?",
+    complete = function()
+      local levels = provider.effort_levels()
+      local out = { "default" }
+      for _, l in ipairs(levels) do
+        out[#out + 1] = l
+      end
+      return out
+    end,
+    desc = "Set the agent reasoning effort (claude: low…max|ultracode; codex: low…xhigh)",
   })
 
   vim.api.nvim_create_user_command("NvimeAudit", function(args)
