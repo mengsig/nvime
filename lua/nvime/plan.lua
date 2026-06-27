@@ -2233,7 +2233,8 @@ function M.create(opts)
 
   local provider = opts.provider or (state.config and state.config.provider) or "claude"
   local prompt = build_author_prompt(intent, opts.refine_id)
-  local response = {}
+  local response = {} -- on_text only (the agent's answer; carries the NVIME_PLAN marker)
+  local all_output = {} -- on_text + on_progress (used to detect resume failures)
   -- Two output sinks. The default author flow streams into the run-log float.
   -- When opts.on_stream is given (the "update plan" chat), the caller captures
   -- the agent's output into its transcript and we open no float. opts.on_complete
@@ -2360,9 +2361,11 @@ function M.create(opts)
     end,
     on_text = function(text)
       response[#response + 1] = text
+      all_output[#all_output + 1] = text
       emit(text)
     end,
     on_progress = function(text)
+      all_output[#all_output + 1] = text
       emit(text)
     end,
     on_handle = function(h)
@@ -2386,6 +2389,38 @@ function M.create(opts)
 
       local plan_id = nil
       local final_status = "ok"
+      -- Stale-session self-recovery: when refining/updating, the provider may no
+      -- longer have the resumed author session ("No conversation found with
+      -- session ID: ..."). Clear the bad id and retry ONCE from a fresh
+      -- conversation, so an expired (or pre-stable-workspace) session can't wedge
+      -- the update.
+      if
+        result.code ~= 0
+        and resume_session_id
+        and not opts._fresh_retry
+        and table.concat(all_output):lower():find("no conversation found", 1, true)
+      then
+        if opts.refine_id then
+          local stale = M.get(opts.refine_id)
+          if stale and stale.author_provider_sessions then
+            stale.author_provider_sessions[provider] = nil
+            persist_plan(stale)
+          end
+        end
+        emit("[nvime] stored session expired — retrying with a fresh conversation…\n")
+        if state.plan._tick_timer then
+          pcall(state.plan._tick_timer.stop, state.plan._tick_timer)
+          pcall(state.plan._tick_timer.close, state.plan._tick_timer)
+          state.plan._tick_timer = nil
+        end
+        state.plan.active_run = nil
+        local retry = vim.tbl_extend("force", {}, opts)
+        retry._fresh_retry = true
+        vim.schedule(function()
+          M.create(retry)
+        end)
+        return
+      end
       if result.code ~= 0 then
         final_status = "failed"
         emit("[nvime] plan author failed (code " .. tostring(result.code) .. ")\n")

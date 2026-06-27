@@ -3513,6 +3513,89 @@ end
     state.plan.plans = nil
   end
 
+  -- ── Plan author stale-session self-recovery ───────────────────────────────
+  -- A resumed author session the provider has forgotten ("No conversation
+  -- found") must clear the bad id and retry once from a fresh conversation.
+  do
+    local agents = require("nvime.agents")
+    local saved_run = agents.run
+    local rdir = tmp .. "/recover-plans"
+    vim.fn.mkdir(rdir .. "/0001-rec", "p")
+    local rfd = io.open(rdir .. "/0001-rec/plan.json", "w")
+    rfd:write(vim.json.encode({
+      version = 1,
+      id = "0001-rec",
+      title = "Rec",
+      why = "x",
+      created_at = os.time(),
+      updated_at = os.time(),
+      files_estimated = {},
+      acceptance = {},
+      author_provider_sessions = { claude = "stale-id" },
+      steps = { { id = 1, intent = "a", file = "a.lua", range = "new", depends_on = {}, tests = {} } },
+    }))
+    rfd:close()
+    state.config.plan.dir = rdir
+    state.plan.loaded = false
+    state.plan.plans = nil
+
+    local calls = {}
+    agents.run = function(opts)
+      -- Record the resume id ("<fresh>" when none — Lua tables can't store nil).
+      calls[#calls + 1] = opts.resume_session_id or "<fresh>"
+      vim.schedule(function()
+        if opts.resume_session_id then
+          -- resume fails: the provider forgot the session.
+          if opts.on_text then
+            opts.on_text("No conversation found with session ID: stale-id\n")
+          end
+          if opts.on_exit then
+            opts.on_exit({ code = 1, nvime_synced_plan_files = {} })
+          end
+        else
+          -- a fresh run succeeds and captures a new session id.
+          if opts.on_session_id then
+            opts.on_session_id("fresh-id")
+          end
+          if opts.on_exit then
+            opts.on_exit({ code = 0, nvime_synced_plan_files = { ".nvime/plans/0001-rec/plan.json" } })
+          end
+        end
+      end)
+      return { kill = function() end }
+    end
+
+    local completed
+    plan.create({
+      intent = "tweak step 1",
+      refine_id = "0001-rec",
+      provider = "claude",
+      on_stream = function() end, -- suppress the run-log float (chat-style)
+      on_complete = function(pid, status)
+        completed = { id = pid, status = status }
+      end,
+    })
+    vim.wait(3000, function()
+      return completed ~= nil
+    end)
+    agents.run = saved_run
+    state.plan.active_run = nil -- don't leak the author-run state into later tests
+
+    assert(completed, "recover: on_complete fired after the retry")
+    assert_eq(completed.status, "ok", "recover: the fresh retry succeeded")
+    assert_eq(#calls, 2, "recover: retried exactly once (resume fail → fresh)")
+    assert_eq(calls[1], "stale-id", "recover: first attempt resumed the stale id")
+    assert_eq(calls[2], "<fresh>", "recover: the retry ran without resuming")
+    state.plan.loaded = false
+    state.plan.plans = nil
+    local rp = plan.get("0001-rec")
+    assert_eq(rp.author_provider_sessions.claude, "fresh-id", "recover: stale id replaced by the fresh one")
+
+    state.config.plan.dir = plans_dir
+    state.plan.loaded = false
+    state.plan.plans = nil
+  end
+
   -- Render must survive multi-line fields in plan.json (intent/notes/why/
   -- acceptance/title may all contain embedded newlines from JSON-encoded
   -- agent output; nvim_buf_set_lines rejects items with embedded \n).

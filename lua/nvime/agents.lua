@@ -537,13 +537,30 @@ local function collect_plan_files(root, base, out)
   end
 end
 
+-- A filesystem-safe, repo-specific id so two checkouts don't share a workspace.
+local function plan_workspace_slug(root)
+  local base = vim.fn.fnamemodify(root, ":t")
+  if base == nil or base == "" then
+    base = "repo"
+  end
+  local hash = vim.fn.sha256 and vim.fn.sha256(root):sub(1, 8) or tostring(#root)
+  return (base:gsub("[^%w%-_]", "_")) .. "-" .. hash
+end
+
 local function prepare_plan_workspace(lane)
   if lane ~= "plan" then
     return nil
   end
   local root = repo_root()
-  local tmp = vim.fn.tempname()
-  local cwd = tmp .. "/workspace"
+  -- STABLE workspace path (NOT a fresh tempname). claude/codex key resumable
+  -- sessions by project directory, so a plan-author session can only be resumed
+  -- on a later refine/update if the cwd is identical. We therefore keep one
+  -- workspace per repo under stdpath('data') and refresh its contents each run.
+  -- (Returning no `tmp` keeps the dispatcher from deleting it after the run; the
+  -- provider's session store lives in ~/.claude, not here, so wiping the
+  -- contents to re-mirror the repo never invalidates the session.)
+  local cwd = string.format("%s/nvime/plan-workspace/%s/workspace", vim.fn.stdpath("data"), plan_workspace_slug(root))
+  pcall(vim.fn.delete, cwd, "rf")
   copy_tree(root, cwd, plan_excluded_workspace_dirs)
   -- copy_tree above intentionally excludes the .git tree; everything else
   -- including .nvime/plans is now in the workspace. .nvime/plans gets a
@@ -552,7 +569,6 @@ local function prepare_plan_workspace(lane)
   ensure_workspace_git_root(cwd)
   return {
     root = root,
-    tmp = tmp,
     cwd = cwd,
     lane = lane,
   }
