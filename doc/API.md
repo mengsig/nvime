@@ -478,34 +478,39 @@ Transport: `jsonrpc_response` (780), `jsonrpc_error` (784), `send` (788),
 
 ## `nvime.plan` (lua/nvime/plan.lua)
 
-Plan store + plan UI (picker, plan view, compose buffer, run panel) +
-`:Nvime plan` command dispatch.
+The three-phase plan flow (phase 0 research + agree → phase 1 scaffold TODOs →
+phase 2 implement) + plan store + plan UI (picker, plan view, compose, run
+panel) + `:NvimePlan` command dispatch. Phases 1–2 reuse the Big Change
+worktree/review/merge engine via a linked session (`plan.bigchange_session_id`).
 
 ### Public API
 | Symbol | Lines | Notes |
 |---|---|---|
-| `M.plans` | 316–322 | List all plans. |
-| `M.refresh` | 324–328 | Reload plans from disk. |
-| `M.get` | 330–337 | Fetch a plan by id. |
-| `M.delete` | 1150–1161 | Delete a plan. |
-| `M.add_test_for_step` | 1587–1703 | Author a test for a plan step. |
-| `M.reset_session` | 1710–1736 | Reset a plan run session. |
-| `M.compose_step` | 1744–1910 | Open the step compose buffer. |
-| `M.execute_step` | 1912–2233 | Run the active step end-to-end. |
-| `M.open` | 2463–2472 | Open the plan view for a plan id. |
-| `M.create` | 2741–2965 | Create a new plan from a brief. |
-| `M.refine` | 2967–2969 | Refine an existing plan via the model. |
-| `M.replan` | 2971–2973 | Replan from scratch. |
-| `M.discuss` | 2975–2978 | Discussion-mode interaction with the plan. |
-| `M.picker` | 3264–3301 | Open the plan picker. |
-| `M.compose` | 3537–3606 | Open the plan compose buffer. |
-| `M.prompt_new` | 3608–3610 | Prompt for a new plan brief. |
-| `M.command` | 3616–3714 | `:Nvime plan ...` dispatcher. |
-| `M._next_pending_step` | 3716–3727 | Next non-done step (test hook). |
-| `M.complete_subcommands` | 3729–3753 | Tab-completion for `:Nvime plan`. |
-| `M.close_all` | 3757–3759 | Close all plan UI windows. |
-| `M.focus` | 3766–3789 | Focus the plan view. |
-| `M.reopen_run` | 3794–3813 | Reopen the run-log panel. |
+| `M.plans` | 355 | List all plans. |
+| `M.refresh` | 363 | Reload plans from disk. |
+| `M.get` | 369 | Fetch a plan by id. |
+| `M.set_step_status` | 1206 | Mark a step done/pending/blocked (+ plan.md changelog). |
+| `M.delete` | 1208 | Delete a plan. |
+| `M.detect_test_file` / `M.detect_test_runner` | 1378–1379 | Project test-detection helpers. |
+| `M.reset_session` | 1386 | Clear the captured author session (phase-0 refine). |
+| `M.agree` | 1759 | Agree to a plan → start phase 1 (scaffold). |
+| `M.open` | 1897 | Open a plan at its current phase (view or review). |
+| `M.create` | 2190 | Create a new plan from a brief (phase-0 author). |
+| `M.refine` | 2416 | Refine an existing plan via the model. |
+| `M.replan` | 2420 | Replan from scratch. |
+| `M.discuss` | 2424 | Discussion-mode interaction with the plan. |
+| `M.picker` | 2715 | Open the plan picker. |
+| `M.compose` | 2975 | Open the plan compose buffer. |
+| `M.prompt_new` | 3046 | Prompt for a new plan brief. |
+| `M.command` | 3054 | `:NvimePlan ...` dispatcher. |
+| `M.complete_subcommands` | 3141 | Tab-completion for `:NvimePlan`. |
+| `M.close_all` | 3168 | Close all plan UI windows. |
+| `M.focus` | 3177 | Focus the plan view. |
+| `M.reopen_run` | 3205 | Reopen the run-log panel. |
+
+Phase-flow test hooks: `M._plan_phase`, `M._plan_spec_markdown`,
+`M._scaffold_prompt`, `M._implement_prompt`, `M._linked_session`,
+`M._enter_scaffold`, `M._enter_implement`, `M._finalize_plan`.
 | `M.statusline_components` | 3815–3829 | Plan parts of the statusline. |
 | `M.format_id` | 3831–3833 | Format a plan id from a number. |
 | `M.next_plan_number` | 3835–3837 | Next available plan number. |

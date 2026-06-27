@@ -219,32 +219,20 @@ M.defaults = {
     },
   },
   plan = {
+    -- The phased flow: phase 0 (research + agree) → phase 1 (the agent writes
+    -- inert TODO scaffolding in an isolated worktree, reviewed at vibe) → phase
+    -- 2 (the agent implements the reviewed scaffolding, reviewed at vibe/easy
+    -- per the "require understanding?" choice). Phases 1–2 reuse the Big Change
+    -- worktree/review/merge engine via a linked session.
     enabled = true,
     dir = nil, -- defaults to <git-root>/.nvime/plans
     auto_open = true, -- open the rendered plan view after authoring
-    auto_in_progress = true, -- mark a step in_progress when its edit lane fires
-    inject_context_chars = 480, -- per-step plan context block budget
-    -- Devil's-advocate critic for plan executions. Defaults to true here
-    -- (overrides diff.devils_advocate) because plan steps are structured,
-    -- pre-approved by the user via the plan, and a critical second pass is
-    -- worth the extra latency. Set to false to disable.
-    devils_advocate = true,
-    -- Default test file for the test scaffolder. Auto-detected when nil.
+    -- Default test file / runner used by the project test-detection helpers
+    -- (shared with the test-loop). Auto-detected from project markers when nil
+    -- (Cargo.toml, build.zig, go.mod, pyproject.toml, package.json, pom.xml,
+    -- build.gradle, CMakeLists.txt, Makefile, scripts/test).
     test_file = nil,
-    -- Default test runner shell command (e.g. "cargo test", "pytest -q",
-    -- "zig build test", "./scripts/test"). Auto-detected from project
-    -- markers (Cargo.toml, build.zig, go.mod, pyproject.toml,
-    -- package.json, pom.xml, build.gradle, CMakeLists.txt, Makefile,
-    -- scripts/test) when nil.
     test_runner = nil,
-    -- Provider session continuity:
-    --   "plan" : all steps of one plan share a provider conversation; the
-    --            session id rotates and is persisted on plan.json. Press
-    --            gN in the plan view to clear it.
-    --   "none" : every step starts a fresh conversation (older nvime
-    --            behavior; safer for very large plans where the session
-    --            could blow past the context window).
-    session_continuity = "plan",
   },
   sessions = {
     enabled = true,

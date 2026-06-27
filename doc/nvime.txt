@@ -270,19 +270,16 @@ COMMANDS                                                        *nvime-commands*
 :NvimePlan
 :NvimePlan new [intent]
 :NvimePlan open <id>
-:NvimePlan run <id> [step]
+:NvimePlan agree <id>
 :NvimePlan refresh
 :NvimePlan delete <id>
 :NvimePlan discuss <id>
-:NvimePlan add-test <id> <step>
 :NvimePlan reset-session <id> [provider]
-        Drive the plan author and executor lanes (see |nvime-plan|). With no
-        args, opens the plan picker. `new` drafts a plan via the plan author
-        agent — restricted to writing files under .nvime/plans/<id>/. `open`
-        opens the plan view buffer. `run` executes a step (the next pending
-        step if no step argument is given) by opening the step's file/range
-        and routing through |:NvimeEdit| with the existing inline diff
-        review.
+        Drive the phased plan flow (see |nvime-plan|). With no args, opens the
+        plan picker. `new` drafts a plan via the plan author agent — restricted
+        to writing files under .nvime/plans/<id>/. `open` opens the plan at its
+        current phase (the phase-0 research view, or the phase-1/2 review).
+        `agree` agrees to a plan and starts phase 1 (TODO scaffolding).
 
 Inline diff mappings in the target file:
         Pending diffs are shown as readable change blocks: proposed green lines
@@ -514,12 +511,8 @@ Common options:
             enabled = true,
             dir = nil,                  -- defaults to <git-root>/.nvime/plans
             auto_open = true,           -- open the plan view after authoring
-            auto_in_progress = true,    -- mark a step in_progress on execute
-            inject_context_chars = 480, -- plan-context block budget per step
-            devils_advocate = true,     -- read-only critic on every step diff
             test_file = nil,            -- defaults to auto-detect, e.g. tests/headless_spec.lua
             test_runner = nil,          -- defaults to auto-detect from project markers
-            session_continuity = "plan",-- "plan" (steps share session) | "none"
           },
           diff = {
             max_visual_block_lines = 12,
@@ -802,86 +795,71 @@ The sidecar has three sections:
 ==============================================================================
 PLAN                                                                *nvime-plan*
 
-The plan lane decomposes a code change into ordered steps that are executed
-through the existing edit lane. The agent that drafts the plan runs in a
-hardened sub-lane:
+The plan lane is a three-phase flow built on the Big Change worktree/review/
+merge engine. The agent that drafts the plan runs in a hardened sub-lane:
 
-    plan_author   read tools + Bash + Web + Write/Edit/MultiEdit, but the
-                  workspace is a temp copy whose only files synced back to the
-                  repo are those under .nvime/plans/<plan-id>/. Anything written
-                  outside that directory is silently dropped on agent exit.
+    plan_author   read tools + Bash + Web + Write/Edit, but the workspace is a
+                  temp copy whose only files synced back to the repo are those
+                  under .nvime/plans/<plan-id>/. Anything written outside that
+                  directory is silently dropped on agent exit.
 
-    plan_exec    not its own agent lane; instead, opening a step's file/range
-                  and routing through |:NvimeEdit|. The step's intent is
-                  prefixed with a constant-size plan-context block (plan id,
-                  why, step position, acceptance) so the patch worker has the
-                  architectural context without paying multi-step token cost.
+The phases:
+
+    Phase 0 — research + agree. plan_author investigates read-only and writes
+              .nvime/plans/<id>/plan.json + plan.md. You read the roadmap in the
+              plan view and press <CR>/ga to AGREE. Nothing is touched yet.
+
+    Phase 1 — scaffold. A linked Big Change session is created; in an isolated
+              worktree the agent writes ONLY inert `TODO(nvime):` scaffolding —
+              comments at each change site, new files, and type/interface stubs.
+              No behavior. You review it at `vibe` difficulty in the Big Change
+              review view, editing the TODOs directly in the right pane or
+              pressing `r` to ask the agent to revise them. `M` advances.
+
+    Phase 2 — implement. You answer "require understanding?" (no → vibe review,
+              yes → easy review). The agent implements the reviewed scaffolding
+              in the same worktree; you review block-by-block, and `M` lands the
+              work as an unstaged branch in the main tree (gitflow takes over).
 
 Plan storage:
-    .nvime/plans/<NNNN-slug>/plan.json    machine-readable contract
+    .nvime/plans/<NNNN-slug>/plan.json    machine-readable contract (v2: phase,
+                                          phase0_agreed, phase1_agreed,
+                                          require_understanding,
+                                          bigchange_session_id)
     .nvime/plans/<NNNN-slug>/plan.md      human-readable narrative
     .nvime/plans/index.json               index used by the picker
 
-Plan view buffer mappings (nvime://plan/<id>):
-    <CR>        execute the step under the cursor (opens file, fires edit lane)
-    gE          edit-then-execute: open a compose buffer with the would-be
-                intent + plan-context prefilled; tweak, then <C-s> to fire
-    gx          mark the step under the cursor as done
-    gp          mark the step as pending
-    gB          mark the step as blocked
-    gT          run the step's tests in a split terminal
-    gW          scaffold a regression test for the step (test author lane)
-    gN          reset the plan's provider session (next step starts fresh)
-    ]s, [s      next/previous step
-    gA          execute the next pending step
-    gd          discuss/refine the step (re-enters plan author lane)
+Plan view buffer mappings (nvime://plan/<id>, phase 0):
+    <CR>, ga    agree to the plan → start phase 1 (scaffold TODOs)
+    gd          discuss/refine the plan (re-enters plan author lane)
     gr          replan from this point
+    gN          reset the plan's author session (next refinement starts fresh)
+    ]s, [s      next/previous step
     o           open the step's file
     c           copy the step intent
     q, <Esc>    close the plan view
-    ?           show keymap help
+    g?, ?       show keymap help
 
-Plan executor enhancements:
-    - Range anchors. Each step may carry a `range_anchor` (1-3 verbatim
-      lines from the original target). At execute-time nvime searches the
-      file for the anchor and re-anchors the line range to wherever the
-      content has drifted to. This survives the case where earlier steps
-      modify the same file and shift the line numbers of later steps.
-    - Edit-then-execute. Press gE on a step to open a compose buffer with
-      the would-be intent + plan-context prefilled. Edit freely (correct a
-      stale line range, narrow the request, add a hint), then <C-s> to
-      actually run the patch worker against your edited intent.
-    - Auto test-runner detection. The test scaffolder (gW) and the default
-      runner picked when a step has no `tests` field are auto-detected from
-      project markers: Cargo.toml → cargo test, build.zig → zig build test,
-      go.mod → go test ./..., pyproject.toml/pytest.ini → pytest -q,
-      package.json → npm test, pom.xml → mvn test, build.gradle →
-      gradle test, CMakeLists.txt → ctest, Makefile → make test, and
-      `scripts/test` always wins when present. Override via
+Phases 1 and 2 use the Big Change review mappings (see |nvime-bigchange|): a/r
+to approve/request-changes per block, <C-s> to submit a round, t to toggle
+inline/diff view, and M for the completion action (advance to phase 2, or merge).
+
+Notes:
+    - The plan-as-spec (why + ordered steps + acceptance) is handed to the
+      worktree agent as the scaffold and implement prompts; the steps describe
+      WHERE the TODOs go, not a list to execute one at a time.
+    - Edits you make to the TODOs in the worktree are authoritative: the agent
+      reads the live files before revising (phase 1) or implementing (phase 2).
+    - The default test runner is auto-detected from project markers (Cargo.toml
+      → cargo test, build.zig → zig build test, go.mod → go test ./...,
+      pyproject.toml/pytest.ini → pytest -q, package.json → npm test, pom.xml →
+      mvn test, build.gradle → gradle test, CMakeLists.txt → ctest, Makefile →
+      make test; `scripts/test` always wins when present). Override via
       plan.test_runner.
-    - Before running step.tests nvime saves the modified buffer to disk so
-      tools that read from disk (stylua --check, ./scripts/test, rg, etc.)
-      see the new content rather than the pre-patch file.
-    - When all blocks of a step's diff are resolved, nvime auto-runs
-      step.tests and offers Done / Pending / Cancel on green; on red it
-      offers Rollback / Blocked / Pending / Cancel. Rollback restores the
-      file to its pre-step content using the snapshot the diff session
-      captured.
-    - With plan.devils_advocate = true (default), every plan-step diff is
-      shadowed by a read-only critic agent that returns APPROVE / FLAG /
-      REJECT in one sentence. The verdict appears as a colored banner at
-      the top of the diff review and is advisory only — it never blocks
-      the user.
-    - Per-plan session continuity (plan.session_continuity = "plan",
-      default): all steps of a plan share a provider conversation, so
-      step 5 retains the architectural context built up by steps 1-4.
-      The session id is captured on plan_author exit, stored in
-      plan.json under provider_sessions, and rotates as the agent emits
-      new ids on resume. Press gN in the plan view (or run
-      :NvimePlan reset-session <id> [provider]) to clear the captured id
-      and force the next step to start fresh — useful when the
-      conversation has accumulated too much context or gone off-track.
-      Set plan.session_continuity = "none" to revert to fresh-each-time.
+    - Phase-0 author session continuity: the captured plan_author session is
+      stored on plan.json under author_provider_sessions and resumed when you
+      refine (gd/gr). Press gN (or :NvimePlan reset-session <id> [provider]) to
+      clear it and force the next refinement to start fresh.
 
 Plan picker buffer mappings (nvime://plans):
     <CR>            open the plan under the cursor

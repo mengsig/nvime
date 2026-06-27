@@ -567,7 +567,7 @@ function M.setup(opts)
       end
       return out
     end,
-    desc = "Open the nvime plan picker, draft a plan, or run a step",
+    desc = "Open the nvime plan picker, draft a plan, or agree/open a plan phase",
   })
 
   vim.api.nvim_create_user_command("NvimeRecap", function(args)

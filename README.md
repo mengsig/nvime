@@ -7,12 +7,11 @@ It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex 
 - **review/docs**: roam the repo, read shell/tests, write Markdown — no code edits
 - **edit**: one range, one file, written intent or it doesn't move
 - **generation**: fill blank ranges or non-code files like `.gitignore`
-- **plan**: agent drafts a roadmap (`.nvime/plans/<id>/plan.json` + `plan.md`); you execute step-by-step — code lands only where you approved the shape
+- **plan**: a three-phase flow on the Big Change engine. **Phase 0** — the agent drafts a roadmap (`.nvime/plans/<id>/plan.json` + `plan.md`) read-only; you read it and press `ga` to **agree**. **Phase 1** — in an isolated worktree the agent writes only inert `TODO(nvime):` scaffolding (comments, new files, type stubs — no behavior); you review it at *vibe*, editing the TODOs directly or asking the agent to revise. **Phase 2** — you pick "require understanding?" (no → *vibe*, yes → *easy*), the agent implements the reviewed scaffolding, and you review block-by-block before `M` lands an unstaged branch. Code lands only where you approved the shape.
 - **rationalized patches**: every edit ships a one-line `RATIONALE:` (bug → patch → why) in the diff banner before you accept
 - **pre-accept verify lane**: tree-sitter parse + configured linters/type-checkers run against the proposed file content; parse errors block silent accept (`gA!` overrides and writes a `verify_force` audit event). Agents that have the nvime MCP server can self-check via `nvime.verify_file` and report a `VERIFY:` line — belt-and-suspenders, never the contract
-- **devil's-advocate critic**: opt-in second pass returns APPROVE / FLAG / REJECT — advisory, never blocks. Default-on for plans
-- **auto-rollback**: tests fail after accept? one keystroke restores the pre-step file
-- **test scaffolder**: `:NvimePlan add-test <id> <step>` (or `gW`) fires the edit lane to write a regression test for that step
+- **devil's-advocate critic**: opt-in second pass returns APPROVE / FLAG / REJECT — advisory, never blocks
+- **auto-rollback**: tests fail after accept? one keystroke restores the pre-edit file
 
 ### Plan picker
 
@@ -20,11 +19,15 @@ It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex 
 
 ![nvime plan picker](docs/plan-picker.png)
 
-### Plan view
+### Plan view (phase 0)
 
-`<CR>` on a plan row opens the plan view — sectioned WHY / ACCEPTANCE / FILES / STEPS with status-tinted step badges, per-plan progress bar, session-continuity badge, and the full keymap footer.
+`<CR>` on a plan row opens the phase-0 research view — sectioned WHY / ACCEPTANCE / FILES / STEPS with the proposed roadmap, the phase banner, and a session-continuity badge. Press `<CR>` or `ga` to **agree** and start phase 1 (the agent scaffolds `TODO(nvime):` markers in an isolated worktree). `gd` refines the plan, `gr` replans, `gN` resets the author session.
 
 ![nvime plan view](docs/plan-view.png)
+
+### Phase 1 / 2 review
+
+Phases 1 (scaffold) and 2 (implement) run in the Big Change review view: a file→block tree on the left, the real worktree file (editable — change the TODOs in place) on the right. Phase 1 is *vibe* (approve to clear, `r` to ask the agent to revise); `M` advances to phase 2, where you choose the review strictness and the agent implements before you review and merge.
 
 ### Plan compose
 
@@ -32,7 +35,7 @@ It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex 
 
 ### Inline diff review
 
-After step execution, the inline diff opens in the target file with a `RATIONALE:` banner from the patch worker, optional critic verdict, per-block accept/reject controls, and conflict detection if the file drifted under the agent.
+The edit lane's inline diff opens in the target file with a `RATIONALE:` banner from the patch worker, optional critic verdict, per-block accept/reject controls, and conflict detection if the file drifted under the agent.
 
 ![nvime diff review](docs/diff-review.png)
 - diff review: agent output becomes a current-file inline diff; accepted lines or blocks are applied by `nvime`
@@ -378,9 +381,10 @@ require("nvime").setup({
 - `:NvimeTestLoop [on|off|auto|ask|reset]` configures nvime's after-diff
   test-feedback loop (enable, disable, force auto-fix, ask before fix, or
   reset retry counters).
-- `:NvimePlan` opens the plan picker, drafts a plan, or runs a step (e.g.
-  `:NvimePlan add-test <id> <step>`). `:NvimePlanFocus` refocuses the active
-  plan UI float; `:NvimePlanClose` tears down every plan UI float and backdrop.
+- `:NvimePlan` opens the plan picker or drafts a plan; `:NvimePlan agree <id>`
+  agrees to a plan and starts the scaffold phase; `:NvimePlan open <id>` opens a
+  plan at its current phase. `:NvimePlanFocus` refocuses the active plan UI
+  float; `:NvimePlanClose` tears down every plan UI float and backdrop.
 - `:NvimeBlame [notify]` shows the agent attribution popup for the line under
   the cursor.
 - `:NvimeUsage [summary|reset]` opens the token + cost dashboard (also
