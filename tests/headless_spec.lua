@@ -3472,6 +3472,42 @@ end
     assert(maps["gu"], "update: phase-0 view binds gu")
     assert(not maps["gd"], "update: phase-0 view no longer binds gd")
 
+    -- The chat is a 2-window layout (plan + single chat pane), and an unsent
+    -- draft survives close/reopen (no more lost text on q).
+    -- The chat pane is the UNNAMED scratch buffer (the plan pane is a named
+    -- nvime://plan/<id> buffer whose footer also mentions "update plan").
+    local function chat_buf_of_tab()
+      for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        local b = vim.api.nvim_win_get_buf(w)
+        if
+          vim.api.nvim_buf_get_name(b) == ""
+          and table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n"):find("update plan", 1, true)
+        then
+          return b
+        end
+      end
+    end
+    plan.update_chat("0001-upd")
+    assert_eq(#vim.api.nvim_tabpage_list_wins(0), 2, "update: chat is a 2-window layout")
+    local cbuf = chat_buf_of_tab()
+    assert(cbuf, "update: chat buffer present")
+    vim.bo[cbuf].modifiable = true
+    vim.api.nvim_buf_set_lines(cbuf, -1, -1, false, { "my unsent draft" })
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(cbuf, "n")) do
+      if m.lhs == "q" and m.callback then
+        m.callback()
+      end
+    end
+    plan.update_chat("0001-upd")
+    local cbuf2 = chat_buf_of_tab()
+    local ctext = table.concat(vim.api.nvim_buf_get_lines(cbuf2, 0, -1, false), "\n")
+    assert(ctext:find("my unsent draft", 1, true), "update: unsent draft restored on reopen")
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(cbuf2, "n")) do
+      if m.lhs == "q" and m.callback then
+        m.callback()
+      end
+    end
+
     state.config.plan.dir = plans_dir
     state.plan.loaded = false
     state.plan.plans = nil

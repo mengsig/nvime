@@ -2478,59 +2478,86 @@ end
 -- ============================================================================
 -- A conversation to revise the plan IN PLACE — "rework step 2 to use a deque"
 -- — instead of re-typing a whole brief. A tabpage with the live plan view on
--- the left and a transcript + input on the right; each message resumes the
--- author session, edits plan.json, and re-renders the plan. (Major rewrites
--- still go through gr → re-plan, which re-authors from a fresh brief.)
+-- the left and a single chat pane on the right (transcript with the message
+-- input as its editable tail); each message resumes the author session, edits
+-- plan.json, and re-renders the plan. (Major rewrites still go through
+-- gr → re-plan, which re-authors from a fresh brief.)
 
 local UPDATE_NS = vim.api.nvim_create_namespace("nvime.plan.update.scrollback")
+-- Unsent input drafts, kept across close/reopen so q never loses your text.
+local update_drafts = {}
 local U = {
   plan_id = nil,
   tabpage = nil,
   plan_win = nil,
   plan_buf = nil,
-  log_win = nil,
-  log_buf = nil,
-  input_win = nil,
-  input_buf = nil,
+  chat_win = nil,
+  chat_buf = nil,
+  input_start = 1, -- 1-based line where the editable input region begins
   busy = false,
+  gen = 0, -- bumped on close; stale agent callbacks check it and bail
 }
 
 local function update_is_open()
   return U.tabpage and vim.api.nvim_tabpage_is_valid(U.tabpage)
 end
 
--- Append streamed text to the transcript. Schedule-safe: agent callbacks fire
--- in a fast-event context where buffer writes are illegal.
-local function update_log_append(text)
+local function chat_valid()
+  return U.chat_buf and vim.api.nvim_buf_is_valid(U.chat_buf)
+end
+
+-- The unsent message: every line from the input marker to the end of the buffer.
+local function current_input_lines()
+  if not chat_valid() then
+    return {}
+  end
+  local total = vim.api.nvim_buf_line_count(U.chat_buf)
+  if U.input_start > total then
+    return {}
+  end
+  return vim.api.nvim_buf_get_lines(U.chat_buf, U.input_start - 1, -1, false)
+end
+
+local function decorate_chat()
+  local ok_render, render = pcall(require, "nvime.render")
+  if ok_render and type(render.scrollback) == "function" then
+    pcall(render.scrollback, U.chat_buf, UPDATE_NS)
+  end
+end
+
+local function scroll_chat_bottom()
+  if U.chat_win and vim.api.nvim_win_is_valid(U.chat_win) then
+    pcall(vim.api.nvim_win_set_cursor, U.chat_win, { vim.api.nvim_buf_line_count(U.chat_buf), 0 })
+  end
+end
+
+-- Append streamed text at the end of the chat buffer. Schedule-safe: agent
+-- callbacks fire in a fast-event context where buffer writes are illegal.
+local function chat_append(text)
   if vim.in_fast_event and vim.in_fast_event() then
     vim.schedule(function()
-      update_log_append(text)
+      chat_append(text)
     end)
     return
   end
-  if not (U.log_buf and vim.api.nvim_buf_is_valid(U.log_buf)) then
+  if not chat_valid() then
     return
   end
-  local cur = vim.api.nvim_buf_get_lines(U.log_buf, 0, -1, false)
+  local cur = vim.api.nvim_buf_get_lines(U.chat_buf, 0, -1, false)
   local pieces = vim.split(text or "", "\n", { plain = true })
-  vim.bo[U.log_buf].modifiable = true
+  vim.bo[U.chat_buf].modifiable = true
   cur[#cur] = (cur[#cur] or "") .. pieces[1]
   for i = 2, #pieces do
     cur[#cur + 1] = pieces[i]
   end
-  vim.api.nvim_buf_set_lines(U.log_buf, 0, -1, false, cur)
-  vim.bo[U.log_buf].modifiable = false
-  local ok_render, render = pcall(require, "nvime.render")
-  if ok_render and type(render.scrollback) == "function" then
-    pcall(render.scrollback, U.log_buf, UPDATE_NS)
-  end
-  if U.log_win and vim.api.nvim_win_is_valid(U.log_win) then
-    pcall(vim.api.nvim_win_set_cursor, U.log_win, { vim.api.nvim_buf_line_count(U.log_buf), 0 })
-  end
+  vim.api.nvim_buf_set_lines(U.chat_buf, 0, -1, false, cur)
+  vim.bo[U.chat_buf].modifiable = not U.busy
+  decorate_chat()
+  scroll_chat_bottom()
 end
 
-local function update_log_line(line)
-  update_log_append((line or "") .. "\n")
+local function chat_line(line)
+  chat_append((line or "") .. "\n")
 end
 
 -- Re-render the live plan view (left pane) from the latest on-disk plan.
@@ -2547,18 +2574,66 @@ local function render_update_plan()
   end
 end
 
-local function update_set_busy(on)
-  U.busy = on
-  if U.input_buf and vim.api.nvim_buf_is_valid(U.input_buf) then
-    vim.bo[U.input_buf].modifiable = not on
-  end
-  if U.input_win and vim.api.nvim_win_is_valid(U.input_win) then
-    vim.wo[U.input_win].winbar = on and "  ⏳ updating the plan…"
-      or "  ✎ your change · <C-s> send · <C-c> cancel · q close"
+local function update_winbar()
+  if U.chat_win and vim.api.nvim_win_is_valid(U.chat_win) then
+    vim.wo[U.chat_win].winbar = U.busy and "  updating the plan…"
+      or "  type your change · <C-s> send · <C-c> cancel · q close"
   end
 end
 
+local function update_set_busy(on)
+  U.busy = on
+  if chat_valid() then
+    vim.bo[U.chat_buf].modifiable = not on
+  end
+  update_winbar()
+end
+
+-- Open a fresh editable input region at the bottom (optionally pre-filled with a
+-- saved draft) and record where it starts.
+local function begin_input(seed)
+  if not chat_valid() then
+    return
+  end
+  local cur = vim.api.nvim_buf_get_lines(U.chat_buf, 0, -1, false)
+  if (cur[#cur] or "") ~= "" then
+    cur[#cur + 1] = ""
+  end
+  local start = #cur + 1
+  local seed_lines = (seed and seed ~= "") and vim.split(seed, "\n", { plain = true }) or { "" }
+  for _, l in ipairs(seed_lines) do
+    cur[#cur + 1] = l
+  end
+  vim.bo[U.chat_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(U.chat_buf, 0, -1, false, cur)
+  vim.bo[U.chat_buf].modifiable = not U.busy
+  U.input_start = start
+  if U.chat_win and vim.api.nvim_win_is_valid(U.chat_win) then
+    pcall(vim.api.nvim_win_set_cursor, U.chat_win, { #cur, #(cur[#cur] or "") })
+  end
+end
+
+-- Remember the unsent draft so closing/reopening never loses it.
+local function save_draft()
+  if not U.plan_id then
+    return
+  end
+  local txt = vim.trim(table.concat(current_input_lines(), "\n"))
+  update_drafts[U.plan_id] = (txt ~= "") and txt or nil
+end
+
 local function update_close()
+  save_draft()
+  -- Invalidate any in-flight run (its callbacks check U.gen) and stop a runaway
+  -- author so its stream can't leak into a later session.
+  U.gen = U.gen + 1
+  if U.busy then
+    local active = state.plan and state.plan.active_run
+    if active and active.handle and active.handle.kill then
+      pcall(active.handle.kill, active.handle, "sigterm")
+    end
+    U.busy = false
+  end
   if update_is_open() then
     pcall(function()
       vim.api.nvim_set_current_tabpage(U.tabpage)
@@ -2572,9 +2647,9 @@ local function update_cancel()
   local active = state.plan and state.plan.active_run
   if U.busy and active and active.handle and active.handle.kill then
     pcall(active.handle.kill, active.handle, "sigterm")
-    update_log_line("")
-    update_log_line("⚠ cancelled")
-    update_set_busy(false)
+    -- Don't clear busy here: the agent exits asynchronously and on_complete
+    -- (from on_exit) is what unlocks input. Clearing now would let a second send
+    -- double-run the author against the still-dying process.
   end
 end
 
@@ -2583,40 +2658,52 @@ local function update_submit()
     vim.notify("nvime plan: an update is still running — <C-c> to cancel", vim.log.levels.INFO)
     return
   end
-  if not (U.input_buf and vim.api.nvim_buf_is_valid(U.input_buf)) then
+  if not chat_valid() then
     return
   end
-  local text = vim.trim(table.concat(vim.api.nvim_buf_get_lines(U.input_buf, 0, -1, false), "\n"))
+  local text = vim.trim(table.concat(current_input_lines(), "\n"))
   if text == "" then
     return
   end
-  vim.bo[U.input_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(U.input_buf, 0, -1, false, { "" })
+  update_drafts[U.plan_id] = nil
 
-  update_log_line("")
-  update_log_line("▌ you")
+  -- Convert the input region into a sent "you" turn.
+  local block = { "▌ you" }
   for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
-    update_log_line("  " .. l)
+    block[#block + 1] = "  " .. l
   end
-  update_log_line("")
-  update_log_line("▌ author")
+  block[#block + 1] = ""
+  block[#block + 1] = "▌ author"
+  vim.bo[U.chat_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(U.chat_buf, U.input_start - 1, -1, false, block)
   update_set_busy(true)
+  decorate_chat()
+  scroll_chat_bottom()
 
+  local gen = U.gen
   M.create({
     intent = text,
     refine_id = U.plan_id,
-    on_stream = update_log_append,
+    on_stream = function(t)
+      if gen == U.gen then
+        chat_append(t)
+      end
+    end,
     on_complete = function(_, status)
+      if gen ~= U.gen then
+        return -- a stale run from a closed/superseded session
+      end
       update_set_busy(false)
-      update_log_line("")
+      chat_line("")
       if status == "ok" then
-        update_log_line("✓ plan updated")
+        chat_line("✓ plan updated")
         render_update_plan()
       else
-        update_log_line("⚠ no change to the plan (" .. tostring(status) .. ") — try rephrasing")
+        chat_line("⚠ no change to the plan (" .. tostring(status) .. ") — try rephrasing")
       end
-      if U.input_win and vim.api.nvim_win_is_valid(U.input_win) then
-        pcall(vim.api.nvim_set_current_win, U.input_win)
+      begin_input(nil)
+      if U.chat_win and vim.api.nvim_win_is_valid(U.chat_win) then
+        pcall(vim.api.nvim_set_current_win, U.chat_win)
         vim.cmd("startinsert")
       end
     end,
@@ -2635,40 +2722,43 @@ local function update_help_sections()
     {
       heading = "Window",
       rows = {
-        { "<Tab>", "jump to the message input" },
-        { "q", "close the update chat" },
+        { "<Tab>", "toggle between the chat and the plan pane" },
+        { "q", "close (your unsent draft is kept)" },
         { "g?", "toggle this help" },
       },
     },
   }
 end
 
+local function update_help()
+  keyhelp.toggle({
+    title = "update plan keys",
+    sections = update_help_sections(),
+    parent_winid = vim.api.nvim_get_current_win(),
+  })
+end
+
+local function focus_other()
+  local target = (vim.api.nvim_get_current_win() == U.chat_win) and U.plan_win or U.chat_win
+  if target and vim.api.nvim_win_is_valid(target) then
+    vim.api.nvim_set_current_win(target)
+  end
+end
+
 local function install_update_keymaps()
-  local function help()
-    keyhelp.toggle({
-      title = "update plan keys",
-      sections = update_help_sections(),
-      parent_winid = vim.api.nvim_get_current_win(),
-    })
-  end
-  -- Input: send / cancel from insert + normal mode.
-  local iopts = { buffer = U.input_buf, silent = true, nowait = true }
-  vim.keymap.set({ "n", "i" }, "<C-s>", update_submit, iopts)
-  vim.keymap.set({ "n", "i" }, "<C-c>", update_cancel, iopts)
-  vim.keymap.set("n", "q", update_close, iopts)
-  vim.keymap.set("n", "g?", help, iopts)
-  -- Transcript + plan panes: close, hop to input, help.
-  for _, buf in ipairs({ U.log_buf, U.plan_buf }) do
-    local opts = { buffer = buf, silent = true, nowait = true }
-    vim.keymap.set("n", "q", update_close, opts)
-    vim.keymap.set("n", "g?", help, opts)
-    vim.keymap.set("n", "<Tab>", function()
-      if U.input_win and vim.api.nvim_win_is_valid(U.input_win) then
-        vim.api.nvim_set_current_win(U.input_win)
-        vim.cmd("startinsert")
-      end
-    end, opts)
-  end
+  -- Chat pane (the single transcript+input buffer): send / cancel from insert
+  -- and normal mode; q closes (the draft is saved first).
+  local copts = { buffer = U.chat_buf, silent = true, nowait = true }
+  vim.keymap.set({ "n", "i" }, "<C-s>", update_submit, copts)
+  vim.keymap.set({ "n", "i" }, "<C-c>", update_cancel, copts)
+  vim.keymap.set("n", "q", update_close, copts)
+  vim.keymap.set("n", "g?", update_help, copts)
+  vim.keymap.set("n", "<Tab>", focus_other, copts)
+  -- Plan pane (read-only reference): close, hop back to the chat, help.
+  local popts = { buffer = U.plan_buf, silent = true, nowait = true }
+  vim.keymap.set("n", "q", update_close, popts)
+  vim.keymap.set("n", "g?", update_help, popts)
+  vim.keymap.set("n", "<Tab>", focus_other, popts)
 end
 
 function M.update_chat(plan_id)
@@ -2679,22 +2769,27 @@ function M.update_chat(plan_id)
   end
   -- Updating only makes sense before the plan is committed to code (phase 0).
   if plan_phase(plan) >= PHASE.SCAFFOLD then
+    vim.notify("nvime plan: past phase 0 — opening its current phase instead", vim.log.levels.INFO)
     open_phase(plan)
     return
   end
   if update_is_open() and U.plan_id == plan_id then
     vim.api.nvim_set_current_tabpage(U.tabpage)
+    if U.chat_win and vim.api.nvim_win_is_valid(U.chat_win) then
+      vim.api.nvim_set_current_win(U.chat_win)
+    end
     return
   end
   if update_is_open() then
     update_close()
   end
   U.plan_id = plan_id
+  U.busy = false
 
   vim.cmd("tabnew")
   U.tabpage = vim.api.nvim_get_current_tabpage()
-  -- The initial window hosts the transcript; split a plan pane off to the left.
-  U.log_win = vim.api.nvim_get_current_win()
+  -- The initial window becomes the chat pane; split the plan pane off to the left.
+  U.chat_win = vim.api.nvim_get_current_win()
   vim.cmd("topleft vsplit")
   U.plan_win = vim.api.nvim_get_current_win()
   pcall(vim.api.nvim_win_set_width, U.plan_win, math.max(56, math.floor(vim.o.columns * 0.5)))
@@ -2703,31 +2798,24 @@ function M.update_chat(plan_id)
   configure_window(U.plan_win)
 
   ui.ensure_highlights()
-  U.log_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[U.log_buf].bufhidden = "wipe"
-  vim.bo[U.log_buf].filetype = "nvime"
-  vim.api.nvim_win_set_buf(U.log_win, U.log_buf)
-  ui.configure_panel_window(U.log_win, { wrap = true, cursorline = false })
+  U.chat_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[U.chat_buf].bufhidden = "wipe"
+  vim.bo[U.chat_buf].filetype = "nvime"
+  vim.api.nvim_win_set_buf(U.chat_win, U.chat_buf)
+  ui.configure_panel_window(U.chat_win, { wrap = true, cursorline = false })
+  -- Persist the draft if the tab is closed by any means (not just q).
+  vim.api.nvim_create_autocmd("BufWinLeave", { buffer = U.chat_buf, callback = save_draft })
 
-  vim.api.nvim_set_current_win(U.log_win)
-  vim.cmd("belowright split")
-  U.input_win = vim.api.nvim_get_current_win()
-  pcall(vim.api.nvim_win_set_height, U.input_win, 6)
-  U.input_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[U.input_buf].bufhidden = "wipe"
-  vim.api.nvim_buf_set_lines(U.input_buf, 0, -1, false, { "" })
-  vim.api.nvim_win_set_buf(U.input_win, U.input_buf)
-  ui.configure_panel_window(U.input_win, { wrap = true, cursorline = false })
-
-  update_log_line("  " .. ui.icon("brand") .. "  update plan · " .. (plan.title or plan_id))
-  update_log_line("  Tell the author what to change — e.g. “rework step 2 to use a deque, and")
-  update_log_line("  drop step 4”. It edits the plan in place; the left pane refreshes.")
-  update_log_line("  <C-s> send · q close · re-plan (gr in the plan pane) for a full rewrite.")
-  update_log_line(string.rep("─", 58))
+  chat_line("  " .. ui.icon("brand") .. "  update plan · " .. (plan.title or plan_id))
+  chat_line("  Tell the author what to change — e.g. “rework step 2 to use a deque, and")
+  chat_line("  drop step 4”. It edits the plan in place; the plan pane refreshes.")
+  chat_line("  <C-s> send · q close · gr (in the plan pane) re-plans from scratch.")
+  chat_line(string.rep("─", 58))
+  begin_input(update_drafts[plan_id])
 
   install_update_keymaps()
   update_set_busy(false)
-  vim.api.nvim_set_current_win(U.input_win)
+  vim.api.nvim_set_current_win(U.chat_win)
   vim.cmd("startinsert")
 end
 M.update = M.update_chat
@@ -2904,7 +2992,7 @@ refresh_picker = function()
   end
 
   push("  " .. string.rep("─", 76), "NvimePlanRule")
-  push("    <CR> open    n new    R refine    dd delete    r refresh    q close", "NvimePlanFooter")
+  push("    <CR> open    n new    R re-plan    dd delete    r refresh    q close", "NvimePlanFooter")
   push("")
 
   local bufnr = panel.bufnr
@@ -2993,7 +3081,7 @@ install_picker_keymaps = function(bufnr)
       return
     end
     M.replan(id)
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: refine" }))
+  end, vim.tbl_extend("force", opts, { desc = "nvime plan: re-plan (full rewrite)" }))
 
   vim.keymap.set("n", "dd", function()
     local id = plan_id_at_cursor()
@@ -3037,7 +3125,7 @@ function M.picker()
     border = dim.border,
     title = " " .. brand .. "  nvime plans ",
     title_pos = "center",
-    footer = " <CR> open · n new · R refine · dd delete · r refresh · q close ",
+    footer = " <CR> open · n new · R re-plan · dd delete · r refresh · q close ",
     footer_pos = "center",
     zindex = 54,
     focusable = true,

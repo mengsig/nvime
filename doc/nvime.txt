@@ -865,8 +865,8 @@ Notes:
       plan.test_runner.
     - Phase-0 author session continuity: the captured plan_author session is
       stored on plan.json under author_provider_sessions and resumed when you
-      refine (gd/gr). Press gN (or :NvimePlan reset-session <id> [provider]) to
-      clear it and force the next refinement to start fresh.
+      update (gu) or re-plan (gr). Press gN (or :NvimePlan reset-session <id>
+      [provider]) to clear it and force the next refinement to start fresh.
 
 Plan picker buffer mappings (nvime://plans):
     <CR>            open the plan under the cursor
