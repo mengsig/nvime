@@ -21,13 +21,21 @@ It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex 
 
 ### Plan view (phase 0)
 
-`<CR>` on a plan row opens the phase-0 research view — sectioned WHY / ACCEPTANCE / FILES / STEPS with the proposed roadmap, the phase banner, and a session-continuity badge. Press `<CR>` or `ga` to **agree** and start phase 1 (the agent scaffolds `TODO(nvime):` markers in an isolated worktree). `gd` refines the plan, `gr` replans, `gN` resets the author session.
+`<CR>` on a plan row opens the phase-0 research view — sectioned WHY / ACCEPTANCE / FILES / STEPS with the proposed roadmap, the `research → scaffold → implement` phase track, and a session-continuity badge. Press `<CR>` or `ga` to **agree** and start phase 1 (the agent scaffolds `TODO(nvime):` markers in an isolated worktree). `gd` refines the plan, `gr` replans, `gN` resets the author session.
 
-![nvime plan view](docs/plan-view.png)
+![nvime plan phase 0](docs/plan-phase0-research.png)
 
 ### Phase 1 / 2 review
 
-Phases 1 (scaffold) and 2 (implement) run in the Big Change review view: a file→block tree on the left, the real worktree file (editable — change the TODOs in place) on the right. Phase 1 is *vibe* (approve to clear, `r` to ask the agent to revise); `M` advances to phase 2, where you choose the review strictness and the agent implements before you review and merge.
+Phases 1 (scaffold) and 2 (implement) run in the Big Change review view: a file→block tree on the left, the real worktree file (editable — change the TODOs in place) on the right. Phase 1 is *vibe* (approve to clear, `r` to ask the agent to revise); `M` advances to phase 2, where you choose the review strictness (`require understanding?` — no → vibe, yes → easy), the agent implements, and you review block-by-block before `M` merges.
+
+Phase 1 — review the inert `TODO(nvime):` scaffolding (`M advance → implement`):
+
+![nvime plan phase 1 scaffold](docs/plan-phase1-scaffold.png)
+
+Phase 2 — review the implementation at your chosen strictness (`M merge → branch`):
+
+![nvime plan phase 2 implement](docs/plan-phase2-implement.png)
 
 ### Plan compose
 
@@ -707,4 +715,11 @@ Prompt-performance exercises live in [doc/AGENT_EXERCISES.md](doc/AGENT_EXERCISE
 ```sh
 scripts/agent-exercises --list
 scripts/agent-exercises --provider codex --mode nvime --exercise all
+```
+
+Plan-mode exercises drive the **full three-phase flow** (scaffold → implement) against throwaway git repos and run each fixture's hidden test on the produced code. Offline + deterministic by default (a mock agent writes each fixture's golden output, validating the worktree / diff / block-extraction / phase-transition orchestration); `NVIME_PLAN_LIVE=1` swaps in the real provider to measure model efficacy on the same fixtures (1 medium + 2 extreme):
+
+```sh
+scripts/plan-exercises                      # mock (offline, deterministic)
+NVIME_PLAN_LIVE=1 scripts/plan-exercises    # real provider (efficacy)
 ```

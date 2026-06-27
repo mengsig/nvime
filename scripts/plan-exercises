@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+# nvime plan-mode exercise harness.
+#
+# Drives the full three-phase Plan flow (scaffold → implement) against throwaway
+# git repos and runs each fixture's hidden test against the produced code.
+#
+#   scripts/plan-exercises                 # offline, deterministic (mock agent)
+#   NVIME_PLAN_LIVE=1 scripts/plan-exercises   # real provider (measures efficacy)
+#   NVIME_PLAN_ONLY=0101-slugify scripts/plan-exercises   # one fixture
+#
+# Exits non-zero if any fixture fails.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec nvim --headless -u NONE \
+  -c "set rtp^=$repo_root" \
+  -c "luafile $repo_root/scripts/plan-exercises.lua"
