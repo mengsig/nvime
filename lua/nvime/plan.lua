@@ -7,7 +7,7 @@ local ui = require("nvime.ui")
 
 local M = {}
 
-local SCHEMA_VERSION = 1
+local SCHEMA_VERSION = 2
 local PLAN_NS = vim.api.nvim_create_namespace("nvime.plan.view")
 local PICKER_NS = vim.api.nvim_create_namespace("nvime.plan.picker")
 local BACKDROP_NS = vim.api.nvim_create_namespace("nvime.plan.backdrop")
@@ -19,21 +19,12 @@ local STATUSES = { "pending", "in_progress", "done", "blocked", "abandoned" }
 local function plan_help_sections()
   return {
     {
-      heading = "Run",
+      heading = "Phase 0 · research",
       rows = {
-        { "<CR>", "execute the step under the cursor" },
-        { "gA", "run the next pending step" },
-        { "gT", "run the step's tests" },
-        { "gW", "scaffold a regression test" },
-        { "gE", "edit the intent before firing" },
-      },
-    },
-    {
-      heading = "Step status",
-      rows = {
-        { "gx", "mark the step done" },
-        { "gp", "mark the step pending" },
-        { "gB", "mark the step blocked" },
+        { "<CR>  ga", "agree to the plan → start phase 1 (scaffold TODOs)" },
+        { "gd", "refine / discuss the plan" },
+        { "gr", "replan from here" },
+        { "gN", "reset the provider session" },
       },
     },
     {
@@ -42,14 +33,6 @@ local function plan_help_sections()
         { "]s  [s", "next / previous step" },
         { "o", "open the step's file" },
         { "c", "copy the step intent" },
-      },
-    },
-    {
-      heading = "Plan",
-      rows = {
-        { "gd", "refine / discuss the plan" },
-        { "gr", "replan from here" },
-        { "gN", "reset the provider session" },
       },
     },
     {
@@ -322,6 +305,13 @@ local function migrate_plan(plan)
     step.depends_on = step.depends_on or {}
     step.tests = step.tests or {}
   end
+  -- v2: the phased lane. A freshly authored plan (or a migrated v1) starts in
+  -- phase 0 (research) until the user agrees; phases 1 (scaffold TODOs) and 2
+  -- (implement) run through a linked Big Change worktree session.
+  plan.phase = tonumber(plan.phase) or 0
+  plan.phase0_agreed = plan.phase0_agreed == true
+  plan.phase1_agreed = plan.phase1_agreed == true
+  plan.bigchange_session_id = tonumber(plan.bigchange_session_id)
   return plan
 end
 
@@ -683,6 +673,12 @@ local install_picker_keymaps
 local refresh_picker
 local picker_winid
 local close_picker
+-- Phased flow (phase 0 research → phase 1 scaffold → phase 2 implement). These
+-- reference each other and the plan view, so forward-declare them here.
+local open_phase
+local advance_to_implement
+local finalize_plan
+local agree_and_scaffold
 
 local function render_plan_lines(plan)
   local lines = {}
@@ -835,6 +831,15 @@ local function render_plan_lines(plan)
   push_rule()
   push_blank()
 
+  -- Phase banner: where this plan is in the phased flow and the next action.
+  do
+    local agreed = plan.phase0_agreed == true
+    local prow = push("  " .. glyph_or_bar("review", "  ") .. "PHASE 0 · research" .. (agreed and "  (agreed)" or ""), "NvimePlanHeading")
+    mark_range(prow, 2, #lines[prow + 1], "NvimePlanHeading")
+    push("      press <CR> / ga to agree → phase 1: the agent scaffolds TODOs you review", "NvimePlanWhy")
+    push_blank()
+  end
+
   if plan.why and plan.why ~= "" then
     push_section("WHY")
     for _, paragraph in ipairs(vim.split(plan.why, "\n", { plain = true })) do
@@ -938,9 +943,8 @@ local function render_plan_lines(plan)
   end
 
   push_rule()
-  push("    <CR> exec   gE edit-then-exec   gx done   gp pending   gB blocked   gT tests", "NvimePlanFooter")
-  push("    ]s [s navigate       gA run next pending   gW write test   gd refine   gr replan", "NvimePlanFooter")
-  push("    gN reset session     o open file           c copy intent   ? help     q close", "NvimePlanFooter")
+  push("    <CR>/ga agree → scaffold      gd refine      gr replan      gN reset session", "NvimePlanFooter")
+  push("    ]s [s navigate    o open file    c copy intent    g? keys    q close", "NvimePlanFooter")
   push_blank()
 
   return lines, marks, step_index
@@ -966,7 +970,7 @@ local function open_plan_window(bufnr, title)
     border = dim.border,
     title = " " .. brand .. "  " .. title .. " ",
     title_pos = "center",
-    footer = " <CR> exec · gx done · ]s/[s nav · gd discuss · gr replan · q close ",
+    footer = " <CR>/ga agree → scaffold · gd refine · gr replan · ]s/[s nav · q close ",
     footer_pos = "center",
     zindex = 54,
     focusable = true,
@@ -2607,27 +2611,360 @@ end
 -- Plan view keymaps
 -- ============================================================================
 
+-- ============================================================================
+-- Phased flow: phase 0 (research + agree) → 1 (scaffold TODOs) → 2 (implement)
+-- ============================================================================
+-- Phases 1 and 2 reuse the Big Change engine. The agent works in an isolated
+-- git worktree: in phase 1 it writes INERT TODO scaffolding (reviewed at vibe so
+-- you shape it freely / edit it directly / ask the agent to revise it); in phase
+-- 2 it implements that scaffolding (reviewed at vibe or easy). The plan owns the
+-- worktree session via plan.bigchange_session_id; the runtime review hooks
+-- (difficulty + the M completion action) are re-established on every route-in,
+-- so the link survives a restart.
+
+local PHASE = { RESEARCH = 0, SCAFFOLD = 1, IMPLEMENT = 2 }
+
+local function plan_phase(plan)
+  return tonumber(plan and plan.phase) or 0
+end
+M._plan_phase = plan_phase
+
+-- Render the plan as a compact markdown spec the worktree agent builds against.
+local function plan_spec_markdown(plan)
+  local lines = { "# " .. (plan.title or plan.id or "plan") }
+  if plan.why and plan.why ~= "" then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "## Why"
+    lines[#lines + 1] = plan.why
+  end
+  if plan.files_estimated and #plan.files_estimated > 0 then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "## Files (estimated)"
+    for _, f in ipairs(plan.files_estimated) do
+      lines[#lines + 1] = "- " .. tostring(f)
+    end
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "## Ordered steps"
+  for _, step in ipairs(plan.steps or {}) do
+    local loc = step.file or "?"
+    local rng = range_label(step)
+    if rng and rng ~= "" then
+      loc = loc .. " · " .. rng
+    end
+    lines[#lines + 1] = string.format("%d. [%s] %s", step.id or 0, loc, (step.intent or ""):gsub("\n", " "))
+    if step.notes and step.notes ~= "" then
+      lines[#lines + 1] = "   - notes: " .. step.notes:gsub("\n", " ")
+    end
+  end
+  if plan.acceptance and #plan.acceptance > 0 then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "## Acceptance criteria"
+    for _, a in ipairs(plan.acceptance) do
+      local t = type(a) == "table" and (a.text or "") or tostring(a)
+      if t ~= "" then
+        lines[#lines + 1] = "- " .. t:gsub("\n", " ")
+      end
+    end
+  end
+  return table.concat(lines, "\n")
+end
+M._plan_spec_markdown = plan_spec_markdown
+
+-- Phase 1 build prompt: write inert TODO scaffolding only.
+local function scaffold_prompt(plan)
+  return table.concat({
+    "You are SCAFFOLDING a plan as TODO markers — NOT implementing it. You work in",
+    "the current directory (an isolated git worktree) with full tool access.",
+    "",
+    "Lay down the SKELETON of the change the plan describes, as INERT scaffolding only:",
+    "- At every site that will change, insert a comment `TODO(nvime): <what changes here & why>`",
+    "  (one line, using the file's own comment syntax).",
+    "- Create any NEW files the plan needs, containing only their TODO outline — plus empty",
+    "  function / type / interface signatures or stubs where they pin the design.",
+    "- Add type / struct / interface definitions or signatures when they clarify the design, but",
+    "  with NO function bodies and NO behavior.",
+    "",
+    "HARD RULES:",
+    "- Implement NO behavior. No logic, no real function bodies, no wiring that runs.",
+    "- Do not delete or rewrite existing code except to add a TODO comment beside it.",
+    "- Keep the repo parseable: a stub may error / pass / throw / return a zero value, but must",
+    "  not change runtime behavior.",
+    "- Do NOT git commit or git push. Leave everything in the working tree.",
+    "- When done, output a SHORT (<= 5 line) summary of where you placed TODOs. No plan dump.",
+    "",
+    "<plan>",
+    plan_spec_markdown(plan),
+    "</plan>",
+  }, "\n")
+end
+M._scaffold_prompt = scaffold_prompt
+
+-- Phase 2 build prompt: implement the reviewed TODO scaffolding.
+local function implement_prompt(plan)
+  return table.concat({
+    "You are IMPLEMENTING a plan whose TODO scaffolding already exists in this worktree.",
+    "The user reviewed and may have HAND-EDITED the TODO comments and stubs — they are",
+    "authoritative. You work in the current directory (an isolated git worktree) with full",
+    "tool access.",
+    "",
+    "Requirements:",
+    "- Read the current files first. Find every `TODO(nvime):` marker, implement it fully, and",
+    "  REMOVE the marker once done.",
+    "- Honor the user's edits to the scaffolding. Match the surrounding code's style and idioms.",
+    "- Implement everything the plan asks for. Run the project's tests / build if present and fix",
+    "  what you break.",
+    "- Do NOT git commit or git push. Leave all changes in the working tree.",
+    "- When done, output a SHORT (<= 5 line) summary of what you implemented. No plan dump.",
+    "",
+    "<plan>",
+    plan_spec_markdown(plan),
+    "</plan>",
+  }, "\n")
+end
+M._implement_prompt = implement_prompt
+
+local function bc_store()
+  return require("nvime.bigchange.store")
+end
+
+-- The Big Change worktree session backing this plan's phases 1–2 (or nil).
+local function linked_session(plan)
+  if not plan or not plan.bigchange_session_id then
+    return nil
+  end
+  return bc_store().get(plan.bigchange_session_id)
+end
+M._linked_session = linked_session
+
+local function ensure_linked_session(plan)
+  local store_bc = bc_store()
+  local existing = linked_session(plan)
+  if existing then
+    return existing
+  end
+  local provider = (state.config and state.config.provider) or "claude"
+  local session = store_bc.create({
+    title = "Plan " .. (plan.id or "?") .. " · " .. (plan.title or "scaffold"),
+    difficulty = "vibe",
+    provider = provider,
+  })
+  session.plan_id = plan.id
+  session.spec = plan_spec_markdown(plan)
+  session.goal = plan.title
+  store_bc.touch(session)
+  plan.bigchange_session_id = session.id
+  persist_plan(plan)
+  return session
+end
+
+-- (Re)establish the runtime review hooks for the current phase. These hold
+-- functions, so they are never serialized — set fresh on every route-in. The
+-- closures capture plan_id (a string) and re-fetch, so a persist/reload between
+-- setting and firing can't strand a stale plan table.
+local function set_review_hooks(plan, session)
+  local plan_id = plan.id
+  if plan_phase(plan) == PHASE.SCAFFOLD then
+    session.review_prompt_note = "The user may have hand-edited the TODO scaffolding directly in this worktree; the worktree files are the source of truth — read them before revising."
+    session.review_complete = {
+      label = "advance → implement",
+      run = function()
+        advance_to_implement(plan_id)
+      end,
+    }
+  else
+    session.review_prompt_note = nil
+    session.review_complete = {
+      label = "merge → branch",
+      run = function(sess, rerender)
+        require("nvime.bigchange.merge").start(sess, function()
+          finalize_plan(plan_id)
+          if rerender then
+            rerender()
+          end
+        end)
+      end,
+    }
+  end
+end
+
+-- Kick the worktree build for the current phase (scaffold or implement). On
+-- completion the Big Change build flow extracts review blocks and opens the
+-- review with the hooks we set on the session.
+local function start_phase_build(plan, session)
+  local build = require("nvime.bigchange.build")
+  session.spec = plan_spec_markdown(plan)
+  bc_store().touch(session)
+  local opts
+  if plan_phase(plan) == PHASE.SCAFFOLD then
+    opts = {
+      prompt = scaffold_prompt(plan),
+      heading = ui.icon("brand") .. "  Plan " .. (plan.id or "") .. " · scaffolding TODOs (phase 1)",
+      building_label = "Agent is laying down TODO scaffolding (inert — no behavior). This may take a moment…",
+    }
+  else
+    opts = {
+      prompt = implement_prompt(plan),
+      heading = ui.icon("brand") .. "  Plan " .. (plan.id or "") .. " · implementing (phase 2)",
+      building_label = "Agent is implementing the reviewed TODOs full-auto. This may take a while…",
+    }
+  end
+  build.start(session, opts)
+end
+
+-- Route into phases 1/2: resume an in-flight build, reopen an existing review,
+-- or start a fresh build. Hooks are always re-established first.
+open_phase = function(plan)
+  local store_bc = bc_store()
+  local session = ensure_linked_session(plan)
+  set_review_hooks(plan, session)
+  store_bc.set_active(session.id)
+  if session.busy then
+    require("nvime.bigchange.build").open(session)
+    return
+  end
+  if session.blocks and #session.blocks > 0 then
+    require("nvime.bigchange.review").open(session)
+    return
+  end
+  start_phase_build(plan, session)
+end
+M._open_phase = open_phase
+
+-- Transition phase 1 → 2 with the chosen review strictness (no → vibe,
+-- yes → easy), then implement the reviewed scaffolding. The require-understanding
+-- question is asked by advance_to_implement; this does the state change so tests
+-- can drive it directly.
+local function enter_implement(plan_id, require_understanding)
+  local plan = M.get(plan_id)
+  if not plan then
+    return
+  end
+  local session = linked_session(plan)
+  if not session then
+    return
+  end
+  local store_bc = bc_store()
+  plan.require_understanding = require_understanding == true
+  plan.phase1_agreed = true
+  plan.phase = PHASE.IMPLEMENT
+  persist_plan(plan)
+  plan = M.get(plan_id) or plan
+  session.difficulty = plan.require_understanding and "easy" or "vibe"
+  session.blocks = nil -- fresh review for the implementation diff
+  store_bc.touch(session)
+  set_review_hooks(plan, session)
+  require("nvime.bigchange.review").close()
+  start_phase_build(plan, session)
+end
+M._enter_implement = enter_implement
+
+-- Phase 1 → 2: ask the "require understanding?" question, then implement.
+advance_to_implement = function(plan_id)
+  local plan = M.get(plan_id)
+  if not plan then
+    return
+  end
+  if not linked_session(plan) then
+    return
+  end
+  local items = {
+    { req = false, label = "No  — vibe: review without a comprehension gate (approve to clear)" },
+    { req = true, label = "Yes — easy: explain each block at a light bar (≥ 40%)" },
+  }
+  vim.ui.select(items, {
+    prompt = "Phase 2 review — require understanding?",
+    format_item = function(it)
+      return it.label
+    end,
+  }, function(choice)
+    if not choice then
+      return
+    end
+    enter_implement(plan_id, choice.req)
+  end)
+end
+
+-- Phase 2 merge landed: record the branch on the plan and announce it.
+finalize_plan = function(plan_id)
+  local plan = M.get(plan_id)
+  if not plan then
+    return
+  end
+  local session = linked_session(plan)
+  plan.merged_branch = session and session.merged_branch
+  plan.completed_at = now_ts()
+  persist_plan(plan)
+  vim.notify(
+    string.format(
+      "nvime plan %s: implemented & merged onto '%s' (unstaged). Use git to stage & commit.",
+      plan.id,
+      (session and session.merged_branch) or "?"
+    ),
+    vim.log.levels.INFO
+  )
+end
+M._finalize_plan = function(plan_id)
+  return finalize_plan(plan_id)
+end
+
+-- Transition phase 0 → 1 and start the scaffold build. No confirmation; the
+-- view binding asks first via agree_and_scaffold. Exposed for tests.
+local function enter_scaffold(plan_id)
+  local plan = M.get(plan_id)
+  if not plan then
+    return
+  end
+  plan.phase0_agreed = true
+  plan.phase = PHASE.SCAFFOLD
+  persist_plan(plan)
+  plan = M.get(plan_id) or plan
+  close_plan_view()
+  open_phase(plan)
+end
+M._enter_scaffold = enter_scaffold
+
+-- Phase 0 → 1: the agree gate. Confirm, then enter the scaffold phase.
+agree_and_scaffold = function(plan_id)
+  local plan = M.get(plan_id)
+  if not plan then
+    return
+  end
+  if plan_phase(plan) ~= PHASE.RESEARCH then
+    open_phase(plan)
+    return
+  end
+  if not plan.steps or #plan.steps == 0 then
+    vim.notify("nvime plan: nothing to scaffold yet — author a plan first", vim.log.levels.WARN)
+    return
+  end
+  local choice = vim.fn.confirm(
+    "Agree to this plan and start phase 1?\nThe agent writes TODO scaffolding (no behavior) in an isolated worktree you then review.",
+    "&Agree & scaffold\n&Cancel",
+    1
+  )
+  if choice ~= 1 then
+    return
+  end
+  enter_scaffold(plan_id)
+end
+M.agree = agree_and_scaffold
+
 install_plan_view_keymaps = function(bufnr, plan_id, step_index)
   -- Defensive: clear any stale buffer-local maps so reusing the buffer across
-  -- opens doesn't leave dead closures, and so the global `gx` (vim.ui.open
-  -- in nvim 0.10+) can't sneak through if a previous install_*  removed and
+  -- opens doesn't leave dead closures, and so a global `ga`/`gx` (vim.ui.open
+  -- in nvim 0.10+) can't sneak through if a previous install_* removed and
   -- failed to re-set our binding.
   for _, lhs in ipairs({
     "<CR>",
-    "gx",
-    "gp",
-    "gB",
-    "gT",
+    "ga",
     "]s",
     "[s",
-    "gA",
     "o",
     "c",
     "gd",
     "gr",
-    "gW",
     "gN",
-    "gE",
     "q",
     "<Esc>",
     "?",
@@ -2644,87 +2981,25 @@ install_plan_view_keymaps = function(bufnr, plan_id, step_index)
     return id
   end
 
-  vim.keymap.set("n", "<CR>", function()
-    local id = step_or_warn()
-    if id then
-      M.execute_step(plan_id, id)
-    end
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: execute step" }))
-
-  vim.keymap.set("n", "gx", function()
-    local id = step_or_warn()
-    if id then
-      set_step_status(plan_id, id, "done")
-      M.open(plan_id)
-    end
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: mark step done" }))
-
-  vim.keymap.set("n", "gp", function()
-    local id = step_or_warn()
-    if id then
-      set_step_status(plan_id, id, "pending")
-      M.open(plan_id)
-    end
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: mark step pending" }))
-
-  vim.keymap.set("n", "gB", function()
-    local id = step_or_warn()
-    if id then
-      set_step_status(plan_id, id, "blocked")
-      M.open(plan_id)
-    end
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: mark step blocked" }))
-
-  vim.keymap.set("n", "gT", function()
-    local id = step_or_warn()
-    if not id then
-      return
-    end
-    local plan = M.get(plan_id)
-    local step = plan and find_step(plan, id)
-    if not step or not step.tests or #step.tests == 0 then
-      vim.notify("nvime: step has no tests", vim.log.levels.INFO)
-      return
-    end
-    local cmd = table.concat(step.tests, " && ")
-    vim.notify("nvime: running tests — " .. cmd, vim.log.levels.INFO)
-    vim.cmd("botright split | resize 12 | terminal " .. vim.fn.shellescape("sh -lc '" .. cmd:gsub("'", "'\\''") .. "'"))
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: run step tests" }))
-
-  vim.keymap.set("n", "gW", function()
-    -- "g write-test" — fire the test scaffolder for the step under cursor.
-    -- Lands in tests/headless_spec.lua (or your configured plan.test_file)
-    -- through the existing edit lane diff review.
-    local id = step_or_warn()
-    if id then
-      M.add_test_for_step(plan_id, id)
-    end
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: scaffold a regression test" }))
+  -- The phase-0 view's primary action: agree to the plan and start phase 1
+  -- (the agent writes TODO scaffolding in an isolated worktree you then review).
+  local function agree()
+    agree_and_scaffold(plan_id)
+  end
+  vim.keymap.set("n", "<CR>", agree, vim.tbl_extend("force", opts, { desc = "nvime plan: agree & scaffold (phase 1)" }))
+  vim.keymap.set("n", "ga", agree, vim.tbl_extend("force", opts, { desc = "nvime plan: agree & scaffold (phase 1)" }))
 
   vim.keymap.set("n", "gN", function()
-    -- "g new-session" — clear the plan's captured provider session so the
-    -- next step / refinement starts fresh. Useful when the conversation has
-    -- gotten too long or off-track. Affects the current default provider;
-    -- pass a provider arg via :NvimePlan reset-session <id> [provider] for
-    -- finer control.
+    -- "g new-session" — clear the plan's captured author session so the next
+    -- refinement starts fresh. Useful when the research conversation has gotten
+    -- too long or off-track.
     local plan = M.get(plan_id)
     if not plan then
       return
     end
     local provider_name = (state.config and state.config.provider) or "claude"
     M.reset_session(plan_id, provider_name)
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: reset provider session (next step starts fresh)" }))
-
-  vim.keymap.set("n", "gE", function()
-    -- "g edit-then-execute" — open a compose buffer with the would-be intent
-    -- + plan context prefilled. The user can tweak (correct line numbers,
-    -- add hints, narrow the request) before <C-s> actually fires the
-    -- patch worker.
-    local id = step_or_warn()
-    if id then
-      M.compose_step(plan_id, id)
-    end
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: edit intent before firing" }))
+  end, vim.tbl_extend("force", opts, { desc = "nvime plan: reset provider session" }))
 
   vim.keymap.set("n", "]s", function()
     local row = vim.api.nvim_win_get_cursor(0)[1]
@@ -2759,24 +3034,6 @@ install_plan_view_keymaps = function(bufnr, plan_id, step_index)
       end
     end
   end, vim.tbl_extend("force", opts, { desc = "nvime plan: previous step" }))
-
-  vim.keymap.set("n", "gA", function()
-    local plan = M.get(plan_id)
-    if not plan then
-      return
-    end
-    local pending = {}
-    for _, step in ipairs(plan.steps or {}) do
-      if step_status(step) == "pending" then
-        pending[#pending + 1] = step.id
-      end
-    end
-    if #pending == 0 then
-      vim.notify("nvime: no pending steps to run", vim.log.levels.INFO)
-      return
-    end
-    M.execute_step(plan_id, pending[1])
-  end, vim.tbl_extend("force", opts, { desc = "nvime plan: run next pending" }))
 
   vim.keymap.set("n", "o", function()
     local id = step_or_warn()
@@ -2836,6 +3093,12 @@ function M.open(plan_id)
     vim.notify("nvime: unknown plan " .. tostring(plan_id), vim.log.levels.ERROR)
     return
   end
+  -- Phases 1–2 live in the linked Big Change worktree session (scaffold review,
+  -- implement review). Phase 0 is the research plan with the agree gate.
+  if plan_phase(plan) >= PHASE.SCAFFOLD then
+    open_phase(plan)
+    return
+  end
   local bufnr, _, step_index = render_plan(plan, { open = true })
   install_plan_view_keymaps(bufnr, plan.id, step_index)
 end
@@ -2874,9 +3137,9 @@ local AUTHOR_PROMPT_HEADER = table.concat({
   "",
   "Plan id format: `NNNN-<kebab-slug>`. Pick the next free 4-digit number by listing `.nvime/plans/`.",
   "",
-  "plan.json schema (version 1):",
+  "plan.json schema (version 2):",
   "{",
-  '  "version": 1,',
+  '  "version": 2,',
   '  "id": "NNNN-slug",',
   '  "title": "...",',
   '  "why": "...",',

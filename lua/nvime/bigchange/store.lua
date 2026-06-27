@@ -109,6 +109,10 @@ local function serialize(session)
     status = session.status,
     difficulty = session.difficulty,
     provider = session.provider,
+    -- When set, this session is owned by a phased Plan (lua/nvime/plan.lua):
+    -- it is the worktree/review/merge engine for that plan's scaffold +
+    -- implement phases. nil for an ordinary Big Change.
+    plan_id = session.plan_id,
     goal = session.goal,
     -- The user-authored brief (markdown) before intake; reopenable as a draft.
     draft = session.draft,

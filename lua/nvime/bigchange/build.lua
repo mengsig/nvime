@@ -159,11 +159,18 @@ local function build_done(session, text, result)
   end)
 end
 
-function M.start(session)
+-- opts (all optional) let another lane (e.g. the phased Plan flow) drive the
+-- same worktree build with a different prompt and progress copy, without
+-- changing Big Change's own behavior:
+--   opts.prompt          — the build prompt (defaults to agent.build_prompt)
+--   opts.heading         — panel header line (defaults to "Big Change: <title>")
+--   opts.building_label  — the "what the agent is doing" line
+function M.start(session, opts)
+  opts = opts or {}
   view.session = session
   view.lines = {}
   open_panel(session)
-  append(ui.icon("brand") .. "  Big Change: " .. (session.title or ""))
+  append(opts.heading or (ui.icon("brand") .. "  Big Change: " .. (session.title or "")))
   append("Creating isolated worktree…")
 
   local root, err = ensure_worktree(session)
@@ -174,7 +181,7 @@ function M.start(session)
   append("worktree: " .. session.worktree)
   append("base: " .. (session.base_branch or "?") .. " @ " .. (session.base_commit or ""):sub(1, 10))
   append("")
-  append("Agent is implementing the spec full-auto. This may take a while…")
+  append(opts.building_label or "Agent is implementing the spec full-auto. This may take a while…")
   append(
     "──────────────────────────────────────────────"
   )
@@ -187,7 +194,7 @@ function M.start(session)
     session = session,
     lane = "bigchange",
     cwd = session.worktree,
-    prompt = agent.build_prompt(session),
+    prompt = opts.prompt or agent.build_prompt(session),
     -- First build starts fresh IN the worktree; the spec carries all intake
     -- context, so we never resume the repo-root intake session here (it isn't
     -- resolvable from the worktree's project dir). Later worktree turns

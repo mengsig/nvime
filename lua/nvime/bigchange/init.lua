@@ -74,6 +74,13 @@ function M.open_session(id)
     vim.notify("nvime bigchange: session not found", vim.log.levels.WARN)
     return
   end
+  -- A plan-owned session (the worktree engine behind a phased Plan) is driven
+  -- by the Plan flow, which re-establishes the phase hooks (difficulty,
+  -- completion action) before opening the review. Hand off to it.
+  if session.plan_id and session.plan_id ~= "" then
+    require("nvime.plan").open(session.plan_id)
+    return
+  end
   store.set_active(session.id)
   local module_name = STATUS_SURFACE[session.status]
   local ok, surface = pcall(require, module_name)

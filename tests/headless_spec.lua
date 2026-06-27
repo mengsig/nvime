@@ -3149,9 +3149,9 @@ end
     g_help.callback()
     assert(keyhelp.is_open(), "plan g? opens the keyhelp overlay")
     local plan_help = table.concat(vim.api.nvim_buf_get_lines(state.panels.keyhelp.bufnr, 0, -1, false), "\n")
-    assert(plan_help:find("Run", 1, true), "plan help shows the Run section")
-    assert(plan_help:find("execute the step", 1, true), "plan help documents step execution")
-    assert(plan_help:find("Step status", 1, true), "plan help shows the Step status section")
+    assert(plan_help:find("Phase 0", 1, true), "plan help shows the Phase 0 section")
+    assert(plan_help:find("agree to the plan", 1, true), "plan help documents the agree gate")
+    assert(plan_help:find("Navigate", 1, true), "plan help shows the Navigate section")
     keyhelp.close()
   end
 
@@ -3213,6 +3213,171 @@ end
 
   -- compose_step exists and prefills the buffer with intent + plan-context
   assert(type(plan.compose_step) == "function", "plan: compose_step is exported")
+
+  -- ── Phased plan flow (phase 0 research → 1 scaffold → 2 implement) ──────────
+  do
+    local bc_store = require("nvime.bigchange.store")
+    local bc_build = require("nvime.bigchange.build")
+    local bc_review = require("nvime.bigchange.review")
+
+    -- Migration: a v1 plan loads as phase 0 / v2.
+    local pdir = tmp .. "/phased"
+    vim.fn.mkdir(pdir .. "/0001-phased", "p")
+    local v1 = {
+      version = 1,
+      id = "0001-phased",
+      title = "Phased demo",
+      why = "Demonstrate the phased flow.",
+      created_at = os.time(),
+      updated_at = os.time(),
+      files_estimated = { "lua/foo.lua" },
+      acceptance = { { id = 1, text = "tests pass", status = "pending" } },
+      steps = {
+        {
+          id = 1,
+          intent = "Add helper",
+          file = "lua/foo.lua",
+          range = { line1 = 1, line2 = 2 },
+          depends_on = {},
+          tests = {},
+          status = "pending",
+        },
+        { id = 2, intent = "Wire it up", file = "lua/bar.lua", range = "new", depends_on = { 1 }, tests = {}, status = "pending" },
+      },
+    }
+    local pfd = io.open(pdir .. "/0001-phased/plan.json", "w")
+    pfd:write(vim.json.encode(v1))
+    pfd:close()
+
+    state.config.plan.dir = pdir
+    state.plan.loaded = false
+    state.plan.plans = nil
+    local p = plan.get("0001-phased")
+    assert(p, "phased: plan loads")
+    assert_eq(p.version, 2, "phased: v1 migrates to v2")
+    assert_eq(plan._plan_phase(p), 0, "phased: migrated plan starts at phase 0")
+    assert(p.phase0_agreed == false, "phased: not yet agreed")
+
+    -- Spec markdown carries title / why / steps / acceptance.
+    local spec = plan._plan_spec_markdown(p)
+    assert(spec:find("# Phased demo", 1, true), "phased: spec has title")
+    assert(spec:find("## Ordered steps", 1, true), "phased: spec has steps")
+    assert(spec:find("Add helper", 1, true), "phased: spec lists step intent")
+    assert(spec:find("## Acceptance criteria", 1, true), "phased: spec has acceptance")
+
+    -- Scaffold + implement prompts hold their guardrails.
+    local sp = plan._scaffold_prompt(p)
+    assert(sp:find("TODO(nvime)", 1, true), "phased: scaffold prompt names the TODO marker")
+    assert(sp:find("Implement NO behavior", 1, true), "phased: scaffold prompt forbids behavior")
+    local ip = plan._implement_prompt(p)
+    assert(ip:find("REMOVE the marker", 1, true), "phased: implement prompt removes markers")
+    assert(ip:find("authoritative", 1, true), "phased: implement prompt honors user edits")
+
+    -- Stub the Big Change engine so transitions don't spawn an agent or persist.
+    local fake = { sessions = {}, next = 500, build_starts = {}, review_closed = 0 }
+    local saved = {
+      create = bc_store.create,
+      get = bc_store.get,
+      touch = bc_store.touch,
+      set_active = bc_store.set_active,
+      b_start = bc_build.start,
+      b_open = bc_build.open,
+      r_open = bc_review.open,
+      r_close = bc_review.close,
+    }
+    bc_store.create = function(opts)
+      fake.next = fake.next + 1
+      local s = {
+        id = fake.next,
+        title = opts.title,
+        difficulty = opts.difficulty,
+        provider = opts.provider,
+        status = bc_store.STATUS.INTAKE,
+        blocks = {},
+      }
+      fake.sessions[s.id] = s
+      return s
+    end
+    bc_store.get = function(id)
+      return fake.sessions[tonumber(id)]
+    end
+    bc_store.touch = function() end
+    bc_store.set_active = function() end
+    bc_build.start = function(session, o)
+      fake.build_starts[#fake.build_starts + 1] = { session = session, opts = o or {} }
+    end
+    bc_build.open = function() end
+    bc_review.open = function() end
+    bc_review.close = function()
+      fake.review_closed = fake.review_closed + 1
+    end
+
+    local ok_pcall, err_pcall = pcall(function()
+      -- Phase 0 → 1: agree gate transition.
+      plan._enter_scaffold("0001-phased")
+      local after1 = plan.get("0001-phased")
+      assert_eq(plan._plan_phase(after1), 1, "phased: enter_scaffold flips to phase 1")
+      assert(after1.phase0_agreed == true, "phased: phase0_agreed set")
+      assert(after1.bigchange_session_id, "phased: linked bigchange session created")
+      local sess = plan._linked_session(after1)
+      assert(sess and sess.plan_id == "0001-phased", "phased: session links back to plan")
+      assert_eq(#fake.build_starts, 1, "phased: scaffold build kicked")
+      assert(
+        fake.build_starts[1].opts.prompt:find("TODO(nvime)", 1, true),
+        "phased: scaffold build uses the scaffold prompt"
+      )
+      assert_eq(sess.difficulty, "vibe", "phased: phase 1 review is vibe")
+
+      -- Phase 1 → 2: choose "require understanding" = yes → easy.
+      plan._enter_implement("0001-phased", true)
+      local after2 = plan.get("0001-phased")
+      assert_eq(plan._plan_phase(after2), 2, "phased: enter_implement flips to phase 2")
+      assert(after2.require_understanding == true, "phased: require_understanding recorded")
+      assert(after2.phase1_agreed == true, "phased: phase1_agreed set")
+      local sess2 = plan._linked_session(after2)
+      assert_eq(sess2.difficulty, "easy", "phased: yes → easy difficulty")
+      assert(sess2.blocks == nil, "phased: phase-2 review starts fresh")
+      assert_eq(fake.review_closed, 1, "phased: phase-1 review tab closed")
+      assert_eq(#fake.build_starts, 2, "phased: implement build kicked")
+      assert(
+        fake.build_starts[2].opts.prompt:find("REMOVE the marker", 1, true),
+        "phased: implement build uses the implement prompt"
+      )
+
+      -- Finalize after merge records the branch + completion.
+      sess2.merged_branch = "plan/0001-phased"
+      plan._finalize_plan("0001-phased")
+      local done = plan.get("0001-phased")
+      assert_eq(done.merged_branch, "plan/0001-phased", "phased: finalize records the branch")
+      assert(done.completed_at, "phased: finalize stamps completion")
+    end)
+
+    -- Restore the real Big Change engine regardless of outcome.
+    bc_store.create, bc_store.get, bc_store.touch, bc_store.set_active =
+      saved.create, saved.get, saved.touch, saved.set_active
+    bc_build.start, bc_build.open = saved.b_start, saved.b_open
+    bc_review.open, bc_review.close = saved.r_open, saved.r_close
+    assert(ok_pcall, "phased: transitions run cleanly: " .. tostring(err_pcall))
+
+    -- Restore the prior plan dir so later assertions in this block still resolve.
+    state.config.plan.dir = plans_dir
+    state.plan.loaded = false
+    state.plan.plans = nil
+  end
+
+  -- Review completion-label seam: default merges; a plan hook overrides it, and
+  -- the grade prompt carries an optional lane note.
+  do
+    local bc_review = require("nvime.bigchange.review")
+    assert_eq(bc_review._complete_label({}), "merge", "review: default completion verb is merge")
+    assert_eq(
+      bc_review._complete_label({ review_complete = { label = "advance → implement" } }),
+      "advance → implement",
+      "review: plan hook overrides the completion verb"
+    )
+    local gp = bc_review._grade_prompt({ difficulty = "easy", review_prompt_note = "EDIT-NOTE-XYZ" }, {})
+    assert(gp:find("EDIT-NOTE-XYZ", 1, true), "review: grade prompt includes the lane note")
+  end
 
   -- Render must survive multi-line fields in plan.json (intent/notes/why/
   -- acceptance/title may all contain embedded newlines from JSON-encoded

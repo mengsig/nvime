@@ -88,6 +88,17 @@ local function threshold(session)
   return difficulty(session).threshold -- nil means vibe (auto-clear)
 end
 
+-- The verb shown on the "all cleared" completion action (M). A plain Big Change
+-- merges; a phased Plan overrides this (advance to implement / finalize) via a
+-- runtime `session.review_complete` hook that is never serialized.
+local function complete_label(session)
+  local rc = session and session.review_complete
+  if rc and rc.label and rc.label ~= "" then
+    return rc.label
+  end
+  return "merge"
+end
+
 local function get_block(id)
   for _, b in ipairs(R.session.blocks or {}) do
     if b.id == id then
@@ -250,7 +261,7 @@ local function render_left()
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
     lines[#lines + 1] = "  a approve · r request-changes"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
-    lines[#lines + 1] = "  <C-s> submit · M merge · q close · g? keys"
+    lines[#lines + 1] = "  <C-s> submit · M " .. complete_label(session) .. " · q close · g? keys"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
   end
 
@@ -754,6 +765,12 @@ local function grade_prompt(session, pending)
     '    "valid": <bool>, "revised": <bool>, "response": "..."}]',
     "",
   }
+  -- A lane-specific note (e.g. the Plan scaffold phase tells the agent the user
+  -- may have hand-edited the worktree files, which are the source of truth).
+  if session.review_prompt_note and session.review_prompt_note ~= "" then
+    lines[#lines + 1] = session.review_prompt_note
+    lines[#lines + 1] = ""
+  end
   for _, b in ipairs(pending) do
     lines[#lines + 1] = string.format("### Block %d — %s (%s) — action=%s", b.id, b.title, b.file, b.action)
     lines[#lines + 1] = "diff:"
@@ -886,8 +903,9 @@ local function submit_round()
           local pct = overall_grade(session)
           vim.notify(
             string.format(
-              "nvime bigchange: all blocks cleared — final grade %d%% — press M to merge 🔓",
-              pct or 100
+              "nvime: all blocks cleared — final grade %d%% — press M to %s 🔓",
+              pct or 100,
+              complete_label(session)
             ),
             vim.log.levels.INFO
           )
@@ -913,9 +931,16 @@ local function merge()
   if not all_cleared(R.session) then
     local cleared, total = progress(R.session)
     vim.notify(
-      string.format("nvime bigchange: merge locked 🔒 (%d/%d blocks cleared)", cleared, total),
+      string.format("nvime: %s locked 🔒 (%d/%d blocks cleared)", complete_label(R.session), cleared, total),
       vim.log.levels.WARN
     )
+    return
+  end
+  local rc = R.session.review_complete
+  if rc and type(rc.run) == "function" then
+    rc.run(R.session, function()
+      render()
+    end)
     return
   end
   require("nvime.bigchange.merge").start(R.session, function()
@@ -996,7 +1021,7 @@ local function review_help_sections()
       heading = "Round",
       rows = {
         { "<C-s>", "submit the round to the agent" },
-        { "M", "merge (unlocks once every block is cleared)" },
+        { "M", complete_label(R.session) .. " (unlocks once every block is cleared)" },
       },
     },
     {
@@ -1080,5 +1105,7 @@ end
 M._overall_grade = overall_grade
 M._apply_results = apply_results
 M._help_sections = review_help_sections
+M._complete_label = complete_label
+M._grade_prompt = grade_prompt
 
 return M
