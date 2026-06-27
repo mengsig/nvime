@@ -1623,8 +1623,9 @@ end
 -- review with the hooks we set on the session.
 local function start_phase_build(plan, session)
   local build = require("nvime.bigchange.build")
-  session.spec = plan_spec_markdown(plan)
-  bc_store().touch(session)
+  -- session.spec was set from the plan at link time (used only as a label in the
+  -- Big Change picker); the build prompt below derives its own spec from `plan`,
+  -- so there is nothing to recompute here.
   local opts
   if plan_phase(plan) == PHASE.SCAFFOLD then
     opts = {
