@@ -273,7 +273,7 @@ COMMANDS                                                        *nvime-commands*
 :NvimePlan agree <id>
 :NvimePlan refresh
 :NvimePlan delete <id>
-:NvimePlan discuss <id>
+:NvimePlan update <id>
 :NvimePlan reset-session <id> [provider]
         Drive the phased plan flow (see |nvime-plan|). With no args, opens the
         plan picker. `new` drafts a plan via the plan author agent — restricted
@@ -831,14 +831,21 @@ Plan storage:
 
 Plan view buffer mappings (nvime://plan/<id>, phase 0):
     <CR>, ga    agree to the plan → start phase 1 (scaffold TODOs)
-    gd          discuss/refine the plan (re-enters plan author lane)
-    gr          replan from this point
+    gu          update plan — open a chat to revise it in place (see below)
+    gr          re-plan — full rewrite from a fresh brief (compose buffer)
     gN          reset the plan's author session (next refinement starts fresh)
     ]s, [s      next/previous step
     o           open the step's file
     c           copy the step intent
     q, <Esc>    close the plan view
     g?, ?       show keymap help
+
+Update-plan chat (gu, or :NvimePlan update <id>): a tabpage with the live plan
+view on the left and a transcript + message input on the right. Each message
+resumes the plan-author session, edits plan.json in place, and re-renders the
+plan — so you can say "rework step 2 to use a deque, drop step 4" instead of
+re-typing a brief. <C-s> sends, <C-c> cancels an in-flight update, q closes.
+Use gr (re-plan) when you want a from-scratch rewrite instead.
 
 Phases 1 and 2 use the Big Change review mappings (see |nvime-bigchange|): a/r
 to approve/request-changes per block, <C-s> to submit a round, t to toggle

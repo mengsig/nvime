@@ -489,24 +489,24 @@ worktree/review/merge engine via a linked session (`plan.bigchange_session_id`).
 | `M.plans` | 355 | List all plans. |
 | `M.refresh` | 363 | Reload plans from disk. |
 | `M.get` | 369 | Fetch a plan by id. |
-| `M.set_step_status` | 1206 | Mark a step done/pending/blocked (+ plan.md changelog). |
-| `M.delete` | 1208 | Delete a plan. |
-| `M.detect_test_file` / `M.detect_test_runner` | 1378–1379 | Project test-detection helpers. |
-| `M.reset_session` | 1386 | Clear the captured author session (phase-0 refine). |
-| `M.agree` | 1759 | Agree to a plan → start phase 1 (scaffold). |
-| `M.open` | 1897 | Open a plan at its current phase (view or review). |
-| `M.create` | 2190 | Create a new plan from a brief (phase-0 author). |
-| `M.refine` | 2416 | Refine an existing plan via the model. |
-| `M.replan` | 2420 | Replan from scratch. |
-| `M.discuss` | 2424 | Discussion-mode interaction with the plan. |
-| `M.picker` | 2715 | Open the plan picker. |
-| `M.compose` | 2975 | Open the plan compose buffer. |
-| `M.prompt_new` | 3046 | Prompt for a new plan brief. |
-| `M.command` | 3054 | `:NvimePlan ...` dispatcher. |
-| `M.complete_subcommands` | 3141 | Tab-completion for `:NvimePlan`. |
-| `M.close_all` | 3168 | Close all plan UI windows. |
-| `M.focus` | 3177 | Focus the plan view. |
-| `M.reopen_run` | 3205 | Reopen the run-log panel. |
+| `M.delete` | 1205 | Delete a plan (discards its linked Big Change session). |
+| `M.reset_session` | 1402 | Clear the captured author session (phase-0 refine). |
+| `M.agree` | ~1775 | Agree to a plan → start phase 1 (scaffold). |
+| `M.open` | 1932 | Open a plan at its current phase (view or review). |
+| `M.create` | 2225 | Create / refine a plan (phase-0 author); `on_stream`/`on_complete` hooks let the update chat drive it. |
+| `M.refine` | 2468 | Refine an existing plan via the model. |
+| `M.replan` | 2472 | Re-plan from a fresh brief (full rewrite). |
+| `M.update_chat` / `M.update` | 2674 | Conversational "update plan" chat (phase 0). |
+| `M.discuss` | 2736 | Back-compat alias → opens the update chat. |
+| `M.picker` | 3026 | Open the plan picker. |
+| `M.compose` | 3286 | Open the plan compose buffer. |
+| `M.prompt_new` | 3357 | Prompt for a new plan brief. |
+| `M.command` | 3365 | `:NvimePlan ...` dispatcher. |
+| `M.complete_subcommands` | 3452 | Tab-completion for `:NvimePlan`. |
+| `M.close_all` | 3479 | Close all plan UI windows. |
+| `M.focus` | 3488 | Focus the plan view. |
+| `M.reopen_run` | 3516 | Reopen the run-log panel. |
+| `M.detect_test_file` / `M.detect_test_runner` | — | Project test-detection helpers (shared with test-loop). |
 
 Phase-flow test hooks: `M._plan_phase`, `M._plan_spec_markdown`,
 `M._scaffold_prompt`, `M._implement_prompt`, `M._linked_session`,

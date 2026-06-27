@@ -21,9 +21,15 @@ It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex 
 
 ### Plan view (phase 0)
 
-`<CR>` on a plan row opens the phase-0 research view — sectioned WHY / ACCEPTANCE / FILES / STEPS with the proposed roadmap, the `research → scaffold → implement` phase track, and a session-continuity badge. Press `<CR>` or `ga` to **agree** and start phase 1 (the agent scaffolds `TODO(nvime):` markers in an isolated worktree). `gd` refines the plan, `gr` replans, `gN` resets the author session.
+`<CR>` on a plan row opens the phase-0 research view — sectioned WHY / ACCEPTANCE / FILES / STEPS with the proposed roadmap, the `research → scaffold → implement` phase track, and a session-continuity badge. Press `<CR>` or `ga` to **agree** and start phase 1 (the agent scaffolds `TODO(nvime):` markers in an isolated worktree). `gN` resets the author session.
 
 ![nvime plan phase 0](docs/plan-phase0-research.png)
+
+### Update plan (chat)
+
+`gu` opens a conversation to revise the plan **in place** — the live plan view on the left, a transcript + input on the right. Say *"rework step 2 to only wrap GET/HEAD, and add a step 3 for the regression spec"* and the author (resuming its session) edits `plan.json` and the left pane refreshes. For a from-scratch rewrite, `gr` **re-plans** from a fresh brief.
+
+![nvime update plan chat](docs/plan-update-chat.png)
 
 ### Phase 1 / 2 review
 

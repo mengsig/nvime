@@ -3399,6 +3399,84 @@ end
     assert(gp:find("EDIT-NOTE-XYZ", 1, true), "review: grade prompt includes the lane note")
   end
 
+  -- ── Update-plan chat: author streaming hooks + keymap wiring ───────────────
+  do
+    local agents = require("nvime.agents")
+    local saved_run = agents.run
+
+    local udir = tmp .. "/update-plans"
+    vim.fn.mkdir(udir .. "/0001-upd", "p")
+    local ufd = io.open(udir .. "/0001-upd/plan.json", "w")
+    ufd:write(vim.json.encode({
+      version = 1,
+      id = "0001-upd",
+      title = "Upd",
+      why = "x",
+      created_at = os.time(),
+      updated_at = os.time(),
+      files_estimated = {},
+      acceptance = {},
+      steps = { { id = 1, intent = "a", file = "a.lua", range = "new", depends_on = {}, tests = {} } },
+    }))
+    ufd:close()
+    state.config.plan.dir = udir
+    state.plan.loaded = false
+    state.plan.plans = nil
+
+    -- M.create streams to on_stream and calls on_complete (no run float opened).
+    agents.run = function(opts)
+      vim.schedule(function()
+        if opts.on_session_id then
+          opts.on_session_id("sess-1")
+        end
+        if opts.on_text then
+          opts.on_text("working on it")
+        end
+        if opts.on_exit then
+          opts.on_exit({ code = 0, nvime_synced_plan_files = { ".nvime/plans/0001-upd/plan.json" } })
+        end
+      end)
+      return { kill = function() end }
+    end
+    local streamed, completed = {}, nil
+    plan.create({
+      intent = "rework step 1",
+      refine_id = "0001-upd",
+      on_stream = function(t)
+        streamed[#streamed + 1] = t
+      end,
+      on_complete = function(pid, status)
+        completed = { id = pid, status = status }
+      end,
+    })
+    vim.wait(2000, function()
+      return completed ~= nil
+    end)
+    agents.run = saved_run
+    assert(completed, "update: on_complete fired")
+    assert_eq(completed.status, "ok", "update: completion status ok")
+    assert_eq(completed.id, "0001-upd", "update: completion carries the plan id")
+    assert(
+      #streamed > 0 and table.concat(streamed):find("working on it", 1, true),
+      "update: on_stream received the agent text"
+    )
+
+    -- Keymap wiring: phase-0 view binds gu (not gd); update_chat is exported.
+    assert(type(plan.update_chat) == "function", "update: update_chat is exported")
+    plan.open("0001-upd")
+    local vbuf = vim.fn.bufnr("nvime://plan/0001-upd")
+    local maps = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(vbuf, "n")) do
+      maps[m.lhs] = true
+    end
+    assert(maps["gu"], "update: phase-0 view binds gu")
+    assert(not maps["gd"], "update: phase-0 view no longer binds gd")
+
+    state.config.plan.dir = plans_dir
+    state.plan.loaded = false
+    state.plan.plans = nil
+  end
+
   -- Render must survive multi-line fields in plan.json (intent/notes/why/
   -- acceptance/title may all contain embedded newlines from JSON-encoded
   -- agent output; nvim_buf_set_lines rejects items with embedded \n).
