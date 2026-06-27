@@ -760,7 +760,6 @@ local function render_plan_lines(plan)
 
   local title = plan.title or plan.id or "(unnamed plan)"
   local status = plan_overall_status(plan)
-  local c = counts_for_plan(plan)
   local updated = plan.updated_at or plan.created_at
   local updated_label = updated and ui.relative_time(updated) or "new"
 
@@ -777,19 +776,13 @@ local function render_plan_lines(plan)
   -- Title line
   push("  " .. title, "NvimePlanIntent")
 
-  -- Status row with bar
+  -- Status row: phased plans track their phase, not per-step execution, so the
+  -- headline is the status word + when it last changed (the phase track below
+  -- carries the visual progress).
   local status_word = status:gsub("_", " ")
-  local bar_text = progress_bar(plan, 36)
-  local status_line = string.format(
-    "  %s  %s  %s   %d/%d done · updated %s",
-    status_icon(status),
-    pad_right(status_word, 12),
-    bar_text,
-    c.done,
-    c.total,
-    updated_label
-  )
-  local status_row = push(status_line, status_hl(status))
+  local status_line =
+    string.format("  %s  %s  updated %s", status_icon(status), pad_right(status_word, 12), updated_label)
+  push(status_line, status_hl(status))
 
   -- Continuity badge: "↻ claude · resume" when the plan has a stored
   -- provider session, "○ fresh" when not. Lets the user see at a glance
@@ -811,32 +804,36 @@ local function render_plan_lines(plan)
     end
   end
 
-  -- Highlight the bar precisely. 4 leading spaces + icon (display 1) + 2 spaces + status_word padded 12 + 2 spaces.
+  -- Phase track: research → scaffold → implement, with completed phases filled,
+  -- the current phase lit, and future phases dimmed.
   do
-    -- The icon may be a multi-byte glyph; compute its byte length safely.
-    local icon = status_icon(status)
-    local prefix_text = "  " .. icon .. "  " .. pad_right(status_word, 12) .. "  "
-    local bar_byte_start = #prefix_text
-    -- color each segment of the bar
-    local cursor = bar_byte_start
-    local _, segments = progress_bar(plan, 36)
-    for _, seg in ipairs(segments) do
-      local seg_text, seg_hl = seg[1], seg[2]
-      local seg_bytes = #seg_text
-      mark_range(status_row, cursor, cursor + seg_bytes, seg_hl)
-      cursor = cursor + seg_bytes
+    local phase = tonumber(plan.phase) or 0
+    local labels = { [0] = "research", [1] = "scaffold", [2] = "implement" }
+    local line, spans = "  ", {}
+    for i = 0, 2 do
+      local glyph = (i < phase and "●") or (i == phase and "◉") or "○"
+      local start = #line
+      line = line .. glyph .. " " .. labels[i]
+      local hl = (i < phase and "NvimeStatusSuccess") or (i == phase and "NvimePlanHeading") or "NvimePlanWhy"
+      spans[#spans + 1] = { start, #line, hl }
+      if i < 2 then
+        line = line .. "  →  "
+      end
+    end
+    local track_row = push(line)
+    for _, s in ipairs(spans) do
+      mark_range(track_row, s[1], s[2], s[3])
     end
   end
   push_blank()
   push_rule()
   push_blank()
 
-  -- Phase banner: where this plan is in the phased flow and the next action.
+  -- Call to action for phase 0: agree to start scaffolding.
   do
-    local agreed = plan.phase0_agreed == true
-    local prow = push("  " .. glyph_or_bar("review", "  ") .. "PHASE 0 · research" .. (agreed and "  (agreed)" or ""), "NvimePlanHeading")
-    mark_range(prow, 2, #lines[prow + 1], "NvimePlanHeading")
-    push("      press <CR> / ga to agree → phase 1: the agent scaffolds TODOs you review", "NvimePlanWhy")
+    local hint = (plan.phase0_agreed == true) and "agreed — press <CR> / ga to resume phase 1 (scaffold)"
+      or "press <CR> / ga to agree → phase 1: the agent scaffolds TODOs you review"
+    push("  " .. glyph_or_bar("review", "  ") .. hint, "NvimePlanWhy")
     push_blank()
   end
 
@@ -1210,6 +1207,25 @@ function M.delete(plan_id)
   if not plan then
     return false
   end
+  -- A plan owns a Big Change worktree session for its scaffold/implement phases.
+  -- Refuse to delete while it is actively building (that would orphan a running
+  -- agent), otherwise discard the session first so its worktree + store record
+  -- don't outlive the plan.
+  if plan.bigchange_session_id then
+    local session = require("nvime.bigchange.store").get(plan.bigchange_session_id)
+    if session and session.busy then
+      vim.notify(
+        "nvime plan: a build is still running for this plan — wait for it to finish before deleting",
+        vim.log.levels.WARN
+      )
+      return false
+    end
+    if session then
+      pcall(function()
+        require("nvime.bigchange").discard(plan.bigchange_session_id)
+      end)
+    end
+  end
   local dir = plan_dir_for(plan_id)
   pcall(vim.fn.delete, dir, "rf")
   audit.write({ event = "plan_deleted", plan_id = plan_id })
@@ -1495,7 +1511,8 @@ local function scaffold_prompt(plan)
     "",
     "HARD RULES:",
     "- Implement NO behavior. No logic, no real function bodies, no wiring that runs.",
-    "- Do not delete or rewrite existing code except to add a TODO comment beside it.",
+    "- You may modify existing code ONLY by adding a TODO comment beside it — never",
+    "  delete, move, or rewrite existing code.",
     "- Keep the repo parseable: a stub may error / pass / throw / return a zero value, but must",
     "  not change runtime behavior.",
     "- Do NOT git commit or git push. Leave everything in the working tree.",
@@ -1560,7 +1577,11 @@ local function ensure_linked_session(plan)
   session.plan_id = plan.id
   session.spec = plan_spec_markdown(plan)
   session.goal = plan.title
-  store_bc.touch(session)
+  -- Persist the session to disk BEFORE the plan references it. Otherwise a crash
+  -- in the touch()-deferred-save window would leave plan.bigchange_session_id
+  -- pointing at a session whose plan_id was never written — losing the back-link
+  -- and misrouting it as a plain Big Change on the next load.
+  store_bc.save_now()
   plan.bigchange_session_id = session.id
   persist_plan(plan)
   return session
@@ -1573,7 +1594,8 @@ end
 local function set_review_hooks(plan, session)
   local plan_id = plan.id
   if plan_phase(plan) == PHASE.SCAFFOLD then
-    session.review_prompt_note = "The user may have hand-edited the TODO scaffolding directly in this worktree; the worktree files are the source of truth — read them before revising."
+    session.review_prompt_note =
+      "The user may have hand-edited the TODO scaffolding directly in this worktree; the worktree files are the source of truth — read them before revising."
     session.review_complete = {
       label = "advance → implement",
       run = function()
@@ -1610,6 +1632,13 @@ local function start_phase_build(plan, session)
       heading = ui.icon("brand") .. "  Plan " .. (plan.id or "") .. " · scaffolding TODOs (phase 1)",
       building_label = "Agent is laying down TODO scaffolding (inert — no behavior). This may take a moment…",
     }
+    -- Remind the reviewer that phase 1 is scaffolding-only: anything that looks
+    -- like real behavior is a bug to send back, not to approve.
+    vim.notify(
+      "nvime plan phase 1: review the TODO scaffolding — it must be inert (comments / stubs / type defs). "
+        .. "Press r to send back any real behavior; M to advance to implement.",
+      vim.log.levels.INFO
+    )
   else
     opts = {
       prompt = implement_prompt(plan),
@@ -1625,6 +1654,9 @@ end
 open_phase = function(plan)
   local store_bc = bc_store()
   local session = ensure_linked_session(plan)
+  -- ensure_linked_session may have persisted + reloaded the plan list; re-fetch
+  -- so we operate on the current on-disk copy.
+  plan = M.get(plan.id) or plan
   set_review_hooks(plan, session)
   store_bc.set_active(session.id)
   if session.busy then
@@ -1659,7 +1691,10 @@ local function enter_implement(plan_id, require_understanding)
   persist_plan(plan)
   plan = M.get(plan_id) or plan
   session.difficulty = plan.require_understanding and "easy" or "vibe"
-  session.blocks = nil -- fresh review for the implementation diff
+  -- Fresh review for the implementation diff. Empty table (not nil) keeps the
+  -- field type-consistent with store.normalize; the next build's blocks.extract
+  -- repopulates it with the implementation blocks.
+  session.blocks = {}
   store_bc.touch(session)
   set_review_hooks(plan, session)
   require("nvime.bigchange.review").close()
@@ -2422,7 +2457,9 @@ function M.replan(plan_id)
 end
 
 function M.discuss(plan_id, step_id)
-  -- Reuse the same compose panel; the user can write a step-scoped refinement.
+  -- Reuse the same compose panel; the user can write a refinement. step_id is
+  -- optional: nil → a plan-level discussion (the gd binding passes the step
+  -- under the cursor, or nil when the cursor isn't on a step).
   M.compose({ refine_id = plan_id, focus_step = step_id })
 end
 

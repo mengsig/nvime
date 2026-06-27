@@ -3235,7 +3235,15 @@ end
           tests = {},
           status = "pending",
         },
-        { id = 2, intent = "Wire it up", file = "lua/bar.lua", range = "new", depends_on = { 1 }, tests = {}, status = "pending" },
+        {
+          id = 2,
+          intent = "Wire it up",
+          file = "lua/bar.lua",
+          range = "new",
+          depends_on = { 1 },
+          tests = {},
+          status = "pending",
+        },
       },
     }
     local pfd = io.open(pdir .. "/0001-phased/plan.json", "w")
@@ -3267,16 +3275,19 @@ end
     assert(ip:find("authoritative", 1, true), "phased: implement prompt honors user edits")
 
     -- Stub the Big Change engine so transitions don't spawn an agent or persist.
-    local fake = { sessions = {}, next = 500, build_starts = {}, review_closed = 0 }
+    local bc_mod = require("nvime.bigchange")
+    local fake = { sessions = {}, next = 500, build_starts = {}, review_closed = 0, discarded = {} }
     local saved = {
       create = bc_store.create,
       get = bc_store.get,
       touch = bc_store.touch,
       set_active = bc_store.set_active,
+      save_now = bc_store.save_now,
       b_start = bc_build.start,
       b_open = bc_build.open,
       r_open = bc_review.open,
       r_close = bc_review.close,
+      discard = bc_mod.discard,
     }
     bc_store.create = function(opts)
       fake.next = fake.next + 1
@@ -3296,6 +3307,7 @@ end
     end
     bc_store.touch = function() end
     bc_store.set_active = function() end
+    bc_store.save_now = function() end
     bc_build.start = function(session, o)
       fake.build_starts[#fake.build_starts + 1] = { session = session, opts = o or {} }
     end
@@ -3303,6 +3315,10 @@ end
     bc_review.open = function() end
     bc_review.close = function()
       fake.review_closed = fake.review_closed + 1
+    end
+    bc_mod.discard = function(id)
+      fake.discarded[#fake.discarded + 1] = id
+      fake.sessions[tonumber(id)] = nil
     end
 
     local ok_pcall, err_pcall = pcall(function()
@@ -3329,7 +3345,7 @@ end
       assert(after2.phase1_agreed == true, "phased: phase1_agreed set")
       local sess2 = plan._linked_session(after2)
       assert_eq(sess2.difficulty, "easy", "phased: yes → easy difficulty")
-      assert(sess2.blocks == nil, "phased: phase-2 review starts fresh")
+      assert(type(sess2.blocks) == "table" and #sess2.blocks == 0, "phased: phase-2 review starts fresh (empty blocks)")
       assert_eq(fake.review_closed, 1, "phased: phase-1 review tab closed")
       assert_eq(#fake.build_starts, 2, "phased: implement build kicked")
       assert(
@@ -3343,13 +3359,24 @@ end
       local done = plan.get("0001-phased")
       assert_eq(done.merged_branch, "plan/0001-phased", "phased: finalize records the branch")
       assert(done.completed_at, "phased: finalize stamps completion")
+
+      -- Deleting a plan refuses while its session is building, then discards the
+      -- linked session (worktree + record) so nothing is orphaned.
+      local live = plan._linked_session(plan.get("0001-phased"))
+      live.busy = true
+      assert(plan.delete("0001-phased") == false, "phased: delete refused while build is busy")
+      assert(plan.get("0001-phased"), "phased: plan survives a refused delete")
+      live.busy = false
+      assert(plan.delete("0001-phased"), "phased: delete succeeds when idle")
+      assert_eq(#fake.discarded, 1, "phased: delete discards the linked session")
     end)
 
     -- Restore the real Big Change engine regardless of outcome.
-    bc_store.create, bc_store.get, bc_store.touch, bc_store.set_active =
-      saved.create, saved.get, saved.touch, saved.set_active
+    bc_store.create, bc_store.get, bc_store.touch, bc_store.set_active, bc_store.save_now =
+      saved.create, saved.get, saved.touch, saved.set_active, saved.save_now
     bc_build.start, bc_build.open = saved.b_start, saved.b_open
     bc_review.open, bc_review.close = saved.r_open, saved.r_close
+    bc_mod.discard = saved.discard
     assert(ok_pcall, "phased: transitions run cleanly: " .. tostring(err_pcall))
 
     -- Restore the prior plan dir so later assertions in this block still resolve.
