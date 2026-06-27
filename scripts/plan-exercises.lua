@@ -283,8 +283,11 @@ local function install_mock(fixture)
   end
 end
 
+-- A real provider turn takes far longer than the mock; give live runs minutes.
+local WAIT_MS = LIVE and 360000 or 15000
+
 local function wait_for(pred, ms)
-  return vim.wait(ms or 15000, pred, 50)
+  return vim.wait(ms or WAIT_MS, pred, 100)
 end
 
 local function run_fixture(fixture)
