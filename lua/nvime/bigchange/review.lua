@@ -41,6 +41,9 @@ local R = {
   -- navigable); "diff" = just the change as diff text, like the old pane. Toggle
   -- with `t`; the choice persists on this module state across close/reopen.
   mode = "inline",
+  -- Soft-wrap long lines in the right pane so prose / long TODO comments are
+  -- readable without horizontal scrolling. Toggle with `w`.
+  wrap = true,
   ns_left = vim.api.nvim_create_namespace("nvime.bigchange.review.left"),
   ns_overlay = vim.api.nvim_create_namespace("nvime.bigchange.review.overlay"),
   row_to_block = {},
@@ -257,7 +260,9 @@ local function render_left()
     marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusRunning" }
   else
     local other = (R.mode == "inline") and "diff" or "inline"
-    lines[#lines + 1] = string.format("  <CR> open · ]c/[c hunks · t → %s view", other)
+    lines[#lines + 1] = "  <CR> open · ]c/[c hunks"
+    marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
+    lines[#lines + 1] = string.format("  t → %s view · w → %s", other, (R.wrap ~= false) and "no-wrap" or "wrap")
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
     lines[#lines + 1] = "  a approve · r request-changes"
     marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
@@ -293,7 +298,9 @@ local function configure_file_window(winid)
   vim.wo[winid].signcolumn = "yes:1"
   vim.wo[winid].number = true
   vim.wo[winid].relativenumber = false
-  vim.wo[winid].wrap = false
+  -- Soft-wrap (with breakindent) so long lines read in place; `w` toggles it.
+  vim.wo[winid].wrap = R.wrap ~= false
+  vim.wo[winid].breakindent = true
   vim.wo[winid].cursorline = true
   vim.wo[winid].winhighlight = ""
 end
@@ -565,7 +572,7 @@ local function show_diff(block, on_disk)
   vim.bo[buf].modifiable = false
   uikit.apply_marks(buf, R.ns_overlay, lines, marks)
   vim.api.nvim_win_set_buf(R.right_win, buf)
-  ui.configure_panel_window(R.right_win, { wrap = false, cursorline = true })
+  ui.configure_panel_window(R.right_win, { wrap = R.wrap ~= false, cursorline = true })
   R.right_buf, R.right_file, R.anchors, R.shown_id = buf, block.file, anchors, block.id
 end
 
@@ -784,6 +791,18 @@ local function toggle_mode()
   R.mode = (R.mode == "inline") and "diff" or "inline"
   render_left()
   show_active({ focus = false })
+end
+
+-- Toggle soft-wrap on the right pane. Applied live to the current window and
+-- persisted on R.wrap so both views (inline file and diff scratch) re-apply it
+-- through their window config on the next show.
+local function toggle_wrap()
+  R.wrap = R.wrap == false
+  if R.right_win and vim.api.nvim_win_is_valid(R.right_win) then
+    vim.wo[R.right_win].wrap = R.wrap
+    vim.wo[R.right_win].breakindent = true
+  end
+  render_left()
 end
 
 -- ---------------------------------------------------------------------------
@@ -1085,6 +1104,7 @@ local function review_help_sections()
       heading = "Window",
       rows = {
         { "t", "toggle inline / file-view mode" },
+        { "w", "toggle soft-wrap in the file pane" },
         { "<Tab>", "jump to the file pane" },
         { "q", "close the review" },
         { "g?", "toggle this help" },
@@ -1108,6 +1128,7 @@ local function install_left_keymaps(bufnr)
   map("M", merge)
   map("q", M.close)
   map("t", toggle_mode)
+  map("w", toggle_wrap)
   map("g?", function()
     keyhelp.toggle({
       title = "big change keys",

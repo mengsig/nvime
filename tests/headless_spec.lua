@@ -6355,6 +6355,82 @@ end)();
   state.config.plan.dir = saved_dir
   state.plan.loaded = false
   state.plan.plans = nil
+end)();
+-- The update chat renders a CLEAN transcript: agent prose only (internal progress
+-- + the NVIME_PLAN marker/JSON filtered out), a calm footer, no scary warning.
+(function()
+  local plan = require("nvime.plan")
+  local agents = require("nvime.agents")
+  local cdir = vim.fn.tempname()
+  vim.fn.mkdir(cdir .. "/0001-cc", "p")
+  local fd = io.open(cdir .. "/0001-cc/plan.json", "w")
+  fd:write(vim.json.encode({
+    version = 1,
+    id = "0001-cc",
+    title = "CC",
+    why = "x",
+    created_at = os.time(),
+    updated_at = os.time(),
+    files_estimated = {},
+    acceptance = {},
+    author_provider_sessions = { claude = "s1" },
+    steps = { { id = 1, intent = "a", file = "a.lua", range = "new", depends_on = {}, tests = {} } },
+  }))
+  fd:close()
+  local saved_dir = state.config.plan.dir
+  state.config.plan.dir = cdir
+  state.plan.loaded = false
+  state.plan.plans = nil
+  local saved_run = agents.run
+  agents.run = function(o)
+    vim.schedule(function()
+      if o.on_progress then
+        o.on_progress("[claude] session started\n")
+      end
+      if o.on_text then
+        o.on_text('Here is my answer.\n\nNVIME_PLAN\n```json\n{"id":"0001-cc"}\n```\n')
+      end
+      if o.on_exit then
+        o.on_exit({ code = 0, nvime_synced_plan_files = { ".nvime/plans/0001-cc/plan.json" } })
+      end
+    end)
+    return { kill = function() end }
+  end
+  plan.update_chat("0001-cc")
+  local cb
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if
+      vim.api.nvim_buf_get_name(b) == ""
+      and table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n"):find("update plan", 1, true)
+    then
+      cb = b
+    end
+  end
+  vim.bo[cb].modifiable = true
+  vim.api.nvim_buf_set_lines(cb, -1, -1, false, { "make step 1 use a deque" })
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(cb, "n")) do
+    if (m.lhs == "<C-S>" or m.lhs == "<C-s>") and m.callback then
+      m.callback()
+    end
+  end
+  vim.wait(2500)
+  local txt = table.concat(vim.api.nvim_buf_get_lines(cb, 0, -1, false), "\n")
+  assert(txt:find("Here is my answer", 1, true), "cleanchat: agent prose shown")
+  assert(not txt:find("session started", 1, true), "cleanchat: internal progress filtered out")
+  assert(not txt:find("NVIME_PLAN", 1, true) and not txt:find('"id"', 1, true), "cleanchat: marker + JSON stripped")
+  assert(txt:find("updated the plan", 1, true), "cleanchat: calm updated footer")
+  assert(not txt:find("try rephrasing", 1, true), "cleanchat: no scary warning")
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(cb, "n")) do
+    if m.lhs == "q" and m.callback then
+      m.callback()
+    end
+  end
+  agents.run = saved_run
+  state.plan.active_run = nil
+  state.config.plan.dir = saved_dir
+  state.plan.loaded = false
+  state.plan.plans = nil
 end)()
 
 print("nvime headless spec passed")

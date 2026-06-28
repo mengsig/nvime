@@ -2307,10 +2307,19 @@ function M.create(opts)
       pcall(vim.api.nvim_set_current_win, run_winid)
     end
   end
+  -- The agent's PROSE: streamed to the caller (the update chat) or the run float.
   local function emit(text)
     if opts.on_stream then
       opts.on_stream(text)
     elseif run_bufnr then
+      run_panel_append(text)
+    end
+  end
+  -- Internal progress / status (provider "started", synced counts, the ─ rule,
+  -- recovery notes). Goes ONLY to the run-log float — never the chat transcript,
+  -- which should read as a clean conversation.
+  local function status(text)
+    if run_bufnr then
       run_panel_append(text)
     end
   end
@@ -2394,7 +2403,7 @@ function M.create(opts)
     end,
     on_progress = function(text)
       all_output[#all_output + 1] = text
-      emit(text)
+      status(text)
     end,
     on_handle = function(h)
       handle = h
@@ -2413,7 +2422,7 @@ function M.create(opts)
         synced_plan_files = synced,
         marker = marker,
       })
-      emit("\n" .. string.rep("─", 78) .. "\n")
+      status("\n" .. string.rep("─", 78) .. "\n")
 
       local plan_id = nil
       local final_status = "ok"
@@ -2435,7 +2444,7 @@ function M.create(opts)
             persist_plan(stale)
           end
         end
-        emit("[nvime] stored session expired — retrying with a fresh conversation…\n")
+        status("[nvime] stored session expired — retrying with a fresh conversation…\n")
         if state.plan._tick_timer then
           pcall(state.plan._tick_timer.stop, state.plan._tick_timer)
           pcall(state.plan._tick_timer.close, state.plan._tick_timer)
@@ -2451,10 +2460,10 @@ function M.create(opts)
       end
       if result.code ~= 0 then
         final_status = "failed"
-        emit("[nvime] plan author failed (code " .. tostring(result.code) .. ")\n")
+        status("[nvime] plan author failed (code " .. tostring(result.code) .. ")\n")
       elseif #synced == 0 then
         final_status = "no_output"
-        emit("[nvime] no plan files were written; the agent may have refused.\n")
+        status("[nvime] no plan files were written; the agent may have refused.\n")
       else
         if marker and marker.id then
           plan_id = marker.id
@@ -2467,7 +2476,7 @@ function M.create(opts)
             end
           end
         end
-        emit(string.format("[nvime] synced %d plan file(s)%s\n", #synced, plan_id and (" · plan " .. plan_id) or ""))
+        status(string.format("[nvime] synced %d plan file(s)%s\n", #synced, plan_id and (" · plan " .. plan_id) or ""))
         M.refresh()
         -- Persist the captured author session under author_provider_sessions
         -- so future refinements (which also run in the temp workspace cwd)
@@ -2716,6 +2725,39 @@ local function update_cancel()
   end
 end
 
+-- Render the in-flight agent reply in place (lines from `from` to end of buffer)
+-- with the internal NVIME_PLAN marker + its trailing JSON stripped, so the chat
+-- shows only the agent's prose. Schedule-safe (agent callbacks are fast-event).
+local function render_agent_reply(from, raw)
+  if vim.in_fast_event and vim.in_fast_event() then
+    vim.schedule(function()
+      render_agent_reply(from, raw)
+    end)
+    return
+  end
+  if not chat_valid() then
+    return
+  end
+  local text = raw or ""
+  local cut = text:find("NVIME_PLAN", 1, true)
+  if cut then
+    text = text:sub(1, cut - 1)
+  end
+  text = vim.trim(text)
+  local lines = {}
+  for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
+    lines[#lines + 1] = "  " .. l
+  end
+  if #lines == 0 then
+    lines = { "  …" }
+  end
+  vim.bo[U.chat_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(U.chat_buf, from, -1, false, lines)
+  vim.bo[U.chat_buf].modifiable = not U.busy
+  decorate_chat()
+  scroll_chat_bottom()
+end
+
 local function update_submit()
   if U.busy then
     vim.notify("nvime plan: an update is still running — <C-c> to cancel", vim.log.levels.INFO)
@@ -2730,7 +2772,8 @@ local function update_submit()
   end
   update_drafts[U.plan_id] = nil
 
-  -- Convert the input region into a sent "you" turn.
+  -- Convert the input region into a sent "you" turn + an empty agent turn; the
+  -- reply re-renders below "▌ author" as it streams.
   local block = { "▌ you" }
   for _, l in ipairs(vim.split(text, "\n", { plain = true })) do
     block[#block + 1] = "  " .. l
@@ -2739,31 +2782,38 @@ local function update_submit()
   block[#block + 1] = "▌ author"
   vim.bo[U.chat_buf].modifiable = true
   vim.api.nvim_buf_set_lines(U.chat_buf, U.input_start - 1, -1, false, block)
+  local agent_from = vim.api.nvim_buf_line_count(U.chat_buf)
   update_set_busy(true)
   decorate_chat()
   scroll_chat_bottom()
 
   local gen = U.gen
+  local turn = {}
   M.create({
     intent = text,
     refine_id = U.plan_id,
     conversational = true, -- this is the chat → resumed turns use the lean prompt
     on_stream = function(t)
-      if gen == U.gen then
-        chat_append(t)
+      if gen ~= U.gen then
+        return
       end
+      turn[#turn + 1] = t
+      render_agent_reply(agent_from, table.concat(turn))
     end,
-    on_complete = function(_, status)
+    on_complete = function(_, st)
       if gen ~= U.gen then
         return -- a stale run from a closed/superseded session
       end
       update_set_busy(false)
-      chat_line("")
-      if status == "ok" then
-        chat_line("✓ plan updated")
+      render_agent_reply(agent_from, table.concat(turn))
+      -- A calm, single-line footer for this turn. A conversational answer (the
+      -- agent replied without editing the plan) needs none — the reply is the
+      -- answer, not a failure.
+      if st == "ok" then
+        chat_line("  · updated the plan ✓")
         render_update_plan()
-      else
-        chat_line("⚠ no change to the plan (" .. tostring(status) .. ") — try rephrasing")
+      elseif st == "failed" then
+        chat_line("  · that didn't go through — try again")
       end
       begin_input(nil)
       if U.chat_win and vim.api.nvim_win_is_valid(U.chat_win) then
