@@ -6270,6 +6270,91 @@ end)();
   state.config.providers.codex.reasoning_effort = nil
 
   assert(vim.fn.exists(":NvimeEffort") == 2, "effort: :NvimeEffort command exists")
+end)();
+-- Plan-author prompt selection: the full ~8KB header only for a NEW conversation
+-- (fresh author or re-plan); the lean follow-up only for a RESUMED conversational
+-- update (gu). (IIFE: keep locals out of the main chunk's 200-local cap.)
+(function()
+  local plan = require("nvime.plan")
+  local agents = require("nvime.agents")
+  local pdir = vim.fn.tempname()
+  vim.fn.mkdir(pdir .. "/0001-ps", "p")
+  local fd = io.open(pdir .. "/0001-ps/plan.json", "w")
+  fd:write(vim.json.encode({
+    version = 1,
+    id = "0001-ps",
+    title = "PS",
+    why = "x",
+    created_at = os.time(),
+    updated_at = os.time(),
+    files_estimated = {},
+    acceptance = {},
+    author_provider_sessions = { claude = "sess-1" },
+    steps = { { id = 1, intent = "a", file = "a.lua", range = "new", depends_on = {}, tests = {} } },
+  }))
+  fd:close()
+  state.config.plan = state.config.plan or {}
+  local saved_dir = state.config.plan.dir
+  state.config.plan.dir = pdir
+  state.plan.loaded = false
+  state.plan.plans = nil
+
+  -- The lean follow-up: no header, carries the user message + load-bearing rules.
+  local lean = plan._build_refine_followup_prompt("change step 2", "0001-ps")
+  assert(not lean:find("NVIME PLAN AUTHOR MODE", 1, true), "promptsel: lean prompt omits the full header")
+  assert(lean:find("change step 2", 1, true), "promptsel: lean prompt carries the user message")
+  assert(
+    lean:find("range_anchor", 1, true) and lean:find("needs a test", 1, true),
+    "promptsel: lean prompt keeps the load-bearing rules"
+  )
+  assert(#lean < 1500, "promptsel: lean prompt stays lean")
+
+  local saved_run = agents.run
+  local captured
+  agents.run = function(o)
+    captured = o.prompt
+    vim.schedule(function()
+      if o.on_exit then
+        o.on_exit({ code = 0, nvime_synced_plan_files = { ".nvime/plans/0001-ps/plan.json" } })
+      end
+    end)
+    return { kill = function() end }
+  end
+  local function fire(opts)
+    captured = nil
+    local d = false
+    plan.create(vim.tbl_extend("force", {
+      provider = "claude",
+      on_stream = function() end,
+      on_complete = function()
+        d = true
+      end,
+    }, opts))
+    vim.wait(2000, function()
+      return d
+    end)
+    return captured or ""
+  end
+  local has_header = function(p)
+    return p:find("NVIME PLAN AUTHOR MODE", 1, true) ~= nil
+  end
+
+  assert(has_header(fire({ intent = "new" })), "promptsel: a fresh plan gets the full header")
+  local up = fire({ intent = "tweak it", refine_id = "0001-ps", conversational = true })
+  assert(
+    not has_header(up) and up:find("tweak it", 1, true),
+    "promptsel: conversational resume (gu) gets the lean prompt"
+  )
+  assert(
+    has_header(fire({ intent = "rewrite", refine_id = "0001-ps" })),
+    "promptsel: re-plan (non-conversational) keeps the full header"
+  )
+
+  agents.run = saved_run
+  state.plan.active_run = nil
+  state.config.plan.dir = saved_dir
+  state.plan.loaded = false
+  state.plan.plans = nil
 end)()
 
 print("nvime headless spec passed")

@@ -2070,6 +2070,28 @@ local function build_author_prompt(intent, existing_id)
   return table.concat(lines, "\n")
 end
 
+-- Lean follow-up prompt for a RESUMED plan-author session. The agent already has
+-- the full AUTHOR_PROMPT_HEADER (schema, rules, marker protocol) in its context
+-- from the first turn, so re-sending the ~8KB header every update is wasteful and
+-- forces rigid re-authoring. Here we send only the user's change plus a compact
+-- reminder of the two load-bearing rules (write only under .nvime/plans/<id>/;
+-- finish with the NVIME_PLAN marker).
+local function build_refine_followup_prompt(intent, existing_id)
+  local id = (existing_id and existing_id ~= "") and existing_id or "<plan-id>"
+  return table.concat({
+    "Continue with the plan you authored (" .. id .. "). The user says:",
+    "",
+    intent or "",
+    "",
+    "Re-read `.nvime/plans/"
+      .. id
+      .. "/plan.json` (your current plan) and apply this in place under the SAME id — update plan.json + plan.md, writing ONLY under `.nvime/plans/"
+      .. id
+      .. "/`. Keep the same rules you authored under: every step that changes behavior needs a test (its `tests` field or a follow-up test step), and any step with an existing line range (not a new file) needs a `range_anchor` (1-3 verbatim lines). Finish with the NVIME_PLAN marker exactly as before. If the message is a question rather than an edit, answer it briefly and only re-emit the marker if you actually changed the plan.",
+  }, "\n")
+end
+M._build_refine_followup_prompt = build_refine_followup_prompt
+
 local function format_run_log()
   local panel = state.panels.plan_run
   if panel and panel.bufnr and vim.api.nvim_buf_is_valid(panel.bufnr) then
@@ -2232,7 +2254,28 @@ function M.create(opts)
   ensure_dir(plans_dir())
 
   local provider = opts.provider or (state.config and state.config.provider) or "claude"
-  local prompt = build_author_prompt(intent, opts.refine_id)
+  -- Resume the captured plan-author session when refining an existing plan (so
+  -- the architect keeps its prior investigation context). Author sessions live
+  -- in author_provider_sessions — see the agents.run call below for why.
+  local resume_session_id = nil
+  if opts.refine_id and opts.refine_id ~= "" then
+    local existing_plan = M.get(opts.refine_id)
+    if existing_plan and existing_plan.author_provider_sessions then
+      resume_session_id = existing_plan.author_provider_sessions[provider]
+    end
+  end
+  local captured_session_id = resume_session_id
+  -- The full ~8KB AUTHOR_PROMPT_HEADER is only needed when STARTING a new
+  -- conversation. The lean follow-up is reserved for the CONVERSATIONAL update
+  -- chat (gu — it sets opts.conversational): there the resumed agent already has
+  -- the header in context, so we send just the user's change + a compact rules
+  -- reminder. Re-planning (gr — a full rewrite from a fresh brief) and fresh
+  -- authoring always get the full header, even though the session still resumes
+  -- for memory continuity.
+  local resuming = resume_session_id ~= nil and resume_session_id ~= ""
+  local lean = resuming and opts.conversational == true
+  local prompt = lean and build_refine_followup_prompt(intent, opts.refine_id)
+    or build_author_prompt(intent, opts.refine_id)
   local response = {} -- on_text only (the agent's answer; carries the NVIME_PLAN marker)
   local all_output = {} -- on_text + on_progress (used to detect resume failures)
   -- Two output sinks. The default author flow streams into the run-log float.
@@ -2328,26 +2371,11 @@ function M.create(opts)
   audit.write({ event = "plan_author_start", provider = provider, intent = intent })
 
   local handle
-  -- Plan-level session continuity: when refining an existing plan, resume
-  -- the captured provider session so the architect retains its prior
-  -- investigation context. When drafting a new plan we still ask the agent
-  -- to persist the session so subsequent refinements can resume.
-  --
-  -- IMPORTANT: plan_author runs in a temp workspace (prepare_plan_workspace);
-  -- the session id Claude assigns is scoped to that cwd. plan_exec runs in
-  -- the real repo root with a different cwd, so it cannot resume a session
-  -- captured here. Author sessions therefore live in `author_provider_sessions`
-  -- (used only by future plan_author refinements). plan_exec uses the
-  -- separate `provider_sessions` table, which it owns and rotates itself.
-  local resume_session_id = nil
-  if opts.refine_id and opts.refine_id ~= "" then
-    local existing_plan = M.get(opts.refine_id)
-    if existing_plan and existing_plan.author_provider_sessions then
-      resume_session_id = existing_plan.author_provider_sessions[provider]
-    end
-  end
-  local captured_session_id = resume_session_id
-
+  -- Plan-level session continuity. The plan_author runs in a STABLE per-repo
+  -- workspace (prepare_plan_workspace), so the session id Claude assigns is
+  -- resumable on later refinements; it lives in `author_provider_sessions`.
+  -- resume_session_id / captured_session_id were computed above (they also
+  -- decide whether we sent the full header or a lean follow-up).
   handle = agents.run({
     provider = provider,
     lane = "plan",
@@ -2719,6 +2747,7 @@ local function update_submit()
   M.create({
     intent = text,
     refine_id = U.plan_id,
+    conversational = true, -- this is the chat → resumed turns use the lean prompt
     on_stream = function(t)
       if gen == U.gen then
         chat_append(t)
