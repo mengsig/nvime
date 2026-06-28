@@ -5002,34 +5002,47 @@ end)(); -- ---------------------------------------------------------------------
   local blame_payload = vim.json.decode(blame_call.result.content[1].text)
   assert(blame_payload.sha and blame_payload.author, "mcp: git_blame returns sha+author")
 
-  -- test_run against a synthetic command we know exits 0
+  -- test_run runs ONLY the project's configured runner; an agent-supplied
+  -- `runner` argument is IGNORED (H1: no arbitrary sh -c from a prompt-injected
+  -- review/plan agent).
+  local mcp_state = require("nvime.state")
+  mcp_state.config.test_loop = mcp_state.config.test_loop or {}
+  local saved_runner = mcp_state.config.test_loop.runner
+
+  mcp_state.config.test_loop.runner = "echo from-test && exit 0"
   local run_call = send({
     jsonrpc = "2.0",
     id = 40,
     method = "tools/call",
-    params = { name = "nvime.test_run", arguments = { runner = "echo from-test && exit 0", timeout = 5000 } },
+    -- a hostile runner here must be dropped on the floor.
+    params = { name = "nvime.test_run", arguments = { runner = "echo PWNED && exit 0", timeout = 5000 } },
   })
   assert(run_call.result and run_call.result.content, "mcp: test_run returns content")
   local run_payload = vim.json.decode(run_call.result.content[1].text)
   assert_eq(run_payload.exit_code, 0, "mcp: test_run captures exit code 0")
-  assert(run_payload.stdout_tail:find("from-test", 1, true), "mcp: test_run captures stdout")
+  assert(run_payload.stdout_tail:find("from-test", 1, true), "mcp: test_run runs the configured runner")
+  assert(not run_payload.stdout_tail:find("PWNED", 1, true), "mcp: test_run ignores the agent-supplied runner")
+  assert_eq(run_payload.runner, "echo from-test && exit 0", "mcp: test_run reports the configured runner")
 
+  mcp_state.config.test_loop.runner = "echo broke 1>&2 && exit 7"
   local run_fail = send({
     jsonrpc = "2.0",
     id = 41,
     method = "tools/call",
-    params = { name = "nvime.test_run", arguments = { runner = "echo broke 1>&2 && exit 7", timeout = 5000 } },
+    params = { name = "nvime.test_run", arguments = { timeout = 5000 } },
   })
   local fail_payload = vim.json.decode(run_fail.result.content[1].text)
   assert_eq(fail_payload.exit_code, 7, "mcp: test_run captures non-zero exit")
   assert(fail_payload.stderr_tail:find("broke", 1, true), "mcp: test_run captures stderr")
 
+  -- shellguard still polices the configured runner.
   local blocked_runner = "git commit --allow-empty -m blocked-by-nvime"
+  mcp_state.config.test_loop.runner = blocked_runner
   local run_blocked = send({
     jsonrpc = "2.0",
     id = 42,
     method = "tools/call",
-    params = { name = "nvime.test_run", arguments = { runner = blocked_runner, timeout = 5000 } },
+    params = { name = "nvime.test_run", arguments = { timeout = 5000 } },
   })
   assert(run_blocked.result and run_blocked.result.content, "mcp: test_run shellguard block returns content")
   local blocked_payload = vim.json.decode(run_blocked.result.content[1].text)
@@ -5040,6 +5053,7 @@ end)(); -- ---------------------------------------------------------------------
     blocked_payload.stderr_tail:find("nvime shellguard blocked: git commit", 1, true),
     "mcp: test_run captures shellguard stderr"
   )
+  mcp_state.config.test_loop.runner = saved_runner
 
   local recent = send({
     jsonrpc = "2.0",
@@ -6606,8 +6620,7 @@ end)();
   state.config.plan.dir = saved_dir
   state.plan.loaded = false
   state.plan.plans = nil
-end)()
-;
+end)();
 (function()
   -- project guidance (CLAUDE.md) injection + untrusted project MCP gate
   local agents = require("nvime.agents")
