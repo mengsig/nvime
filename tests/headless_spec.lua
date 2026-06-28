@@ -6607,7 +6607,7 @@ end)();
   state.plan.loaded = false
   state.plan.plans = nil
 end)()
-
+;
 (function()
   -- project guidance (CLAUDE.md) injection + untrusted project MCP gate
   local agents = require("nvime.agents")
