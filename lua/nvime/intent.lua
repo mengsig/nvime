@@ -259,6 +259,8 @@ local function classify_with_model(intent_text)
   local handle = agents.run({
     provider = provider,
     lane = "critic", -- reuses the read-only, no-edit, no-MCP lane shape
+    -- A tiny structured classifier that never runs commands — skip CLAUDE.md.
+    no_project_guidance = true,
     prompt = MODEL_PROMPT .. "\n" .. intent_text,
     on_text = function(text)
       response[#response + 1] = text

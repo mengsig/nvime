@@ -36,9 +36,114 @@ local function project_config_path()
   return repo_root() .. "/.nvime/mcp.json"
 end
 
+-- ---------------------------------------------------------------------------
+-- project-config trust gate
+-- ---------------------------------------------------------------------------
+-- A repo's own .nvime/mcp.json declares commands nvime would spawn as local
+-- processes. Reviewing/planning over an UNTRUSTED repo is the headline use, so
+-- a malicious repo could otherwise drive-by-execute its servers the moment the
+-- user runs :NvimeReview / :NvimePlan / chat. Treat the repo as untrusted:
+-- require an explicit, persisted, per-(repo, content) approval before honoring
+-- those servers, and fail closed when we can't ask. `state.config.mcp.servers`
+-- (the user's own config) is always trusted; only the project file is gated.
+local function trust_store_path()
+  return vim.fn.stdpath("data") .. "/nvime/mcp_trust.json"
+end
+
+local function load_trust()
+  local ok, raw = pcall(vim.fn.readfile, trust_store_path())
+  if ok and type(raw) == "table" and #raw > 0 then
+    local dok, decoded = pcall(vim.json.decode, table.concat(raw, "\n"))
+    if dok and type(decoded) == "table" then
+      return decoded
+    end
+  end
+  return {}
+end
+
+local function save_trust(store)
+  pcall(vim.fn.mkdir, vim.fn.fnamemodify(trust_store_path(), ":h"), "p")
+  local fd = io.open(trust_store_path(), "w")
+  if not fd then
+    return
+  end
+  fd:write(vim.json.encode(store))
+  fd:write("\n")
+  pcall(function()
+    fd:close()
+  end)
+end
+
+-- Interactive prompting is only safe with a UI and outside a fast event. In a
+-- headless run (e.g. nvime's own MCP self-server) we fail closed.
+local function can_prompt()
+  return not vim.in_fast_event() and #vim.api.nvim_list_uis() > 0
+end
+
+local function describe_servers(servers)
+  local lines = {}
+  for name, entry in pairs(servers) do
+    local cmd = entry.command or entry.url or "(no command)"
+    if type(entry.args) == "table" and #entry.args > 0 then
+      cmd = cmd .. " " .. table.concat(entry.args, " ")
+    end
+    lines[#lines + 1] = string.format("  • %s: %s", name, cmd)
+  end
+  table.sort(lines)
+  return lines
+end
+
+-- Returns true when the project-declared servers may be spawned.
+local function ensure_project_trust(path, content, servers)
+  local c = cfg()
+  if c.project_config == false then
+    return false -- project file disabled entirely
+  end
+  if c.trust_project_config == true then
+    return true -- user opted to trust every repo
+  end
+  local root = repo_root()
+  local sig = vim.fn.sha256(content)
+  local store = load_trust()
+  local entry = store[root]
+  if entry and entry.signature == sig then
+    return entry.approved == true -- remembered decision for this exact content
+  end
+  if not can_prompt() then
+    vim.schedule(function()
+      vim.notify(
+        "nvime mcp: ignoring untrusted project MCP servers in "
+          .. path
+          .. " (open this repo interactively to review and trust them)",
+        vim.log.levels.WARN
+      )
+    end)
+    return false
+  end
+  local msg = table.concat({
+    "This repository's " .. path,
+    "declares MCP server commands that nvime would run as local processes with your privileges:",
+    "",
+    table.concat(describe_servers(servers), "\n"),
+    "",
+    "Only trust them if you trust this repository. Run these servers?",
+  }, "\n")
+  local choice = vim.fn.confirm(msg, "&No, skip them\n&Yes, trust this repo", 1, "Question")
+  local approved = choice == 2
+  store[root] = { signature = sig, approved = approved, path = path }
+  save_trust(store)
+  if not approved then
+    vim.schedule(function()
+      vim.notify("nvime mcp: project MCP servers not trusted; skipping them", vim.log.levels.INFO)
+    end)
+  end
+  return approved
+end
+
 -- Cache (path, mtime, size) → parsed servers. agents.lua calls servers()
 -- twice per spawn (once for claude, once for codex); without this we'd
--- readfile + JSON-decode the project config twice per turn.
+-- readfile + JSON-decode the project config twice per turn. The cached value
+-- already reflects the trust decision, so a declined repo is not re-prompted.
 local cached_project_key
 local cached_project_servers
 
@@ -58,11 +163,21 @@ local function read_project_servers()
   if not ok or not raw or #raw == 0 then
     return {}
   end
-  local decoded_ok, decoded = pcall(vim.json.decode, table.concat(raw, "\n"))
+  local content = table.concat(raw, "\n")
+  local decoded_ok, decoded = pcall(vim.json.decode, content)
   if not decoded_ok or type(decoded) ~= "table" then
     return {}
   end
   local servers = decoded.mcpServers or decoded.servers or {}
+  if vim.tbl_isempty(servers) then
+    cached_project_key, cached_project_servers = key, {}
+    return {}
+  end
+  -- Gate the untrusted project-declared servers before exposing them to a spawn.
+  if not ensure_project_trust(path, content, servers) then
+    cached_project_key, cached_project_servers = key, {}
+    return {}
+  end
   cached_project_key = key
   cached_project_servers = servers
   return servers

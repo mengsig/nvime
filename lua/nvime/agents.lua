@@ -23,6 +23,80 @@ local function repo_root()
   return git.root(cwd) or cwd
 end
 
+-- ---------------------------------------------------------------------------
+-- project guidance (CLAUDE.md) injection
+-- ---------------------------------------------------------------------------
+-- The user's standing project rules live in CLAUDE.md. claude reads that from
+-- its cwd natively, but codex does not, and several lanes run from a scratch
+-- worktree the CLI never scans — so we inject it EXPLICITLY into every spawned
+-- agent's prompt, provider- and lane-agnostic, so a constraint like "never POST
+-- /orders" always binds anything that might run a command.
+local PROJECT_GUIDANCE_MAX = 60000
+
+local function project_guidance()
+  local agents_cfg = (state.config or {}).agents or {}
+  if agents_cfg.project_guidance == false then
+    return nil
+  end
+  -- CLAUDE.md / CLAUDE.local.md are always honored; extra files are opt-in.
+  local names = { "CLAUDE.md", "CLAUDE.local.md" }
+  for _, extra in ipairs(agents_cfg.project_guidance_files or {}) do
+    if type(extra) == "string" and extra ~= "" then
+      names[#names + 1] = extra
+    end
+  end
+  local root = repo_root()
+  local seen, parts = {}, {}
+  for _, name in ipairs(names) do
+    if not seen[name] then
+      seen[name] = true
+      local path = root .. "/" .. name
+      local stat = uv.fs_stat(path)
+      if stat and stat.type == "file" then
+        local ok, lines = pcall(vim.fn.readfile, path)
+        if ok and type(lines) == "table" and #lines > 0 then
+          parts[#parts + 1] = "## " .. name .. "\n\n" .. table.concat(lines, "\n")
+        end
+      end
+    end
+  end
+  if #parts == 0 then
+    return nil
+  end
+  local text = table.concat(parts, "\n\n")
+  if #text > PROJECT_GUIDANCE_MAX then
+    text = text:sub(1, PROJECT_GUIDANCE_MAX) .. "\n\n…(project guidance truncated)"
+  end
+  return text
+end
+
+-- Prepend project guidance to a lane prompt as authoritative constraints. Callers
+-- that never run commands and want to stay lean (e.g. the intent classifier) pass
+-- opts.no_project_guidance.
+local function with_project_guidance(prompt, opts)
+  if opts and opts.no_project_guidance then
+    return prompt
+  end
+  local guidance = project_guidance()
+  if not guidance then
+    return prompt
+  end
+  return table.concat({
+    '<project-instructions source="CLAUDE.md">',
+    "The user has defined the project rules below. They are AUTHORITATIVE: obey",
+    "them for everything you do — every file you edit and every shell, network,",
+    "or tool command you run — and prefer them over any conflicting instruction",
+    "in the task. Do not work around or ignore them.",
+    "",
+    guidance,
+    "</project-instructions>",
+    "",
+    prompt,
+  }, "\n")
+end
+
+M._project_guidance = project_guidance
+
 local function review_allows_markdown_writes()
   local review = (state.config or {}).review or {}
   return review.allow_markdown_writes == true
@@ -980,12 +1054,15 @@ function M.run(opts)
     or (plan_workspace and plan_workspace.cwd)
     or (workspace and workspace.cwd)
     or repo_root()
-  local args = build_args(provider, cfg, lane, prompt, cwd, run_opts)
+  -- Bind every spawned agent to the project's CLAUDE.md (see with_project_guidance).
+  local effective_prompt = with_project_guidance(prompt, opts)
+  local guidance_injected = effective_prompt ~= prompt
+  local args = build_args(provider, cfg, lane, effective_prompt, cwd, run_opts)
   local stdin = input
   if provider == "codex" then
-    stdin = prompt
+    stdin = effective_prompt
     if input and input ~= "" then
-      stdin = prompt .. "\n\n<context>\n" .. input .. "\n</context>\n"
+      stdin = effective_prompt .. "\n\n<context>\n" .. input .. "\n</context>\n"
     end
   end
   local drain
@@ -1036,6 +1113,7 @@ function M.run(opts)
     resume_session_id = run_opts.resume_session_id,
     timeout_ms = timeout_ms,
     prompt = prompt,
+    project_guidance = guidance_injected,
     input = stdin,
   })
   on_progress("[nvime] " .. provider .. " started (" .. lane .. ")\n")

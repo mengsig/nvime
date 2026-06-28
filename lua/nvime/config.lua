@@ -203,6 +203,17 @@ M.defaults = {
     -- is killed (SIGTERM) and an `agent_timeout` audit event is written.
     timeout_ms = nil,
     lane_timeouts = {},
+    -- Inject the project's CLAUDE.md (and CLAUDE.local.md) into EVERY agent
+    -- nvime spawns — any provider, any lane (edit, plan, big change, chat) —
+    -- as authoritative, non-overridable instructions. claude reads CLAUDE.md
+    -- from its cwd natively, but codex does not and several lanes run from a
+    -- scratch worktree the CLI never scans, so we pass it explicitly so a rule
+    -- like "never POST /orders" reaches any agent that might run a command.
+    project_guidance = true,
+    -- Extra files (relative to the repo root) layered after CLAUDE.md, e.g.
+    -- { "CLAUDE.local.md", "AGENTS.md" }. CLAUDE.md / CLAUDE.local.md are always
+    -- included when present.
+    project_guidance_files = {},
   },
   bigchange = {
     -- Forced-comprehension review relaxation for self-evident blocks. When a
@@ -290,6 +301,14 @@ M.defaults = {
     enabled = true,
     config_path = nil, -- defaults to .nvime/mcp.json in a git repo
     servers = {},
+    -- A repo's own .nvime/mcp.json declares commands nvime would spawn as local
+    -- processes. Because reviewing/planning over an UNTRUSTED repo is the headline
+    -- use, those servers are gated: `project_config = false` ignores the project
+    -- file entirely; otherwise nvime prompts once per (repo, content) and persists
+    -- the decision (set `trust_project_config = true` to trust every repo without
+    -- a prompt — not recommended). `servers` above is always trusted.
+    project_config = true,
+    trust_project_config = false,
     expose_self = true,
     self_command = nil, -- defaults to `nvim --headless --cmd "lua require('nvime.mcp_server').run()"`
     -- Codex's non-interactive `exec` mode auto-cancels every MCP tool
@@ -428,10 +447,14 @@ local optional_types = {
   ["usage.budgets.lane_usd"] = { "table" },
   ["agents.timeout_ms"] = { "number", "nil" },
   ["agents.lane_timeouts"] = { "table" },
+  ["agents.project_guidance"] = { "boolean" },
+  ["agents.project_guidance_files"] = { "list" },
   ["test_loop.runner"] = { "string", "nil" },
   ["mcp.config_path"] = { "string", "nil" },
   ["mcp.self_command"] = { "string", "nil" },
   ["mcp.servers"] = { "table" },
+  ["mcp.project_config"] = { "boolean" },
+  ["mcp.trust_project_config"] = { "boolean" },
   ["verify.checks"] = { "table" },
   ["risk.sensitive_paths"] = { "list", "nil" },
   ["risk.generated_globs"] = { "list", "nil" },
