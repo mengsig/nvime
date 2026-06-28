@@ -61,6 +61,39 @@ local function plans_dir()
   return vim.fn.stdpath("state") .. "/nvime/plans"
 end
 
+-- A plan id is a directory name under .nvime/plans/ (`NNNN-kebab-slug`). It is
+-- read back from an UNTRUSTED plan.json, then concatenated into filesystem paths
+-- (write on author-exit, `dd` → vim.fn.delete(dir,'rf')). Reject anything with a
+-- path separator or `..` so a crafted id like "../../../tmp/pwn" can't escape.
+local function valid_plan_id(id)
+  return type(id) == "string" and id:match("^%d+%-[%l%d%-]+$") ~= nil
+end
+
+-- Resolve `path` (absolute or relative to `root`) and return its normalized
+-- absolute form ONLY if it stays inside `root`; nil otherwise. vim.fs.normalize
+-- collapses `.`/`..` lexically without requiring the path to exist (so it works
+-- for a not-yet-created step file), blocking both `..` escapes and absolute
+-- paths that point outside the project.
+local function confine_to_root(path, root)
+  if not path or path == "" or not root or root == "" then
+    return nil
+  end
+  root = vim.fs.normalize(vim.fn.fnamemodify(root, ":p")):gsub("/+$", "")
+  local abs = path
+  if abs:sub(1, 1) ~= "/" then
+    abs = root .. "/" .. abs
+  end
+  abs = vim.fs.normalize(abs)
+  if abs == root or vim.startswith(abs, root .. "/") then
+    return abs
+  end
+  return nil
+end
+
+-- Test-only exports.
+M._valid_plan_id = valid_plan_id
+M._confine_to_root = confine_to_root
+
 local function plan_dir_for(id)
   return plans_dir() .. "/" .. id
 end
@@ -316,11 +349,18 @@ local function migrate_plan(plan)
 end
 
 local function load_plan(id)
+  if not valid_plan_id(id) then
+    return nil
+  end
   local plan = read_json(plan_json_path(id))
   if not plan then
     return nil
   end
-  return migrate_plan(plan)
+  plan = migrate_plan(plan)
+  -- The on-disk directory name is authoritative; ignore whatever `id` the
+  -- (untrusted) plan.json claims, so a forged id can't redirect later writes.
+  plan.id = id
+  return plan
 end
 
 local function discover_plans()
@@ -376,6 +416,10 @@ function M.get(id)
 end
 
 local function persist_plan(plan)
+  if not valid_plan_id(plan.id) then
+    vim.notify("nvime: refusing to write plan with an invalid id: " .. tostring(plan.id), vim.log.levels.ERROR)
+    return false
+  end
   plan.updated_at = now_ts()
   plan.version = SCHEMA_VERSION
   local ok, err = write_json(plan_json_path(plan.id), plan)
@@ -1203,6 +1247,9 @@ end
 M.set_step_status = set_step_status
 
 function M.delete(plan_id)
+  if not valid_plan_id(plan_id) then
+    return false
+  end
   local plan = M.get(plan_id)
   if not plan then
     return false
@@ -1240,9 +1287,12 @@ local function open_step_target(plan, step)
     return false, "step has no file"
   end
   local root = git.root() or vim.fn.getcwd()
-  local abs = file
-  if abs:sub(1, 1) ~= "/" then
-    abs = root .. "/" .. file
+  -- step.file comes from the (untrusted) plan.json. Confine it to the repo root
+  -- before any mkdir/writefile/edit, so an absolute path or `..` escape can't
+  -- create directory trees / empty files anywhere on disk.
+  local abs = confine_to_root(file, root)
+  if not abs then
+    return false, "step.file escapes the project root: " .. tostring(file)
   end
   local range = step.range
   if range == "new" or range == nil then

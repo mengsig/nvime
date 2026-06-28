@@ -6739,6 +6739,38 @@ end)();
   package.loaded["nvime.mcp"] = nil
 
   vim.cmd("cd " .. vim.fn.fnameescape(prev_cwd))
+end)();
+(function()
+  -- plan.id / step.file path-traversal guards (H7 / M19)
+  local plan = require("nvime.plan")
+  assert_eq(plan._valid_plan_id("0001-foo"), true, "plan id: NNNN-slug is valid")
+  assert_eq(plan._valid_plan_id("../../pwn"), false, "plan id: traversal rejected")
+  assert_eq(plan._valid_plan_id("0001-foo/../x"), false, "plan id: embedded slash rejected")
+  assert_eq(plan._valid_plan_id("0001-FOO"), false, "plan id: uppercase rejected")
+
+  local root = "/home/u/proj"
+  assert_eq(plan._confine_to_root("src/x.lua", root), root .. "/src/x.lua", "confine: relative stays in root")
+  assert_eq(plan._confine_to_root("../../etc/passwd", root), nil, "confine: .. escape rejected")
+  assert_eq(plan._confine_to_root("/etc/passwd", root), nil, "confine: absolute outside rejected")
+  assert_eq(plan._confine_to_root("a/../b", root), root .. "/b", "confine: interior .. normalized in root")
+
+  -- load_plan derives id from the on-disk dir, ignoring a forged plan.json id
+  local state = require("nvime.state")
+  local saved_dir = state.config.plan and state.config.plan.dir
+  local saved_loaded, saved_plans = state.plan.loaded, state.plan.plans
+  local tmp = vim.fn.tempname()
+  vim.fn.mkdir(tmp .. "/0001-real", "p")
+  state.config.plan = state.config.plan or {}
+  state.config.plan.dir = tmp
+  local fd = io.open(tmp .. "/0001-real/plan.json", "w")
+  fd:write(vim.json.encode({ version = 1, id = "../../../tmp/pwn", title = "t", steps = {} }))
+  fd:close()
+  state.plan.loaded = false
+  state.plan.plans = nil
+  local loaded = plan.get("0001-real")
+  assert(loaded and loaded.id == "0001-real", "load_plan: on-disk dir id is authoritative over plan.json")
+  state.config.plan.dir = saved_dir
+  state.plan.loaded, state.plan.plans = saved_loaded, saved_plans
 end)()
 
 print("nvime headless spec passed")
