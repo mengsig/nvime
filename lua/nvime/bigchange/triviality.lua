@@ -554,10 +554,37 @@ function M.applies(session)
   return d.threshold ~= nil
 end
 
+-- True when any changed hunk touches a path the policy marks human-only
+-- (secrets, keys, .env, lockfiles, migrations). Such a change must always be
+-- reviewed — never auto-cleared — even when its content looks self-evident.
+-- Fail-open: if policy_rules is unavailable the normal review still runs.
+local function touches_protected_path(hunks, block)
+  local ok, policy_rules = pcall(require, "nvime.policy_rules")
+  if not ok or type(policy_rules.evaluate) ~= "function" then
+    return false
+  end
+  local seen = {}
+  for _, h in ipairs(hunks or {}) do
+    local f = h.file or (block and block.file)
+    if f and not seen[f] then
+      seen[f] = true
+      local res = policy_rules.evaluate(f, "review")
+      if type(res) == "table" and res.require_human then
+        return true
+      end
+    end
+  end
+  return false
+end
+
 -- Classify a block. `hunks` is blocks.block_hunks(session, block).
 -- Returns { trivial = bool, category = string|nil, source = string|nil }.
 function M.classify(session, block, hunks)
   if not M.applies(session) then
+    return { trivial = false }
+  end
+  -- Policy-protected paths are never self-evident: force human review.
+  if touches_protected_path(hunks, block) then
     return { trivial = false }
   end
   local file = block and block.file

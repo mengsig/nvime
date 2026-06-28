@@ -95,23 +95,52 @@ function M.start(session, cb)
       end
     end)
     if not applied_ok then
-      -- Roll back so the user is left where they started, not stranded on an
-      -- empty branch. Restore their original branch and delete the new one.
+      -- The `--3way` retry can PARTIALLY apply, leaving conflict markers and
+      -- unmerged index entries on the new branch — a plain `checkout` back would
+      -- then be REFUSED and `branch -D` (the current branch) would fail, yet the
+      -- old code still claimed "rolled back". Hard-reset to discard the partial
+      -- apply, force-switch back, delete the branch, and VERIFY we actually
+      -- returned before telling the user it rolled back.
+      local target = (prior_branch and prior_branch ~= "" and prior_branch ~= "HEAD") and prior_branch or start_point
+      local back_ok
       store.with_trusted(function()
-        if prior_branch and prior_branch ~= "" and prior_branch ~= "HEAD" then
-          git.systemlist({ "git", "-C", root, "checkout", prior_branch })
-        else
-          git.systemlist({ "git", "-C", root, "checkout", start_point })
+        git.systemlist({ "git", "-C", root, "reset", "--hard" })
+        local out = git.systemlist({ "git", "-C", root, "checkout", "--force", target })
+        back_ok = git_ok(out)
+        if back_ok then
+          git.systemlist({ "git", "-C", root, "branch", "-D", branch })
         end
-        git.systemlist({ "git", "-C", root, "branch", "-D", branch })
       end)
-      vim.notify(
-        "nvime bigchange: patch did not apply cleanly; rolled back to '"
-          .. (prior_branch or start_point)
-          .. "'. Patch saved at: "
-          .. patch_file,
-        vim.log.levels.ERROR
-      )
+      if back_ok then
+        vim.notify(
+          "nvime bigchange: patch did not apply cleanly; rolled back to '"
+            .. target
+            .. "'. Patch saved at: "
+            .. patch_file,
+          vim.log.levels.ERROR
+        )
+      else
+        vim.notify(
+          "nvime bigchange: patch did not apply cleanly AND automatic rollback could not return you to '"
+            .. target
+            .. "'. You are likely still on branch '"
+            .. branch
+            .. "' with a partially-applied/conflicted tree. Clean up manually:\n"
+            .. "  git -C "
+            .. root
+            .. " reset --hard && git -C "
+            .. root
+            .. " checkout "
+            .. target
+            .. " && git -C "
+            .. root
+            .. " branch -D "
+            .. branch
+            .. "\nPatch saved at: "
+            .. patch_file,
+          vim.log.levels.ERROR
+        )
+      end
       return
     end
 

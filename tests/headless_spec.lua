@@ -300,6 +300,17 @@ do
     "code after a ctx-closed docstring is not trivial"
   )
 
+  -- contained H5: a change touching a policy-protected (human-only) path —
+  -- secrets, .env, lockfiles, migrations — never auto-clears, even when the
+  -- content looks self-evident.
+  assert_eq(classify(".env", { { "add", "# DB_HOST" } }).trivial, false, ".env is never auto-cleared")
+  assert_eq(
+    classify("secrets/config.yaml", { { "add", "key: value" } }).trivial,
+    false,
+    "secrets/** is never auto-cleared"
+  )
+  assert_eq(classify("Cargo.lock", { { "add", 'name = "x"' } }).trivial, false, "lockfile is never auto-cleared")
+
   -- soundness guards (red-team): a line that merely BEGINS like an import but
   -- also runs code must never auto-clear — the whole point of forced review.
   assert_eq(
