@@ -15,7 +15,7 @@ It is a Neovim Lua plugin for getting real shit done with Claude Code and Codex 
 
 ### Plan picker
 
-`<leader>nP` opens the plan picker — every plan in `.nvime/plans/` plus a live "drafting…" row when an author run is in flight.
+`<leader>nP` opens the plan picker — every plan in `.nvime/plans/` plus a live "drafting…" row when an author run is in flight. In the picker: `<CR>` opens the plan at its current phase, `n` (also `N` / `<C-n>`) starts a new plan via compose, `R` re-plans a row from a fresh brief (full rewrite), `dd` deletes a plan, `r` refreshes the list, and `q` / `<Esc>` close.
 
 ![nvime plan picker](docs/plan-picker.png)
 
@@ -59,7 +59,7 @@ This is an editor discipline tool, not a security sandbox. It prevents accidenta
 
 ![nvime dashboard](docs/dashboard.png)
 
-Screenshots of the plan workflow are in [Plan picker](#plan-picker), [Plan view](#plan-view), [Plan compose](#plan-compose), and [Inline diff review](#inline-diff-review).
+Screenshots of the plan workflow are in [Plan picker](#plan-picker), [Plan view](#plan-view-phase-0), [Plan compose](#plan-compose), and [Inline diff review](#inline-diff-review).
 
 ### Big Change
 
@@ -243,13 +243,9 @@ require("nvime").setup({
   plan = {
     enabled = true,
     dir = nil, -- defaults to <git-root>/.nvime/plans
-    auto_open = true,
-    auto_in_progress = true,
-    inject_context_chars = 480,
-    devils_advocate = true,
+    auto_open = true, -- open the rendered plan view after authoring
     test_file = nil,
     test_runner = nil,
-    session_continuity = "plan", -- "plan" or "none"
   },
   sessions = {
     enabled = true,
