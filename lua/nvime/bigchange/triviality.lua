@@ -54,6 +54,30 @@ local CONFIG_GLOBS = {
   "**/package.json",
 }
 
+-- Config/doc paths that LOOK like value files but can carry executable behavior
+-- (CI workflows with `run:` steps, package manifests with install/postinstall
+-- scripts, compose/Dockerfiles, docs that are actually .py/.sh). These are
+-- excluded from the file-level doc/config auto-clear so their changes fall
+-- through to per-line classification — a value/comment line still clears, but a
+-- script/command line stays substantive instead of clearing by path alone.
+local EXEC_CONFIG_GLOBS = {
+  ".github/**",
+  "**/.github/**",
+  "package.json",
+  "**/package.json",
+  "Dockerfile",
+  "**/Dockerfile",
+  "**/Dockerfile.*",
+  "**/*compose*.yml",
+  "**/*compose*.yaml",
+  "docs/**/*.py",
+  "doc/**/*.py",
+  "docs/**/*.sh",
+  "doc/**/*.sh",
+  "**/Makefile",
+  "Makefile",
+}
+
 -- Comment prefix(es) by file extension.
 local COMMENT_PREFIXES = {
   lua = { "--" },
@@ -191,8 +215,19 @@ local function is_comment(trimmed, file)
     end
   end
   if ext and C_FAMILY[ext] then
-    if vim.startswith(trimmed, "/*") or vim.startswith(trimmed, "*/") or vim.startswith(trimmed, "*") then
+    if vim.startswith(trimmed, "/*") or vim.startswith(trimmed, "*/") then
       return true
+    end
+    -- A leading `*` is only a block-comment continuation (javadoc/qdoc style)
+    -- when it stands alone or is followed by whitespace or another `*`. A `*`
+    -- glued to an identifier/operator is a pointer deref or multiply that begins
+    -- a real statement (`*p = evil();`, `*self.count += 1`, `*out++ = *in++`),
+    -- which must NOT be auto-cleared as a comment.
+    if vim.startswith(trimmed, "*") then
+      local after = trimmed:sub(2, 2)
+      if after == "" or after == " " or after == "\t" or after == "*" or after == "/" then
+        return true
+      end
     end
   end
   return false
@@ -317,11 +352,16 @@ end
 -- substantive (executable / meaningful code). doc and config are file-level:
 -- ANY line in such a file is trivial.
 function M._trivial_kind(text, file)
-  if path_matches_any(file, doc_globs()) then
-    return "doc"
-  end
-  if path_matches_any(file, CONFIG_GLOBS) then
-    return "config"
+  -- An executable-capable config/doc file is classified per-line (below), never
+  -- whole-file by path, so a `run:`/script/command line can't auto-clear.
+  local exec_config = path_matches_any(file, EXEC_CONFIG_GLOBS)
+  if not exec_config then
+    if path_matches_any(file, doc_globs()) then
+      return "doc"
+    end
+    if path_matches_any(file, CONFIG_GLOBS) then
+      return "config"
+    end
   end
   local trimmed = vim.trim(text or "")
   if trimmed == "" then
@@ -384,26 +424,37 @@ local function scan_changed(hunks, file)
     end
   end
   for _, h in ipairs(hunks or {}) do
-    -- Import-bracket state never spans a hunk: a multi-line import is contiguous
-    -- source, so its opener and closer share one hunk. Resetting per hunk stops
-    -- an import whose closer fell outside the diff context from leaking into a
+    -- Classify each hunk against ITS OWN file, not the (agent-declared) block
+    -- file: an agent could group real .py/.go code into a block it mislabels
+    -- "README.md" so every line reads as doc and auto-clears. h.file is the
+    -- diff's real path; `file` is only a fallback.
+    local hfile = h.file or file
+    -- Import-bracket AND docstring state never span a hunk: each is contiguous
+    -- source whose opener and closer share one hunk. Resetting per hunk stops a
+    -- region whose closer fell outside the diff context from leaking into a
     -- later hunk and swallowing real code there.
     streams.add.imp_open, streams.add.imp_depth = false, 0
     streams.del.imp_open, streams.del.imp_depth = false, 0
+    streams.add.ds_open, streams.add.ds_delim = false, nil
+    streams.del.ds_open, streams.del.ds_delim = false, nil
     for _, l in ipairs(h.lines or {}) do
       local text = l.text or ""
       local trimmed = vim.trim(text)
-      local code = code_only(trimmed, file)
+      local code = code_only(trimmed, hfile)
       if l.kind == "ctx" then
-        -- A context (unchanged) line moves the import depth in BOTH streams so a
-        -- changed symbol nested inside an otherwise-unchanged multi-line import
-        -- (one name added to a `from x import (…)`) still reads as an import
-        -- continuation, not substantive code. Context never sets kinds /
-        -- substantive / any — it only keeps the bracket depth honest.
+        -- A context (unchanged) line moves import/docstring state in BOTH streams
+        -- so a change nested inside an otherwise-unchanged region reads correctly,
+        -- and — critically — a docstring whose CLOSING delimiter is a context line
+        -- is closed here, so executable add-lines AFTER it are not swept up as
+        -- docstring. Context never sets kinds / substantive / any.
         for _, st in pairs(streams) do
-          if st.imp_open then
+          if st.ds_open then
+            if st.ds_delim and trimmed:find(vim.pesc(st.ds_delim)) then
+              st.ds_open, st.ds_delim = false, nil
+            end
+          elseif st.imp_open then
             advance(st, code)
-          elseif is_import(trimmed, file) and not has_exec_tail(code) then
+          elseif is_import(trimmed, hfile) and not has_exec_tail(code) then
             open_block(st, code)
           end
         end
@@ -425,17 +476,17 @@ local function scan_changed(hunks, file)
         elseif st.ds_open then
           kinds.docstring = true
           if st.ds_delim and trimmed:find(vim.pesc(st.ds_delim)) then
-            st.ds_open = false
+            st.ds_open, st.ds_delim = false, nil
           end
         else
-          local d, n = docstring_open(trimmed, file)
+          local d, n = docstring_open(trimmed, hfile)
           if d then
             kinds.docstring = true
             if n < 2 then
               st.ds_open, st.ds_delim = true, d
             end
           else
-            local k = M._trivial_kind(text, file)
+            local k = M._trivial_kind(text, hfile)
             if k then
               kinds[k] = true
               -- An import opener with an unbalanced bracket starts a multi-line

