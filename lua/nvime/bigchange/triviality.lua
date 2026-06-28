@@ -101,15 +101,26 @@ local C_FAMILY = {
   zig = true,
 }
 
--- Import/require/use statement pattern(s) by file extension.
+-- Import/require/use statement pattern(s) by file extension. `is_import` only
+-- checks that a line BEGINS like an import; `has_exec_tail` then rejects a match
+-- that also carries executable code (a `;`-compound, an invoked require), so
+-- these can stay permissive without auto-clearing real code.
 local IMPORT_PATTERNS = {
   py = { "^import%s", "^from%s+[%w%._]+%s+import%s" },
-  lua = { "^local%s+[%w_,%s]+=%s*require", "^require%s*%(" },
-  js = { "^import%s", "^export%s+.*%sfrom%s", "=%s*require%s*%(" },
-  ts = { "^import%s", "^export%s+.*%sfrom%s", "=%s*require%s*%(" },
-  tsx = { "^import%s", "^export%s+.*%sfrom%s", "=%s*require%s*%(" },
+  -- `require` must be the real call/keyword, not an identifier that merely
+  -- begins with those letters (`required_settings`, `require_init`): the
+  -- frontier `%f[^%w_]` anchors the match to a word boundary after `require`.
+  lua = { "^local%s+[%w_,%s]+=%s*require%f[^%w_]", "^require%s*%(" },
+  -- `^import%s+["'{*%w]` excludes the space-form dynamic import `import (…)` (a
+  -- Promise-returning call, not a static import). `^export%s*{` opens a
+  -- multi-line re-export whose `from` clause sits on the closing line.
+  js = { "^import%s+[\"'{*%w]", "^export%s+.*%sfrom%s", "^export%s*{", "=%s*require%s*%(" },
+  ts = { "^import%s+[\"'{*%w]", "^export%s+.*%sfrom%s", "^export%s*{", "=%s*require%s*%(" },
+  jsx = { "^import%s+[\"'{*%w]", "^export%s+.*%sfrom%s", "^export%s*{", "=%s*require%s*%(" },
+  tsx = { "^import%s+[\"'{*%w]", "^export%s+.*%sfrom%s", "^export%s*{", "=%s*require%s*%(" },
   go = { "^import%s" },
-  rs = { "^use%s" },
+  -- `pub use` / `pub(crate) use` re-exports are still self-evident imports.
+  rs = { "^use%s", "^pub%s+use%s", "^pub%b()%s*use%s" },
   c = { "^#include" },
   cpp = { "^#include" },
   h = { "^#include" },
@@ -201,18 +212,84 @@ local function is_import(trimmed, file)
   return false
 end
 
--- Net bracket delta on a line: opening `(`/`{` minus closing `)`/`}`. A
--- multi-line import block (Python `from x import (…)`, Go `import (…)`, JS/TS
--- `import {…} from`, Rust `use a::{…}`) opens with a positive delta and closes
--- when the running depth returns to zero. Its continuation lines carry only
--- symbol names (`SETTINGS,`) and a bare closer (`)`), so without depth tracking
--- they read as substantive code and the whole import wrongly needs a graded
--- explanation. Import statements never embed brackets inside string/char
--- literals, so a raw count is exact here.
-local function net_brackets(s)
-  local _, opens = s:gsub("[%({]", "")
-  local _, closes = s:gsub("[%)}]", "")
+-- Reduce a line to its CODE: blank out string/char-literal spans and drop a
+-- trailing line comment. Bracket counting and trailing-code detection run on
+-- this, so a `(` inside a comment or a `;` inside a string can neither corrupt
+-- the import-bracket depth nor hide executable code. Block comments are not
+-- handled — an import line never opens one.
+local function code_only(line, file)
+  local markers = COMMENT_PREFIXES[ext_of(file)] or {}
+  local out, i, n, quote = {}, 1, #line, nil
+  while i <= n do
+    local c = line:sub(i, i)
+    if quote then
+      if c == "\\" then
+        i = i + 2 -- skip the escaped char so an escaped quote does not close early
+      else
+        if c == quote then
+          quote = nil
+        end
+        i = i + 1
+      end
+    else
+      local comment = false
+      for _, m in ipairs(markers) do
+        if line:sub(i, i + #m - 1) == m then
+          comment = true
+          break
+        end
+      end
+      if comment then
+        break
+      elseif c == '"' or c == "'" or c == "`" then
+        quote, i = c, i + 1
+      else
+        out[#out + 1], i = c, i + 1
+      end
+    end
+  end
+  return table.concat(out)
+end
+
+-- Net bracket delta on already-`code_only`-sanitized text: opening `(`/`{` minus
+-- closing `)`/`}`. A multi-line import block (Python `from x import (…)`, Go
+-- `import (…)`, JS/TS `import {…} from`, Rust `use a::{…}`) opens with a positive
+-- delta and closes when the running depth returns to zero; its continuation
+-- lines carry only symbol names and a bare closer.
+local function net_brackets(code)
+  local _, opens = code:gsub("[%({]", "")
+  local _, closes = code:gsub("[%)}]", "")
   return opens - closes
+end
+
+-- True when sanitized `code` carries executable code beyond a self-contained
+-- import: a compound statement after a top-level `;`, or a `require(...)` whose
+-- result is immediately invoked / method-chained (`require("x").setup()`,
+-- `require("x")(app)`). Such a line begins like an import but is NOT trivial.
+local function has_exec_tail(code)
+  local semi = code:find(";")
+  while semi do
+    if code:find("%S", semi + 1) then
+      return true
+    end
+    semi = code:find(";", semi + 1)
+  end
+  local pos = code:find("require%s*%(")
+  while pos do
+    -- Bind `open` to a single value: as the trailing arg to find it would
+    -- otherwise spill its second return into find's `plain` flag.
+    local open = code:find("%(", pos)
+    local _, close = code:find("%b()", open)
+    if not close then
+      break
+    end
+    -- A `.field`/`:method` chain (or none) followed by `(` is an invocation.
+    if code:sub(close + 1):match("^[%.%w_:]*%s*%(") then
+      return true
+    end
+    pos = code:find("require%s*%(", close + 1)
+  end
+  return false
 end
 
 -- When `trimmed` (a leading-trimmed line) begins a triple-quoted docstring for
@@ -253,7 +330,9 @@ function M._trivial_kind(text, file)
   if is_comment(trimmed, file) then
     return "comment"
   end
-  if is_import(trimmed, file) then
+  -- An import prefix only counts when nothing executable rides on the same line
+  -- (`import os; wipe()`, `local x = require("m").run()`).
+  if is_import(trimmed, file) and not has_exec_tail(code_only(trimmed, file)) then
     return "import"
   end
   return nil
@@ -290,18 +369,19 @@ local function scan_changed(hunks, file)
     add = { ds_open = false, ds_delim = nil, imp_open = false, imp_depth = 0 },
     del = { ds_open = false, ds_delim = nil, imp_open = false, imp_depth = 0 },
   }
-  -- While inside an import block, fold this line's brackets into the running
-  -- depth and close at zero. Returns true while the stream is (still) inside the
-  -- block, so the caller treats the line as an import continuation.
-  local function in_import(st, trimmed)
-    if not st.imp_open then
-      return false
+  -- Open an import block when an import opener leaves an unbalanced bracket.
+  local function open_block(st, code)
+    local depth = net_brackets(code)
+    if depth > 0 then
+      st.imp_open, st.imp_depth = true, depth
     end
-    st.imp_depth = st.imp_depth + net_brackets(trimmed)
+  end
+  -- Advance an open block's depth by this line's brackets, closing at zero.
+  local function advance(st, code)
+    st.imp_depth = st.imp_depth + net_brackets(code)
     if st.imp_depth <= 0 then
       st.imp_open, st.imp_depth = false, 0
     end
-    return true
   end
   for _, h in ipairs(hunks or {}) do
     -- Import-bracket state never spans a hunk: a multi-line import is contiguous
@@ -313,30 +393,35 @@ local function scan_changed(hunks, file)
     for _, l in ipairs(h.lines or {}) do
       local text = l.text or ""
       local trimmed = vim.trim(text)
+      local code = code_only(trimmed, file)
       if l.kind == "ctx" then
         -- A context (unchanged) line moves the import depth in BOTH streams so a
         -- changed symbol nested inside an otherwise-unchanged multi-line import
         -- (one name added to a `from x import (…)`) still reads as an import
-        -- continuation, not substantive code. Context lines never set kinds /
-        -- substantive / any — they only keep the bracket depth honest.
-        local inside_add = in_import(streams.add, trimmed)
-        local inside_del = in_import(streams.del, trimmed)
-        if not (inside_add and inside_del) then
-          local nb = net_brackets(trimmed)
-          if nb > 0 and is_import(trimmed, file) then
-            if not streams.add.imp_open then
-              streams.add.imp_open, streams.add.imp_depth = true, nb
-            end
-            if not streams.del.imp_open then
-              streams.del.imp_open, streams.del.imp_depth = true, nb
-            end
+        -- continuation, not substantive code. Context never sets kinds /
+        -- substantive / any — it only keeps the bracket depth honest.
+        for _, st in pairs(streams) do
+          if st.imp_open then
+            advance(st, code)
+          elseif is_import(trimmed, file) and not has_exec_tail(code) then
+            open_block(st, code)
           end
         end
       elseif l.kind == "add" or l.kind == "del" then
         any = true
         local st = streams[l.kind]
-        if in_import(st, trimmed) then
-          kinds.import = true
+        if st.imp_open then
+          -- Inside a multi-line import the lines are bare member names; a call
+          -- `(`, an assignment `=`, or a trailing statement means real code rode
+          -- in (a closer that also runs code, or an unbalanced opener swallowing
+          -- the next statement), so the block ends and this line is substantive.
+          if has_exec_tail(code) or code:find("[%(=]") then
+            substantive = true
+            st.imp_open, st.imp_depth = false, 0
+          else
+            kinds.import = true
+            advance(st, code)
+          end
         elseif st.ds_open then
           kinds.docstring = true
           if st.ds_delim and trimmed:find(vim.pesc(st.ds_delim)) then
@@ -353,13 +438,10 @@ local function scan_changed(hunks, file)
             local k = M._trivial_kind(text, file)
             if k then
               kinds[k] = true
-              -- An import line with an unbalanced opener starts a multi-line
+              -- An import opener with an unbalanced bracket starts a multi-line
               -- import block whose continuation lines follow until it balances.
               if k == "import" then
-                local nb = net_brackets(trimmed)
-                if nb > 0 then
-                  st.imp_open, st.imp_depth = true, nb
-                end
+                open_block(st, code)
               end
             else
               substantive = true

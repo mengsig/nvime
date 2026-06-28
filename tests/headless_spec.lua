@@ -237,6 +237,77 @@ do
     "import block does not leak across a hunk boundary into code"
   )
 
+  -- soundness guards (red-team): a line that merely BEGINS like an import but
+  -- also runs code must never auto-clear — the whole point of forced review.
+  assert_eq(
+    classify("a.py", { { "add", 'import os; os.system("rm -rf /")' } }).trivial,
+    false,
+    "import with a ;-compound statement is not trivial"
+  )
+  assert_eq(
+    classify("a.js", { { "add", 'const router = require("./routes")(app)' } }).trivial,
+    false,
+    "a require whose result is invoked is not trivial"
+  )
+  assert_eq(
+    classify("a.lua", { { "add", 'require("x").setup()' } }).trivial,
+    false,
+    "a require with a chained call is not trivial"
+  )
+  assert_eq(
+    classify("a.js", { { "add", 'import ("./mod")' } }).trivial,
+    false,
+    "the space-form dynamic import is a call, not a trivial import"
+  )
+  assert_eq(
+    classify("a.lua", { { "add", "local opts = required_settings" } }).trivial,
+    false,
+    "an identifier merely starting with 'require' is not an import"
+  )
+  -- a `(` living in a trailing comment must not corrupt the bracket depth and
+  -- swallow the real code that follows the import.
+  assert_eq(
+    classify("a.py", {
+      { "add", "from json import (" },
+      { "add", "    loads,  # parse per RFC 8259 (section 9" },
+      { "add", ")" },
+      { "add", "config = load_secrets()" },
+    }).trivial,
+    false,
+    "a bracket inside a comment does not leak the import block into code"
+  )
+  -- code riding on a multi-line import's closer / opener line stays substantive.
+  assert_eq(
+    classify("a.py", { { "add", "from x import (" }, { "add", "    a," }, { "add", ") ; run()" } }).trivial,
+    false,
+    "executable code on the import closer line is not trivial"
+  )
+  assert_eq(
+    classify("a.lua", {
+      { "add", 'local app = require("app").configure({' },
+      { "add", "  port = 8080," },
+      { "add", "})" },
+    }).trivial,
+    false,
+    "a require chained into a config-table call is not trivial"
+  )
+  -- false-negatives the user wants cleared: pub-use and keyword-on-closer
+  -- re-exports are still self-evident imports.
+  assert_eq(
+    classify("a.rs", { { "add", "pub use crate::config::Settings;" } }).category,
+    "imports",
+    "rust pub use re-export is imports"
+  )
+  assert_eq(
+    classify("a.js", {
+      { "add", "export {" },
+      { "add", "  a," },
+      { "add", '} from "./mod"' },
+    }).category,
+    "imports",
+    "multi-line export re-export (from on closer) is imports"
+  )
+
   -- documentation files (by extension and by docs/** directory)
   assert_eq(classify("README.md", { { "add", "# New heading" } }).category, "docs", "markdown is docs")
   assert_eq(classify("docs/guide.rst", { { "add", "Some prose." } }).category, "docs", "docs/** is docs")
