@@ -133,6 +133,110 @@ do
   local js_imports = classify("src/x.js", { { "add", 'import x from "y"' } })
   assert_eq(js_imports.category, "imports", "js imports category")
 
+  -- multi-line import blocks (issue #4): only the opener carries the keyword, so
+  -- the symbol lines and closer are tracked by bracket depth across py / go /
+  -- js / rust. Moving a method/constant reshuffles these and must stay trivial.
+  assert_eq(
+    classify("app/x.py", {
+      { "add", "from app.config import (" },
+      { "add", "    SETTINGS," },
+      { "add", "    TIMEOUT," },
+      { "add", ")" },
+    }).category,
+    "imports",
+    "python parenthesized multi-line import is imports"
+  )
+  assert_eq(
+    classify("pkg/x.go", {
+      { "add", "import (" },
+      { "add", '\t"fmt"' },
+      { "add", '\t"os"' },
+      { "add", ")" },
+    }).category,
+    "imports",
+    "go block import is imports"
+  )
+  assert_eq(
+    classify("src/x.js", {
+      { "add", "import {" },
+      { "add", "  foo," },
+      { "add", '} from "./baz"' },
+    }).category,
+    "imports",
+    "js multi-line named import is imports"
+  )
+  assert_eq(
+    classify("src/x.rs", {
+      { "add", "use std::collections::{" },
+      { "add", "    HashMap," },
+      { "add", "    BTreeMap," },
+      { "add", "};" },
+    }).category,
+    "imports",
+    "rust nested use block is imports"
+  )
+  -- a symbol moved out of an unchanged multi-line import: opener/closer are
+  -- context, only the inner name changed — still recognised as an import.
+  assert_eq(
+    classify("app/x.py", {
+      { "ctx", "from app.config import (" },
+      { "del", "    TIMEOUT," },
+      { "ctx", ")" },
+      { "add", "from app.constants import TIMEOUT" },
+    }).category,
+    "imports",
+    "inner symbol change inside an unchanged import block is imports"
+  )
+  -- guard: a multi-line call or table literal has no import keyword, so the
+  -- opener does not start an import block and the body stays substantive.
+  assert_eq(
+    classify("app/x.py", { { "add", "result = compute(" }, { "add", "    x," }, { "add", ")" } }).trivial,
+    false,
+    "multi-line function call is not a trivial import"
+  )
+  assert_eq(
+    classify("lua/foo.lua", { { "add", "local config = {" }, { "add", "  timeout = 30," }, { "add", "}" } }).trivial,
+    false,
+    "lua table literal is not a trivial import"
+  )
+  -- guard: executable code after a multi-line import closes stays substantive.
+  assert_eq(
+    classify("app/x.py", {
+      { "add", "from x import (" },
+      { "add", "    a," },
+      { "add", ")" },
+      { "add", "y = compute()" },
+    }).trivial,
+    false,
+    "code following a multi-line import is not trivial"
+  )
+  -- guard: an import block whose closer falls outside the diff context must not
+  -- leak across the hunk boundary and swallow real code in a later hunk.
+  assert_eq(
+    triviality.classify({ difficulty = "easy" }, { file = "app/x.py" }, {
+      {
+        file = "app/x.py",
+        header = "@@",
+        lines = {
+          { kind = "ctx", text = "from app.config import (" },
+          { kind = "add", text = "    NEW," },
+          { kind = "ctx", text = "    a," },
+          { kind = "ctx", text = "    b," },
+        },
+      },
+      {
+        file = "app/x.py",
+        header = "@@",
+        lines = {
+          { kind = "ctx", text = "def handler():" },
+          { kind = "add", text = "    do_dangerous_thing()" },
+        },
+      },
+    }).trivial,
+    false,
+    "import block does not leak across a hunk boundary into code"
+  )
+
   -- documentation files (by extension and by docs/** directory)
   assert_eq(classify("README.md", { { "add", "# New heading" } }).category, "docs", "markdown is docs")
   assert_eq(classify("docs/guide.rst", { { "add", "Some prose." } }).category, "docs", "docs/** is docs")

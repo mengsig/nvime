@@ -201,6 +201,20 @@ local function is_import(trimmed, file)
   return false
 end
 
+-- Net bracket delta on a line: opening `(`/`{` minus closing `)`/`}`. A
+-- multi-line import block (Python `from x import (…)`, Go `import (…)`, JS/TS
+-- `import {…} from`, Rust `use a::{…}`) opens with a positive delta and closes
+-- when the running depth returns to zero. Its continuation lines carry only
+-- symbol names (`SETTINGS,`) and a bare closer (`)`), so without depth tracking
+-- they read as substantive code and the whole import wrongly needs a graded
+-- explanation. Import statements never embed brackets inside string/char
+-- literals, so a raw count is exact here.
+local function net_brackets(s)
+  local _, opens = s:gsub("[%({]", "")
+  local _, closes = s:gsub("[%)}]", "")
+  return opens - closes
+end
+
 -- When `trimmed` (a leading-trimmed line) begins a triple-quoted docstring for
 -- `file`, return the matched delimiter and the number of times it occurs on the
 -- line (>= 2 means the docstring also closes on this same line). Returns nil
@@ -260,40 +274,93 @@ local function each_changed(hunks, fn)
   return any
 end
 
--- Scan the changed lines IN ORDER, tracking triple-quoted docstring state so a
--- multi-line docstring's interior prose is recognised even though only its
--- opening line carries the delimiter. Returns { kinds = set, substantive = bool,
--- any = bool } where `kinds` keys are trivial categories (doc/config/comment/
--- import/docstring/blank) seen across the block.
+-- Scan the changed lines IN ORDER, tracking triple-quoted docstring state and
+-- multi-line import-bracket state so a multi-line docstring's interior prose or
+-- a multi-line import's symbol list is recognised even though only the opening
+-- line carries the delimiter / import keyword. Returns { kinds = set,
+-- substantive = bool, any = bool } where `kinds` keys are trivial categories
+-- (doc/config/comment/import/docstring/blank) seen across the block.
 local function scan_changed(hunks, file)
   local kinds, substantive, any = {}, false, false
-  -- Docstring state is tracked PER STREAM (added vs deleted) because a hunk
-  -- interleaves the old and new line versions; sharing one state would let a
-  -- new docstring's opening line read as the close of the deleted one.
-  local doc = { add = { open = false, delim = nil }, del = { open = false, delim = nil } }
+  -- Per-stream state (added vs deleted) because a hunk interleaves the old and
+  -- new line versions; one shared state would let a new region's opening line
+  -- read as the close of the deleted one. `ds_*` tracks an open triple-quoted
+  -- docstring; `imp_*` tracks an open multi-line import bracket block.
+  local streams = {
+    add = { ds_open = false, ds_delim = nil, imp_open = false, imp_depth = 0 },
+    del = { ds_open = false, ds_delim = nil, imp_open = false, imp_depth = 0 },
+  }
+  -- While inside an import block, fold this line's brackets into the running
+  -- depth and close at zero. Returns true while the stream is (still) inside the
+  -- block, so the caller treats the line as an import continuation.
+  local function in_import(st, trimmed)
+    if not st.imp_open then
+      return false
+    end
+    st.imp_depth = st.imp_depth + net_brackets(trimmed)
+    if st.imp_depth <= 0 then
+      st.imp_open, st.imp_depth = false, 0
+    end
+    return true
+  end
   for _, h in ipairs(hunks or {}) do
+    -- Import-bracket state never spans a hunk: a multi-line import is contiguous
+    -- source, so its opener and closer share one hunk. Resetting per hunk stops
+    -- an import whose closer fell outside the diff context from leaking into a
+    -- later hunk and swallowing real code there.
+    streams.add.imp_open, streams.add.imp_depth = false, 0
+    streams.del.imp_open, streams.del.imp_depth = false, 0
     for _, l in ipairs(h.lines or {}) do
-      if l.kind == "add" or l.kind == "del" then
+      local text = l.text or ""
+      local trimmed = vim.trim(text)
+      if l.kind == "ctx" then
+        -- A context (unchanged) line moves the import depth in BOTH streams so a
+        -- changed symbol nested inside an otherwise-unchanged multi-line import
+        -- (one name added to a `from x import (…)`) still reads as an import
+        -- continuation, not substantive code. Context lines never set kinds /
+        -- substantive / any — they only keep the bracket depth honest.
+        local inside_add = in_import(streams.add, trimmed)
+        local inside_del = in_import(streams.del, trimmed)
+        if not (inside_add and inside_del) then
+          local nb = net_brackets(trimmed)
+          if nb > 0 and is_import(trimmed, file) then
+            if not streams.add.imp_open then
+              streams.add.imp_open, streams.add.imp_depth = true, nb
+            end
+            if not streams.del.imp_open then
+              streams.del.imp_open, streams.del.imp_depth = true, nb
+            end
+          end
+        end
+      elseif l.kind == "add" or l.kind == "del" then
         any = true
-        local text = l.text or ""
-        local trimmed = vim.trim(text)
-        local st = doc[l.kind]
-        if st.open then
+        local st = streams[l.kind]
+        if in_import(st, trimmed) then
+          kinds.import = true
+        elseif st.ds_open then
           kinds.docstring = true
-          if st.delim and trimmed:find(vim.pesc(st.delim)) then
-            st.open = false
+          if st.ds_delim and trimmed:find(vim.pesc(st.ds_delim)) then
+            st.ds_open = false
           end
         else
           local d, n = docstring_open(trimmed, file)
           if d then
             kinds.docstring = true
             if n < 2 then
-              st.open, st.delim = true, d
+              st.ds_open, st.ds_delim = true, d
             end
           else
             local k = M._trivial_kind(text, file)
             if k then
               kinds[k] = true
+              -- An import line with an unbalanced opener starts a multi-line
+              -- import block whose continuation lines follow until it balances.
+              if k == "import" then
+                local nb = net_brackets(trimmed)
+                if nb > 0 then
+                  st.imp_open, st.imp_depth = true, nb
+                end
+              end
             else
               substantive = true
             end

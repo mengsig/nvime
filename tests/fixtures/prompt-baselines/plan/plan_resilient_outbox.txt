@@ -27,9 +27,9 @@ NVIME_PLAN
 
 Plan id format: `NNNN-<kebab-slug>`. Pick the next free 4-digit number by listing `.nvime/plans/`.
 
-plan.json schema (version 1):
+plan.json schema (version 2):
 {
-  "version": 1,
+  "version": 2,
   "id": "NNNN-slug",
   "title": "...",
   "why": "...",
