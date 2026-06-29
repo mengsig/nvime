@@ -548,6 +548,106 @@ local function refresh_session(session)
   end
 end
 
+-- Signature of the proposed content verify last ran against. Verify is
+-- otherwise idempotent (runs once at activation), but after a partial accept
+-- OR reject the proposed content changes, so a stale parse gate could reflect
+-- lines that will never exist. We key the cached result on the target buffer's
+-- changedtick PLUS each block's resolution status (a reject changes the
+-- proposed text without bumping the buffer's changedtick) and recompute when
+-- either moves — mirroring risk.score's changedtick guard. See M.refresh.
+local function content_signature(session)
+  local parts = {}
+  if session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
+    parts[#parts + 1] = tostring(vim.api.nvim_buf_get_changedtick(session.target_bufnr))
+  end
+  for _, block in ipairs(session.blocks or {}) do
+    parts[#parts + 1] = tostring(block.id) .. ":" .. tostring(block.status)
+  end
+  if #parts == 0 then
+    return "static"
+  end
+  return table.concat(parts, "|")
+end
+
+-- Sorted, de-duplicated list of findings that carry a location, as
+-- { line, col, severity, message, source }. Used for ]v / [v navigation and
+-- the quickfix list. parse-gate findings are included (the failing node is
+-- the most actionable location of all).
+local function finding_locations(session)
+  local v = session and session.verify
+  if not v then
+    return {}
+  end
+  local out = {}
+  local seen = {}
+  for _, f in ipairs(v.findings or {}) do
+    local line = tonumber(f.line)
+    if line then
+      local key = string.format("%d:%d:%s", line, tonumber(f.col) or 0, tostring(f.source))
+      if not seen[key] then
+        seen[key] = true
+        out[#out + 1] = {
+          line = line,
+          col = tonumber(f.col) or 1,
+          severity = f.severity or "warn",
+          message = f.message or "",
+          source = f.source or "?",
+        }
+      end
+    end
+  end
+  table.sort(out, function(a, b)
+    if a.line == b.line then
+      return a.col < b.col
+    end
+    return a.line < b.line
+  end)
+  return out
+end
+
+-- Push located findings into a dedicated quickfix list so the reviewer can
+-- jump to each one (the list is replaced, not opened — see verify.quickfix).
+-- Entries point at the target buffer so locations track the live file; finding
+-- lines are in *proposed* coordinates, so remap each into target coordinates
+-- (the proposed/live file diverge while blocks are pending).
+local function populate_quickfix(session)
+  if cfg().quickfix == false then
+    return
+  end
+  if not (session and session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr)) then
+    return
+  end
+  local locs = finding_locations(session)
+  if #locs == 0 then
+    return
+  end
+  local map_line
+  local ok_diff, diff = pcall(require, "nvime.diff")
+  if ok_diff and diff and type(diff.map_proposed_line) == "function" then
+    map_line = function(line)
+      local ok, mapped = pcall(diff.map_proposed_line, session, line)
+      if ok and type(mapped) == "number" then
+        return mapped
+      end
+      return line
+    end
+  end
+  local items = {}
+  for _, loc in ipairs(locs) do
+    items[#items + 1] = {
+      bufnr = session.target_bufnr,
+      lnum = map_line and map_line(loc.line) or loc.line,
+      col = loc.col,
+      type = (loc.severity == "error") and "E" or "W",
+      text = string.format("[%s] %s", loc.source, loc.message),
+    }
+  end
+  pcall(vim.fn.setqflist, {}, "r", {
+    title = "nvime verify: " .. vim.fn.fnamemodify(session.file or "", ":t"),
+    items = items,
+  })
+end
+
 -- Run one external check. Returns immediately; on_finish is called with the
 -- check result table on the main thread.
 local function run_check(entry, tempfile, on_finish)
@@ -620,7 +720,8 @@ function M.start(session)
   if not session or not session.target_bufnr then
     return nil
   end
-  if session.verify and session.verify.status ~= nil then
+  local signature = content_signature(session)
+  if session.verify and session.verify.status ~= nil and session.verify_signature == signature then
     return session.verify
   end
 
@@ -654,6 +755,9 @@ function M.start(session)
     parse_regression_only = true,
     started_at = math.floor(uv.hrtime() / 1e6),
   }
+  session.verify_signature = signature
+  session.verify_run = (session.verify_run or 0) + 1
+  local run_id = session.verify_run
   for _, finding in ipairs(parse_result.findings) do
     finding.source = finding.source or "parse"
     finding.kind = "parse"
@@ -680,6 +784,7 @@ function M.start(session)
       parse_error = session.verify.parse_error,
       summary = session.verify.summary,
     })
+    populate_quickfix(session)
     refresh_session(session)
     return session.verify
   end
@@ -696,6 +801,9 @@ function M.start(session)
 
   local pending = #checks
   local function finalize()
+    if session.verify_run ~= run_id then
+      return
+    end
     if session.verify.parse_error then
       session.verify.status = "error"
     else
@@ -712,6 +820,7 @@ function M.start(session)
       parse_error = session.verify.parse_error,
       summary = session.verify.summary,
     })
+    populate_quickfix(session)
     refresh_session(session)
   end
 
@@ -719,6 +828,9 @@ function M.start(session)
 
   for _, entry in ipairs(checks) do
     run_check(entry, tempfile, function(result)
+      if session.verify_run ~= run_id then
+        return
+      end
       session.verify.by_check[result.name] = {
         code = result.code,
         count = #result.findings,
@@ -756,6 +868,52 @@ function M.should_block_accept(session)
     return true, "proposed file has tree-sitter parse error; use gA!/:NvimeAccept! to force"
   end
   return false, nil
+end
+
+-- Public: recompute verify after the proposed content changes (e.g. a partial
+-- accept/reject). No-op when the changedtick+status signature is unchanged, so
+-- it is cheap to call on every accept/reject. Returns the (possibly refreshed)
+-- state.
+function M.refresh(session)
+  if not enabled() or not session or not session.target_bufnr then
+    return session and session.verify or nil
+  end
+  if session.verify and session.verify_signature == content_signature(session) then
+    return session.verify
+  end
+  return M.start(session)
+end
+
+-- Public: did an external lint/type check report an *error*-severity finding
+-- (as opposed to the tree-sitter parse gate, which has its own signal)?
+-- Returns (has_error: bool, detail: string?) where detail names the source,
+-- e.g. "shellcheck". Drives diff.accept_policy.verify_tool_error. External
+-- checks run async: until they complete this returns false even if a tool would
+-- flag an error, so a "block" policy on verify_tool_error is not a hard
+-- guarantee during the in-flight window before checks finish.
+function M.has_tool_error(session)
+  local v = session and session.verify
+  if not v then
+    return false, nil
+  end
+  for _, f in ipairs(v.findings or {}) do
+    if f.severity == "error" and (f.source or "parse") ~= "parse" then
+      return true, f.source
+    end
+  end
+  return false, nil
+end
+
+-- Public: located findings for navigation (sorted, de-duplicated). Each entry
+-- is { line, col, severity, message, source }.
+function M.findings(session)
+  return finding_locations(session)
+end
+
+-- Public: re-push the quickfix list for a session (used after a refresh so the
+-- jump targets stay aligned with the current findings).
+function M.fill_quickfix(session)
+  populate_quickfix(session)
 end
 
 -- Collapsed per-tool breakdown of verify findings, e.g.

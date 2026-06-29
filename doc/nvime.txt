@@ -248,7 +248,10 @@ COMMANDS                                                        *nvime-commands*
         Configure the after-diff test-feedback loop. When enabled, accepted
         diff sessions run the configured or detected test runner. Failing tests
         either prompt before a follow-up edit (`ask`) or launch a bounded
-        auto-fix run (`auto`), capped by test_loop.max_retries.
+        auto-fix run (`auto`), capped by test_loop.max_retries. Each run is
+        bounded by test_loop.timeout_ms (default 120000; 0 disables): a hanging
+        runner is killed, the loop is freed, and the run is reported as a
+        timeout with no follow-up fix.
 
                                                         *:NvimeRecap*
 :NvimeRecap [claude|codex] [--cached] [<rev>..<rev>]
@@ -309,6 +312,8 @@ Inline diff mappings in the target file:
         [n      previous unresolved line
         ]b      next visual change block
         [b      previous visual change block
+        ]v      next verify finding (linter/type-checker)
+        [v      previous verify finding (linter/type-checker)
         ga      accept the current visual change block
         v_ga    accept unresolved changed lines touched by the visual range
 	        gA      accept all unresolved blocks
@@ -329,6 +334,7 @@ Diff review workspace mappings:
         e       focus the editable source pane
         ]b/[b   next/previous visual change block
         ]n/[n   next/previous unresolved line
+        ]v/[v   next/previous verify finding (linter/type-checker)
         ga/gb   accept/reject the current visual block
         gu      undo the most recently accepted block when unchanged
         gA/gB   accept/reject all unresolved blocks
@@ -508,6 +514,7 @@ Common options:
             auto_fix = false,
             max_retries = 2,
             capture_lines = 200,
+            timeout_ms = 120000,        -- per-run wall-clock timeout; 0 disables
           },
           mcp = {
             enabled = true,
@@ -530,6 +537,12 @@ Common options:
           diff = {
             max_visual_block_lines = 12,
             devils_advocate = false,    -- enable critic for ALL edit-lane diffs (off by default)
+            accept_policy = {           -- each signal: off|warn|confirm|block (all off)
+              critic_reject = "off",
+              critic_flag = "off",
+              risk_high = "off",
+              verify_tool_error = "off",
+            },
           },
           verify = {
             enabled = true,
@@ -537,6 +550,8 @@ Common options:
             block_on_parse_error = true,-- refuse silent ga/gA on parse error
             timeout_ms = 8000,          -- per-check timeout
             checks = {},                -- user-defined checks merged with built-ins
+            external_checks = true,     -- run installed linters/type-checkers (no-op if absent)
+            quickfix = true,            -- populate the "nvime verify" quickfix list
           },
           risk = {
             enabled = true,
@@ -642,6 +657,16 @@ Built-in checks ship for ruff (*.py), shellcheck (*.sh, *.bash), luacheck
 and selene (*.lua), gofmt -e (*.go), zig ast-check (*.zig), and mypy (*.py).
 A check is silently skipped when its binary is not on $PATH.
 
+External lint/type checks run by default (`verify.external_checks = true`);
+because each no-ops when its binary is absent, this only surfaces findings
+from tools already installed. Set it false to run the tree-sitter parse gate
+alone. Findings carry a line/column and (with `verify.quickfix = true`, the
+default) populate a quickfix list titled "nvime verify: <file>" — set, not
+auto-opened. Navigate findings on the diff target with `]v` / `[v`, or open with
+`:copen`. Verify recomputes whenever pending blocks change (partial accept or
+reject), keyed on a changedtick + per-block-status signature, so the gate never
+reflects content that will not exist.
+
 User-defined checks merge in from `state.config.verify.checks`:
 
 >
@@ -691,6 +716,33 @@ risk diff prompts a confirmation, after which `risk_force` is written to
 the audit ledger. The confirmation can be disabled with
 `risk.confirm_on_force_high = false`.
 
+ACCEPT POLICY                                                *nvime-accept-policy*
+
+Beyond the tree-sitter parse gate, the manual diff accept path consults
+`diff.accept_policy`. Each advisory pre-accept signal maps to one action:
+
+    off       ignore the signal (the banner still shows it).
+    warn      notify on accept, then proceed.
+    confirm   require a yes/no confirmation before a plain `ga` / `gA`.
+    block     refuse silent `ga` / `gA`; `gA!` / `:NvimeAccept!` still
+              forces it and writes an `accept_policy_force` audit event.
+
+Signals:
+    critic_reject       the read-only critic returned REJECT.
+    critic_flag         the critic returned FLAG.
+    risk_high           the blast-radius badge is `high`.
+    verify_tool_error   an external linter/type-checker flagged an error
+                        (a non-parse finding with severity "error").
+
+All signals default to `off`, so the accept path gains no extra friction
+until you opt one in (backward compatible). The critic verdict and external
+verify findings are set asynchronously, so `block` is not a hard guarantee:
+an accept issued before the critic/checks return sees no verdict yet and is
+allowed through. The tree-sitter parse-error gate keeps its own dedicated
+block (`verify.block_on_parse_error`), independent of this table, and the
+trivial / auto-cleared instant-approve path is unaffected — this gate sits on
+the manual accept path only.
+
 PER-PATH POLICY                                                  *nvime-policy-rules*
 
 `.nvime/policy.json` declares per-path rules that gate which files the
@@ -716,10 +768,13 @@ Rule fields:
     max_changed_lines     accept-time cap on hunks affected
     allow_lanes           subset of {ask, edit, plan, accept}; absent means all
 
-Defaults (applied only when the project file is missing) flag migrations,
-lockfiles, secrets, and private keys as `require_human`. The project file
-fully replaces defaults rather than merging, so the rule set on disk is
-always exactly what is active.
+Built-in defaults flag migrations, lockfiles, secrets, and private keys as
+`require_human`. A project file's rules are layered ON TOP of these defaults
+(defaults are evaluated first, so project rules win ties via longer /
+last-written specificity); adding one custom rule never silently drops the
+secret/lockfile guards. Opt out with `policy_rules.inherit_defaults = false`
+in setup, or `"inherit_defaults": false` in policy.json, to get the old
+replace-everything behavior.
 
 Commands:
     :NvimePolicy list

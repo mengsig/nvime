@@ -107,6 +107,38 @@ M.defaults = {
     -- REJECT in one sentence. The verdict is advisory and never blocks the
     -- user. Costs roughly one extra agent call per diff.
     devils_advocate = false,
+    -- Unified accept gate. Each advisory pre-accept signal maps to one of
+    -- "off" | "warn" | "confirm" | "block":
+    --   off     — ignore the signal (the banner still shows it).
+    --   warn    — notify on accept, then proceed.
+    --   confirm — require a yes/no confirmation before a plain ga/gA accept.
+    --   block   — refuse silent ga/gA; gA!/:NvimeAccept! still forces it and
+    --             writes an `accept_policy_force` audit event.
+    -- Defaults are all "off" so nothing silently gains friction (backward
+    -- compatible) — this only matters once a user opts a signal in. The
+    -- tree-sitter parse-error gate keeps its own dedicated block, governed by
+    -- verify.block_on_parse_error, independent of this table. Trivial /
+    -- auto-cleared changes are unaffected: this gate sits on the manual diff
+    -- accept path, not the instant-approve path. Signals:
+    --   critic_reject     — the read-only critic returned REJECT. The critic
+    --                       verdict is set async, so (like verify_tool_error)
+    --                       "block" is not a hard guarantee: an accept before
+    --                       the critic returns sees no verdict and is allowed.
+    --   critic_flag       — the critic returned FLAG (same async caveat as
+    --                       critic_reject).
+    --   risk_high         — the blast-radius score is `high`.
+    --   verify_tool_error — an external linter/type-checker flagged an error
+    --                       (a non-parse finding with severity "error").
+    --                       External checks run async, so "block" is not a hard
+    --                       guarantee: an accept during the in-flight window
+    --                       (before checks finish) sees no findings yet and is
+    --                       allowed through.
+    accept_policy = {
+      critic_reject = "off",
+      critic_flag = "off",
+      risk_high = "off",
+      verify_tool_error = "off",
+    },
   },
   verify = {
     -- Pre-accept verification lane. When a diff session opens, run cheap
@@ -130,10 +162,18 @@ M.defaults = {
     -- (ruff/shellcheck/luacheck/selene/gofmt/zig ast-check/mypy).
     checks = {},
     -- Run the built-in / user-configured external linters & type-checkers
-    -- (ruff, shellcheck, luacheck, gofmt, mypy, plus verify.checks). When
+    -- (ruff, shellcheck, luacheck, gofmt, mypy, plus verify.checks). Each
+    -- check no-ops when its binary is absent from PATH, so turning this on
+    -- only surfaces findings from tools you already have installed. When
     -- false, only the tree-sitter parse gate runs; lint/type findings are
-    -- suppressed entirely.
-    external_checks = false,
+    -- suppressed entirely. On by default so the verify lane is real, not
+    -- dormant; the findings stay advisory and never block accept on their own
+    -- (gate them via diff.accept_policy.verify_tool_error if you want teeth).
+    external_checks = true,
+    -- Populate a quickfix list ("nvime verify") from located findings so the
+    -- reviewer can jump to each one (]v / [v on the diff target, or :copen).
+    -- The list is set, not auto-opened. Set false to suppress.
+    quickfix = true,
     -- When true, the diff banner adds a collapsed per-tool breakdown row under
     -- the verify summary (e.g. "ruff 2 (E501) · shellcheck 1"). Off by default
     -- so the banner stays one line; only meaningful with external_checks = true.
@@ -158,11 +198,15 @@ M.defaults = {
   policy_rules = {
     -- Per-path policy. Reads .nvime/policy.json (schema v1); when absent,
     -- a small built-in default flags migrations, lockfiles, secrets, and
-    -- private keys as `require_human`. The project file fully replaces
-    -- defaults rather than merging into them, so the active rule set is
-    -- always exactly what the user has on disk.
+    -- private keys as `require_human`. A project file's rules are layered
+    -- ON TOP of the built-in defaults (project rules win ties via longer /
+    -- last-written specificity) so adding one custom rule never silently
+    -- drops the secret/lockfile guards. Opt out with `inherit_defaults =
+    -- false` here, or `"inherit_defaults": false` in policy.json, to get the
+    -- old replace-everything behavior.
     enabled = true,
     path = nil, -- defaults to .nvime/policy.json in the git root
+    inherit_defaults = true,
   },
   intent = {
     -- Local intent linter. Refuses or warns on vague prompts BEFORE the
@@ -293,6 +337,12 @@ M.defaults = {
     auto_fix = false,
     max_retries = 2,
     capture_lines = 200,
+    -- Per-run wall-clock timeout (milliseconds). A hanging runner would
+    -- otherwise never fire its exit callback, leaving the (file, plan) pair
+    -- wedged (in_flight set forever). On timeout the process is killed
+    -- (SIGTERM), the loop is freed, and no follow-up fix is launched (a hang
+    -- is not a code failure). Set 0 to disable the timeout.
+    timeout_ms = 120000,
   },
   mcp = {
     -- MCP servers exposed to the agent. nvime synthesizes a config
@@ -450,6 +500,8 @@ local optional_types = {
   ["agents.project_guidance"] = { "boolean" },
   ["agents.project_guidance_files"] = { "list" },
   ["test_loop.runner"] = { "string", "nil" },
+  ["test_loop.timeout_ms"] = { "number" },
+  ["policy_rules.inherit_defaults"] = { "boolean" },
   ["mcp.config_path"] = { "string", "nil" },
   ["mcp.self_command"] = { "string", "nil" },
   ["mcp.servers"] = { "table" },
@@ -576,6 +628,21 @@ local function validate_prompts(warnings, path, value)
   end
 end
 
+local ACCEPT_POLICY_ACTIONS = { off = true, warn = true, confirm = true, block = true }
+
+local function validate_accept_policy(warnings, path, value)
+  if type(value) ~= "table" then
+    validate_leaf(warnings, path, value, "table")
+    return
+  end
+  for key, item in pairs(value) do
+    local child = path .. "." .. tostring(key)
+    if type(item) ~= "string" or not ACCEPT_POLICY_ACTIONS[item] then
+      warn(warnings, child .. " should be one of off|warn|confirm|block, got " .. vim.inspect(item))
+    end
+  end
+end
+
 local function validate_icons(warnings, path, value)
   if type(value) ~= "table" then
     validate_leaf(warnings, path, value, "table")
@@ -606,6 +673,8 @@ local function validate_table(warnings, user, schema, path)
         validate_prompts(warnings, child, value)
       elseif child == "ui.icons" then
         validate_icons(warnings, child, value)
+      elseif child == "diff.accept_policy" then
+        validate_accept_policy(warnings, child, value)
       elseif optional_types[child] then
         validate_leaf(warnings, child, value, optional_types[child])
       elseif schema[key] == nil then

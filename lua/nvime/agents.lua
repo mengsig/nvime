@@ -421,6 +421,26 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
     cwd or repo_root(),
   })
 
+  -- Read-only enforcement parity (B2). claude restricts the read-only lanes
+  -- per-tool (--disallowedTools Edit,Write,NotebookEdit + an allow-list, and
+  -- drops Bash / WebFetch / WebSearch when allow_shell / allow_web are off).
+  -- codex exec has no per-tool surface; it enforces read-only at the OS
+  -- sandbox layer instead: `-s read-only` (review-without-markdown, critic,
+  -- ask, selection, quick) forbids ALL file writes and network. Two
+  -- asymmetries remain and cannot be closed from codex flags:
+  --   * shell: codex still runs commands inside the read-only sandbox (they
+  --     just cannot write or reach the network), so selection.allow_shell =
+  --     false is advisory-only on codex, not a hard tool denial.
+  --   * web: a sandboxed codex lane has no network, so allow_web = true does
+  --     NOT grant it web the way claude grants WebFetch/WebSearch.
+  -- For the workspace-write lanes (markdown review / plan / perf) we pin the
+  -- sandbox's network access OFF explicitly so a write lane never gains
+  -- incidental network and honors allow_web = false; bigchange is left as-is
+  -- (its autonomy is governed by the worktree confinement, not this flag).
+  if sandbox == "workspace-write" and lane ~= "bigchange" then
+    vim.list_extend(args, { "-c", "sandbox_workspace_write.network_access=false" })
+  end
+
   if lane == "bigchange" then
     -- Non-interactive full autonomy: never pause for approval. Writes stay
     -- inside the worktree cwd via the workspace-write sandbox set above.

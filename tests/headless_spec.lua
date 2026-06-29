@@ -6926,6 +6926,344 @@ end)();
     end
   end
   assert(found_good, "a valid plan still loads alongside malformed ones")
+end)();
+
+(function()
+  -- B3: the post-accept test loop must time out an over-running runner so it
+  -- can never wedge (in_flight set forever, exit callback never firing) and
+  -- so the verdict reaches a timed-out test_loop_done (which only fires from
+  -- the exit callback — proving the loop was freed, not wedged).
+  --
+  -- This used to spawn `sleep 30` and rely on the timeout machinery SIGTERMing
+  -- a truly-hanging process within the wait window. That raced the runner's
+  -- neovim/libuv build: on ubuntu CI neither our scheduled kill nor
+  -- vim.system's native `timeout` reliably reaped the runner during vim.wait,
+  -- so the exit callback never fired, test_loop_done never landed, and the
+  -- sleep leaked as an orphan reaped only at job cleanup. The decision logic
+  -- (run_runner) deliberately does NOT depend on the kill landing — it reads
+  -- the timed_out verdict from WALL-CLOCK elapsed >= limit. So drive it
+  -- deterministically with a runner that EXCEEDS the timeout and then exits ON
+  -- ITS OWN: the exit callback fires through the normal process-exit path (no
+  -- kill needed, portable across builds) and elapsed (~700ms) far exceeds the
+  -- 200ms limit, so the wall-clock branch stamps timed_out=true regardless of
+  -- whether any SIGTERM was delivered.
+  local tl = require("nvime.test_loop")
+  local state = require("nvime.state")
+  local saved = state.config.test_loop
+  state.config.test_loop = {
+    enabled = true,
+    runner = "sleep 0.7",
+    timeout_ms = 200,
+    max_retries = 2,
+    capture_lines = 50,
+    auto_fix = false,
+  }
+  tl.reset_counters()
+  local tl_buf = vim.api.nvim_create_buf(true, false)
+  local tl_path = tmp .. "/tl-timeout.lua"
+  vim.api.nvim_buf_set_name(tl_buf, tl_path)
+  vim.api.nvim_buf_set_lines(tl_buf, 0, -1, false, { "local x = 1" })
+
+  local before = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  tl.maybe_run({ accepted = 1, path = tl_path, target_bufnr = tl_buf })
+
+  local function saw_event(predicate)
+    if vim.fn.filereadable(audit_path) ~= 1 then
+      return false
+    end
+    local lines = vim.fn.readfile(audit_path)
+    for i = before + 1, #lines do
+      local ok, decoded = pcall(vim.json.decode, lines[i])
+      if ok and type(decoded) == "table" and predicate(decoded) then
+        return true
+      end
+    end
+    return false
+  end
+
+  local timed_out_logged = vim.wait(5000, function()
+    return saw_event(function(d)
+      return d.event == "test_loop_done" and d.timed_out == true
+    end)
+  end, 50)
+  assert(timed_out_logged, "test_loop: a hanging runner times out and logs test_loop_done with timed_out")
+
+  -- The loop is freed (in_flight cleared from the callback): a second run for
+  -- the same (file, plan) starts fresh rather than being silently swallowed.
+  local before_second = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  tl.maybe_run({ accepted = 1, path = tl_path, target_bufnr = tl_buf })
+  local restarted = vim.wait(5000, function()
+    if vim.fn.filereadable(audit_path) ~= 1 then
+      return false
+    end
+    local lines = vim.fn.readfile(audit_path)
+    for i = before_second + 1, #lines do
+      local ok, decoded = pcall(vim.json.decode, lines[i])
+      if ok and type(decoded) == "table" and decoded.event == "test_loop_start" then
+        return true
+      end
+    end
+    return false
+  end, 50)
+  assert(restarted, "test_loop: a timed-out run does not wedge — the next run starts")
+  -- Drain the second over-running run to its timed-out test_loop_done so no
+  -- sleep process outlives the spec (it self-exits at ~700ms, past the 200ms
+  -- limit, so the verdict lands without relying on a SIGTERM).
+  vim.wait(5000, function()
+    if vim.fn.filereadable(audit_path) ~= 1 then
+      return false
+    end
+    local lines = vim.fn.readfile(audit_path)
+    for i = before_second + 1, #lines do
+      local ok, decoded = pcall(vim.json.decode, lines[i])
+      if ok and type(decoded) == "table" and decoded.event == "test_loop_done" and decoded.timed_out == true then
+        return true
+      end
+    end
+    return false
+  end, 50)
+
+  state.config.test_loop = saved
+  tl.reset_counters()
+end)();
+
+(function()
+  -- S1: the unified accept policy. critic_reject across off/block/warn/force,
+  -- exercising the full action machinery on the COMMON ga/gA path. Defaults
+  -- are "off" so this is opt-in; nothing gains friction silently.
+  local diff = require("nvime.diff")
+  local state = require("nvime.state")
+  local diff_cfg = state.config.diff
+  local saved_policy = diff_cfg.accept_policy
+
+  local counter = 0
+  local function fresh_rejecting_session(action)
+    counter = counter + 1
+    diff_cfg.accept_policy = {
+      critic_reject = action,
+      critic_flag = "off",
+      risk_high = "off",
+      verify_tool_error = "off",
+    }
+    local name = "ap-" .. action .. "-" .. counter
+    local buf = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(buf, tmp .. "/" .. name .. ".lua")
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "local v = 1" })
+    vim.api.nvim_set_current_buf(buf)
+    local response = table.concat({
+      "RATIONALE: bump v",
+      "NVIME_DIFF",
+      "```diff",
+      "--- a/" .. name .. ".lua",
+      "+++ b/" .. name .. ".lua",
+      "@@ -1,1 +1,1 @@",
+      "-local v = 1",
+      "+local v = 2",
+      "```",
+    }, "\n")
+    local res = diff.start_session(
+      { bufnr = buf, line1 = 1, line2 = 1, path = name .. ".lua", source = "test" },
+      response,
+      "claude",
+      name
+    )
+    res.session.verdict = { decision = "REJECT", justification = "removes the nil guard" }
+    return buf
+  end
+
+  local function audit_has(after, event)
+    if vim.fn.filereadable(audit_path) ~= 1 then
+      return false
+    end
+    local lines = vim.fn.readfile(audit_path)
+    for i = after + 1, #lines do
+      local ok, decoded = pcall(vim.json.decode, lines[i])
+      if ok and type(decoded) == "table" and decoded.event == event then
+        return true
+      end
+    end
+    return false
+  end
+
+  local function body(buf)
+    return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+  end
+
+  -- off → REJECT verdict adds no friction (backward compatible default).
+  local off_buf = fresh_rejecting_session("off")
+  diff.accept_all()
+  assert_eq(body(off_buf), "local v = 2", "accept_policy off: critic REJECT does not gate")
+
+  -- block → a plain gA is refused and audited; gA! still forces it.
+  local block_buf = fresh_rejecting_session("block")
+  local before_block = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  diff.accept_all()
+  assert_eq(body(block_buf), "local v = 1", "accept_policy block: critic REJECT refuses silent accept")
+  assert(audit_has(before_block, "accept_policy_block"), "accept_policy block: writes accept_policy_block audit event")
+
+  local before_force = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  diff.accept_all({ force = true })
+  assert_eq(body(block_buf), "local v = 2", "accept_policy block: gA! forces past the gate")
+  assert(audit_has(before_force, "accept_policy_force"), "accept_policy force: writes accept_policy_force audit event")
+
+  -- warn → notifies but proceeds.
+  local warn_buf = fresh_rejecting_session("warn")
+  local before_warn = vim.fn.filereadable(audit_path) == 1 and #vim.fn.readfile(audit_path) or 0
+  diff.accept_all()
+  assert_eq(body(warn_buf), "local v = 2", "accept_policy warn: proceeds after warning")
+  assert(audit_has(before_warn, "accept_policy_warn"), "accept_policy warn: writes accept_policy_warn audit event")
+
+  diff_cfg.accept_policy = saved_policy
+end)();
+
+(function()
+  -- S3: verify must not go stale after a partial reject. Verify is keyed on a
+  -- changedtick+block-status signature, so rejecting a block (which changes the
+  -- proposed content WITHOUT bumping the buffer changedtick) recomputes it.
+  local diff = require("nvime.diff")
+  local buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_name(buf, tmp .. "/verify-stale.lua")
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "local a = 1", "local b = 2", "local c = 3" })
+  vim.api.nvim_set_current_buf(buf)
+  local response = table.concat({
+    "RATIONALE: bump a and c",
+    "NVIME_DIFF",
+    "```diff",
+    "--- a/verify-stale.lua",
+    "+++ b/verify-stale.lua",
+    "@@ -1,1 +1,1 @@",
+    "-local a = 1",
+    "+local a = 11",
+    "@@ -3,1 +3,1 @@",
+    "-local c = 3",
+    "+local c = 33",
+    "```",
+  }, "\n")
+  local res = diff.start_session(
+    { bufnr = buf, line1 = 1, line2 = 3, path = "verify-stale.lua", source = "test" },
+    response,
+    "claude",
+    "verify-stale"
+  )
+  local session = res.session
+  assert(session.verify, "verify-stale: verify ran at activation")
+  local sig0 = session.verify_signature
+  assert(sig0 ~= nil, "verify-stale: a signature is recorded")
+
+  -- Reject the second block; gather pending blocks first.
+  local pending = {}
+  for _, hunk in ipairs(session.hunks or {}) do
+    for _, block in ipairs(hunk.blocks or {}) do
+      pending[#pending + 1] = block
+    end
+  end
+  assert(#pending >= 2, "verify-stale: two pending blocks built")
+  diff.reject_blocks({ pending[#pending] })
+  assert(session.verify_signature ~= sig0, "verify-stale: rejecting a block recomputes verify (signature moved)")
+end)();
+
+(function()
+  -- S4: a custom policy.json must inherit the built-in human-only guards
+  -- rather than silently replacing them.
+  local policy_rules = require("nvime.policy_rules")
+  local state = require("nvime.state")
+  state.config.policy_rules = state.config.policy_rules or {}
+  local saved_path = state.config.policy_rules.path
+
+  -- The local fallback matcher must never fail open for the guarded globs.
+  assert(policy_rules._local_path_matches("secrets/api.key", "secrets/**"), "S4: local matcher matches secrets glob")
+  assert(
+    policy_rules._local_path_matches("a/b/secrets/x.pem", "**/secrets/**"),
+    "S4: local matcher matches nested secrets"
+  )
+  assert(not policy_rules._local_path_matches("src/util.lua", "secrets/**"), "S4: local matcher does not over-match")
+
+  local merge_path = tmp .. "/s4-merge.json"
+  vim.fn.writefile({ '{ "version": 1, "rules": [ { "match": "**/*.py", "max_changed_lines": 5 } ] }' }, merge_path)
+  state.config.policy_rules.path = merge_path
+  assert(
+    not policy_rules.evaluate("migrations/0001_init.sql", "edit").allowed,
+    "S4: custom policy still blocks migrations"
+  )
+  assert(not policy_rules.evaluate("secrets/api.key", "ask").allowed, "S4: custom policy still blocks secrets")
+  assert(
+    not policy_rules.evaluate("src/x.py", "edit", { changed_lines = 50 }).allowed,
+    "S4: custom rule applies on top of inherited defaults"
+  )
+
+  local noinherit_path = tmp .. "/s4-noinherit.json"
+  vim.fn.writefile(
+    { '{ "version": 1, "inherit_defaults": false, "rules": [ { "match": "**/*.py", "max_changed_lines": 5 } ] }' },
+    noinherit_path
+  )
+  state.config.policy_rules.path = noinherit_path
+  assert(
+    policy_rules.evaluate("migrations/0001_init.sql", "edit").allowed,
+    "S4: inherit_defaults=false drops the built-in defaults"
+  )
+
+  state.config.policy_rules.path = saved_path
+end)();
+
+(function()
+  local diff = require("nvime.diff")
+  local session = {
+    blocks = {
+      { id = 1, old_start = 2, old_count = 2, new_lines = { "x" }, status = "rejected" },
+      { id = 2, old_start = 6, old_count = 1, new_lines = { "y1", "y2" }, status = "accepted" },
+    },
+  }
+  -- Proposed (non-rejected applied) and target (accepted applied) both keep the
+  -- rejected block's original two lines, so they align 1:1 around it.
+  assert_eq(diff.map_proposed_line(session, 3), 3, "verify map: finding inside a rejected block maps 1:1 to the target")
+  assert_eq(
+    diff.map_proposed_line(session, 8),
+    8,
+    "verify map: finding after a rejected block does not drift by old_count"
+  )
+end)();
+
+(function()
+  -- ]v/[v navigation must use target-buffer coordinates for the cursor even when
+  -- pressed from the proposed/review buffer (where the cursor is in proposed
+  -- coordinates). A pending block that adds lines makes the two diverge.
+  local diff = require("nvime.diff")
+  local state = require("nvime.state")
+  vim.cmd.edit(tmp .. "/findnav.lua")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "L1", "L2", "L3", "L4", "L5" })
+  local nav_target = vim.api.nvim_get_current_buf()
+  local nav_result = diff.start_session(
+    { bufnr = nav_target, line1 = 1, line2 = 5, path = "findnav.lua", source = "test" },
+    "--- a/findnav.lua\n+++ b/findnav.lua\n@@ -1,5 +1,7 @@\n L1\n-L2\n+n1\n+n2\n+n3\n L3\n L4\n L5",
+    "claude",
+    ""
+  )
+  assert(nav_result.status == "diff", "find-nav: diff session opens")
+  local nav_session = nav_result.session
+  -- Findings in PROPOSED coordinates: proposed line 6 = L4, 7 = L5; the pending
+  -- +2 block maps those to target lines 4 and 5.
+  nav_session.verify = {
+    status = "warn",
+    findings = {
+      { line = 6, col = 1, severity = "warn", message = "f-at-L4", source = "test" },
+      { line = 7, col = 1, severity = "warn", message = "f-at-L5", source = "test" },
+    },
+  }
+  diff.open_view()
+  local nav_review = state.current_diff.review
+  assert(nav_review and vim.api.nvim_win_is_valid(nav_review.proposed_winid), "find-nav: review opens")
+  -- Sit in the proposed pane at proposed line 5 (= target line 3). Without the
+  -- fix the raw proposed cursor (5) skips both findings and wraps to the first;
+  -- with the fix the cursor maps to target 3 and the next finding is target 4.
+  vim.api.nvim_set_current_win(nav_review.proposed_winid)
+  vim.api.nvim_win_set_cursor(0, { 5, 0 })
+  diff.next_finding()
+  assert_eq(
+    vim.api.nvim_win_get_cursor(0)[1],
+    4,
+    "find-nav: next_finding from the proposed buffer maps the cursor to target coordinates"
+  )
+  diff.close_view()
 end)()
 
 print("nvime headless spec passed")

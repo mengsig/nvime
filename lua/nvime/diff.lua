@@ -239,7 +239,10 @@ M.next_change = ops.next_change
 M.next_group = ops.next_group
 M.prev_change = ops.prev_change
 M.prev_group = ops.prev_group
+M.next_finding = ops.next_finding
+M.prev_finding = ops.prev_finding
 M.remaining_text = ops.remaining_text
 M.refresh_session = ops.refresh_session
 M._proposed_lines = ops._proposed_lines
+M.map_proposed_line = session.map_proposed_line
 return M

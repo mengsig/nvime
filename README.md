@@ -203,6 +203,12 @@ require("nvime").setup({
   diff = {
     max_visual_block_lines = 12,
     devils_advocate = false,
+    accept_policy = {      -- each signal: off | warn | confirm | block
+      critic_reject = "off",
+      critic_flag = "off",
+      risk_high = "off",
+      verify_tool_error = "off",
+    },
   },
   verify = {
     enabled = true,
@@ -210,6 +216,8 @@ require("nvime").setup({
     block_on_parse_error = true,
     timeout_ms = 8000,
     checks = {},
+    external_checks = true,  -- run installed linters/type-checkers (no-op when absent)
+    quickfix = true,         -- populate the "nvime verify" quickfix list
   },
   risk = {
     enabled = true,
@@ -224,6 +232,7 @@ require("nvime").setup({
   policy_rules = {
     enabled = true,
     path = nil, -- defaults to .nvime/policy.json in git root
+    inherit_defaults = true, -- layer project rules on top of built-in defaults
   },
   intent = {
     enabled = true,
@@ -266,6 +275,7 @@ require("nvime").setup({
     auto_fix = false,
     max_retries = 2,
     capture_lines = 200,
+    timeout_ms = 120000, -- per-run wall-clock timeout; 0 disables
   },
   mcp = {
     enabled = true,
@@ -579,6 +589,8 @@ Inline diff mappings in the target file:
   editable panes in native diff mode
 - `]n` / `[n`: next or previous unresolved line
 - `]b` / `[b`: next or previous visual change block
+- `]v` / `[v`: next or previous verify finding (linter/type-checker), on the
+  diff target
 - `ga`: accept the current visual change block
 - visual `ga`: accept every unresolved changed line touched by the visual range
 - `gA`: accept all unresolved blocks
@@ -603,6 +615,15 @@ Before applying a hunk, nvime compares the live target lines with the original
 lines in the reviewed patch. If they differ, the block is marked as a conflict
 instead of silently overwriting intervening edits. Use `:NvimeAccept!` or `gA!`
 only when you intentionally want to overwrite that live text.
+
+Beyond the parse gate, the manual accept path consults `diff.accept_policy`: the
+critic verdict (`critic_reject`, `critic_flag`), the risk badge (`risk_high`),
+and external verify findings (`verify_tool_error`) each map to `off | warn |
+confirm | block`. `warn` notifies and proceeds, `confirm` prompts before a plain
+`ga`/`gA`, and `block` refuses silent accept (`gA!`/`:NvimeAccept!` forces it and
+writes an `accept_policy_force` audit event). All four default to `off`, so the
+accept path gains no extra friction until you opt a signal in. Trivial /
+auto-cleared changes bypass this gate entirely.
 
 Reject-only aliases are also installed: `gr` rejects the current line change,
 visual `gr` rejects selected line changes, `gR` rejects all, and `gX` rejects the current visual change block.
@@ -660,8 +681,18 @@ writes enabled, it uses a workspace-write sandbox:
 ```sh
 codex exec --json --ephemeral --ignore-user-config --ignore-rules \
   --skip-git-repo-check --color never -s workspace-write \
+  -c sandbox_workspace_write.network_access=false \
   -C "$TEMP_WORKSPACE" < prompt.txt
 ```
+
+Workspace-write codex lanes pin `sandbox_workspace_write.network_access=false`
+so a write lane never gains incidental network (the Big Change lane is the lone
+exception — its autonomy is bounded by worktree confinement). codex `exec` has
+no per-tool surface, so read-only lanes enforce at the OS sandbox (`-s
+read-only` forbids all writes and network); this differs from Claude, which
+denies tools individually. Two asymmetries follow: `selection.allow_shell =
+false` is advisory on codex (commands still run inside the read-only sandbox),
+and `allow_web = true` grants a sandboxed codex lane no network.
 
 `nvime` never uses Claude/Codex bypass flags by default.
 When `review.allow_markdown_writes = false`, Codex review/docs mode uses

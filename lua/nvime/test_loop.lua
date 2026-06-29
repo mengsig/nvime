@@ -15,11 +15,42 @@ local state = require("nvime.state")
 
 local M = {}
 
+local uv = vim.uv or vim.loop
+
+local DEFAULT_TIMEOUT_MS = 120000
+
+-- Grace added on top of the configured timeout for vim.system's NATIVE timeout,
+-- used purely as a backstop killer (see run_runner). Our own uv timer fires at
+-- exactly `limit` and SIGTERMs the runner from the main loop; the native timeout
+-- only matters if that main-loop kill never lands (it didn't reliably terminate
+-- the runner from the fast-event context on CI). The grace guarantees our timer
+-- sets the authoritative `timed_out` flag before any kill-provoked exit callback.
+local TIMEOUT_BACKSTOP_GRACE_MS = 2000
+
+-- Boundary slop for the wall-clock timeout verdict. The killers fire at-or-after
+-- `limit`, but libuv's oneshot timer can fire a hair shy of it, so a process
+-- SIGTERMed at the deadline may report elapsed a touch under `limit`. This
+-- margin absorbs that jitter; at the default 120s limit the false-positive
+-- window (a genuine pass finishing within 50ms of the limit) is negligible.
+local TIMEOUT_SLOP_MS = 50
+
 local in_flight = {}
 local retry_counters = {}
 
 local function cfg()
   return (state.config or {}).test_loop or {}
+end
+
+-- Per-run wall-clock timeout. nil falls back to the default; 0 disables it
+-- (no timeout). A hanging runner would otherwise never fire vim.system's exit
+-- callback, leaving in_flight[key] set forever and wedging the (file, plan)
+-- pair for the rest of the session.
+local function timeout_ms()
+  local v = tonumber(cfg().timeout_ms)
+  if v == nil then
+    return DEFAULT_TIMEOUT_MS
+  end
+  return v
 end
 
 local function enabled()
@@ -214,9 +245,8 @@ local function run_runner(runner, cwd, on_done)
     env = vim.fn.environ()
     env.PATH = venv_bin .. ":" .. (env.PATH or "/usr/bin:/bin")
   end
-  -- sh -c, NOT -lc: a login shell sources the user's profile and may cd
-  -- to $HOME, which would defeat the cwd we set explicitly.
-  local handle = vim.system({ "sh", "-c", runner }, {
+  local limit = timeout_ms()
+  local sys_opts = {
     text = true,
     cwd = cwd,
     env = env,
@@ -230,11 +260,71 @@ local function run_runner(runner, cwd, on_done)
         stderr_chunks[#stderr_chunks + 1] = data
       end
     end,
-  }, function(result)
+  }
+  -- Own the timeout DECISION instead of inferring it from the exit code:
+  -- vim.system's termination surfaces in build-dependent encodings (code 124,
+  -- or code 0 with signal 15, or code 143 with signal 0, …) and reverse-
+  -- engineering which one means "timed out" is not portable. So an authoritative
+  -- `timed_out` flag is set by our own one-shot timer at exactly `limit`.
+  --
+  -- Owning the KILL from that fast-event timer callback, however, did NOT
+  -- reliably terminate the runner on CI's neovim build (the exit callback then
+  -- never fired within budget and the loop looked wedged). So the kill is
+  -- issued from the MAIN loop (vim.schedule) AND vim.system's native `timeout`
+  -- is armed as a backstop killer — it provably SIGTERMs the runner and fires
+  -- the exit callback on every build. The native timeout is set a grace above
+  -- `limit` so our timer always records `timed_out` first; the verdict still
+  -- depends only on our flag, never on the native timeout's exit encoding. The
+  -- exit callback ALWAYS fires, so in_flight is always cleared and a hanging
+  -- test can never wedge the loop.
+  if limit and limit > 0 then
+    sys_opts.timeout = limit + TIMEOUT_BACKSTOP_GRACE_MS
+  end
+  local timer
+  local timed_out = false
+  local handle
+  local function stop_timer()
+    if timer then
+      timer:stop()
+      timer:close()
+      timer = nil
+    end
+  end
+  local started = uv.hrtime()
+  -- sh -c, NOT -lc: a login shell sources the user's profile and may cd
+  -- to $HOME, which would defeat the cwd we set explicitly.
+  handle = vim.system({ "sh", "-c", runner }, sys_opts, function(result)
+    stop_timer()
+    local code = result.code or -1
+    -- Decide "timed out" from WALL-CLOCK elapsed, not from whether the fast-
+    -- context timer callback above won the race to set `timed_out` first. During
+    -- vim.wait on CI's neovim build that uv timer callback does NOT reliably fire
+    -- before the native-timeout backstop reaps the runner, so reading the flag
+    -- alone reported a hang as a plain failure. The killers (our scheduled kill
+    -- and vim.system's native timeout) both fire at-or-after `limit`, so a hang
+    -- always has elapsed >= limit by the time this exit callback runs — which it
+    -- always does (clearing in_flight). The flag stays as a fast-path OR.
+    local elapsed_ms = (uv.hrtime() - started) / 1e6
+    local hit_timeout = timed_out or (limit and limit > 0 and elapsed_ms >= limit - TIMEOUT_SLOP_MS)
     vim.schedule(function()
-      on_done(result.code or -1, table.concat(stdout_chunks), table.concat(stderr_chunks))
+      on_done(code, table.concat(stdout_chunks), table.concat(stderr_chunks), hit_timeout)
     end)
   end)
+  if limit and limit > 0 then
+    timer = uv.new_timer()
+    -- The timer fires on a later loop tick, so `handle` is assigned by then.
+    -- Set the authoritative flag here, then issue the kill from the main loop
+    -- (the fast-context kill was unreliable on CI). If the process already
+    -- exited the kill is a harmless no-op (pcall guards the nil-self /
+    -- already-reaped cases). The native `timeout` backstop above guarantees the
+    -- runner is reaped even if this scheduled kill never lands.
+    timer:start(limit, 0, function()
+      timed_out = true
+      vim.schedule(function()
+        pcall(handle.kill, handle, "sigterm")
+      end)
+    end)
+  end
   return handle
 end
 
@@ -310,17 +400,29 @@ function M.maybe_run(payload)
   -- the throw escapes maybe_run with in_flight[key] still set, permanently
   -- blocking the test loop for this (file, plan) pair for the rest of the
   -- session. Reset the flag and surface the failure instead.
-  local spawn_ok, spawn_err = pcall(run_runner, runner, cwd, function(code, stdout, stderr)
+  local spawn_ok, spawn_err = pcall(run_runner, runner, cwd, function(code, stdout, stderr, timed_out)
     in_flight[key] = nil
     local combined = tail_lines((stdout or "") .. (stderr or ""), tonumber(cfg().capture_lines) or 200)
     audit.write({
       event = "test_loop_done",
       runner = runner,
       code = code,
+      timed_out = timed_out or nil,
       path = payload.path,
       plan_id = payload.plan_id,
       plan_step_id = payload.plan_step_id,
     })
+    -- A timeout is a hang, not a failing test: don't launch a "fix the
+    -- failure" follow-up (there is no captured failure to fix). Free the loop
+    -- and reset the retry counter so the next genuine run starts fresh.
+    if timed_out then
+      notify(
+        string.format("`%s` timed out after %dms; stopping (not a code failure).", runner, timeout_ms()),
+        vim.log.levels.WARN
+      )
+      reset_counter(payload)
+      return
+    end
     if code == 0 then
       reset_counter(payload)
       notify("`" .. runner .. "` passed.", vim.log.levels.INFO)
