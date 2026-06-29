@@ -15,6 +15,25 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   the disposable checkouts CI/agents use) `.git` is a pointer *file*, not a directory,
   so a `-d` check fails there even though it passes in a normal clone.
 
+## UI / highlights
+
+- All highlight groups live in `lua/nvime/ui.lua`; no other module calls
+  `nvim_set_hl` or hardcodes a hex colour. Surfaces decorate exclusively through the
+  named `Nvime*` groups (via extmark `hl_group` / `line_hl_group` / `winhighlight`),
+  so retuning the look is a one-file change. Keep new decoration on `Nvime*` groups —
+  never reference a standard group (`DiffAdd`, `Comment`, …) directly from a surface.
+- The palette is **colorscheme-derived**: `resolve_palette()` reads the active theme's
+  standard semantic groups (`Normal`/`NormalFloat`, `Comment`, `DiffAdd`,
+  `Diagnostic*`, `Special`, `Function`, …) and maps each accent onto the *role* that
+  carries it, blending raised surfaces/washes from the resolved background. `FALLBACK`
+  is the curated palette used only when a source group is undefined or
+  `termguicolors` is off. Pure role groups (`NvimeError`, `NvimeCursorLine`) `link`
+  to standard groups so they also carry the theme's cterm colours. It re-resolves on
+  `ColorScheme`. `require("nvime.ui").palette()` returns the resolved palette (tests).
+- The two `syntax/*.vim` files independently `highlight default link Nvime* <Standard>`
+  as a fallback for buffers that load syntax before `setup()` runs; keep them aligned
+  with the role mapping in `ui.lua`.
+
 ## Sharp edges
 
 - `vim.system()` **throws synchronously** when `args[1]` (the provider/tool binary) is

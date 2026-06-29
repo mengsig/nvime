@@ -728,6 +728,35 @@ chat_input_win = chat_panel.input_winid;
   require("nvime.state").config.providers.claude.cmd = dedupe_old_claude_cmd
 end)()
 
+-- Colorscheme-respecting highlight system: nvime derives its palette from the
+-- active theme's standard semantic groups and links role groups (errors, the
+-- cursor row) straight onto them, so the plugin inherits the user's colours
+-- rather than imposing a fixed palette.
+do
+  local hl_ui = require("nvime.ui")
+  local had_tgc = vim.o.termguicolors
+  vim.o.termguicolors = true
+  vim.api.nvim_set_hl(0, "Normal", { fg = tonumber("aabbcc", 16), bg = tonumber("101820", 16) })
+  vim.api.nvim_set_hl(0, "NormalFloat", { fg = tonumber("aabbcc", 16), bg = tonumber("141d28", 16) })
+  vim.api.nvim_set_hl(0, "DiagnosticError", { fg = tonumber("fe1234", 16) })
+  vim.api.nvim_set_hl(0, "DiffAdd", { bg = tonumber("002a11", 16) })
+
+  local palette = hl_ui.palette()
+  assert_eq(palette.bg, "#141d28", "palette background tracks the theme NormalFloat bg")
+  assert_eq(palette.fg, "#aabbcc", "palette foreground tracks the theme Normal fg")
+  assert_eq(palette.red, "#fe1234", "palette red is taken from DiagnosticError")
+  assert_eq(palette.add_bg, "#002a11", "diff-add wash is taken from the theme DiffAdd bg")
+  assert(palette.bg_band ~= palette.bg, "raised band surface is elevated from the base background")
+
+  hl_ui.ensure_highlights()
+  local err_hl = vim.api.nvim_get_hl(0, { name = "NvimeError" })
+  assert_eq(err_hl.link, "DiagnosticError", "NvimeError links to the standard DiagnosticError group")
+  local cursor_hl = vim.api.nvim_get_hl(0, { name = "NvimeCursorLine" })
+  assert_eq(cursor_hl.link, "CursorLine", "NvimeCursorLine links to the standard CursorLine group")
+
+  vim.o.termguicolors = had_tgc
+end
+
 require("nvime.chat").prompt()
 assert(vim.api.nvim_get_current_buf() == chat_buf, "chat prompt focuses shared input buffer")
 assert(vim.api.nvim_get_current_win() == chat_input_win, "chat prompt focuses the single chat window")

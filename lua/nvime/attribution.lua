@@ -447,6 +447,9 @@ local function paint_overlay(bufnr)
   if #entries == 0 then
     return
   end
+  -- The overlay paints into a real source buffer, which may be the first nvime
+  -- surface shown this session; make sure our highlight groups are defined.
+  require("nvime.ui").ensure_highlights()
   local buf_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   vim.api.nvim_buf_clear_namespace(bufnr, OVERLAY_NS, 0, -1)
   local seen_lines = {}
@@ -467,11 +470,14 @@ local function paint_overlay(bufnr)
           if age then
             label_parts[#label_parts + 1] = age
           end
-          local hl = "Comment"
+          -- Route through nvime's colorscheme-derived groups so the overlay
+          -- matches every other surface (muted meta, warn for forced accepts,
+          -- error for a critic REJECT) instead of raw standard groups.
+          local hl = "NvimeMuted"
           if entry.forced then
-            hl = "DiagnosticWarn"
+            hl = "NvimeStatusWarn"
           elseif type(entry.verdict) == "table" and entry.verdict.decision == "REJECT" then
-            hl = "DiagnosticError"
+            hl = "NvimeStatusError"
           end
           local label = "  ▎ " .. table.concat(label_parts, " · ")
           pcall(vim.api.nvim_buf_set_extmark, bufnr, OVERLAY_NS, ln - 1, 0, {
