@@ -53,3 +53,18 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `plan.json`, `usage.json`, session/MCP JSON, and per-model rate overrides are all
   untrusted/agent- or user-authored. JSON readers must `type(decoded) == "table"`
   before indexing; per-model rate overrides must be deep-merged onto defaults.
+
+## Providers
+
+- The supported providers live in ONE place: the `ADAPTERS` registry in
+  `provider.lua`. The brand names are written exactly once there; `provider.names`
+  (cycle order) and `provider.adapters` (name → adapter lookup) both derive from it,
+  as do the effort levels/aliases. `agents.lua` registers each adapter's `build_args`
+  at load, and `agents.build_args` dispatches through `provider.adapters[name].build_args`
+  rather than an `if provider == "claude" … elseif "codex"` chain. Add a provider, or
+  fix a per-brand divergence, by editing the registry — not by adding another branch.
+- A plan remembers its authoring provider in `plan.provider` (and per-provider author
+  sessions in `plan.author_provider_sessions`; the implement-phase executor's sessions
+  live separately in `plan.provider_sessions`). The phase-0 continuity badge and the
+  `gN` reset must target the plan's own provider/author bucket, never the global
+  `config.provider` default. `plan._plan_provider(plan)` resolves it.

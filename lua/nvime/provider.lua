@@ -2,7 +2,46 @@ local state = require("nvime.state")
 
 local M = {}
 
-M.names = { "claude", "codex" }
+-- Provider adapter registry (ordered).
+--
+-- Each adapter is the single home for one provider's brand-specific knobs.
+-- Historically the brand list and the per-provider behaviour were two hardcoded
+-- strings (`{ "claude", "codex" }`) plus scattered `if provider == "claude" …
+-- elseif "codex"` branches across ~18 modules — exactly where divergence bugs
+-- hide. Anything genuinely per-brand belongs here so adding a provider, or
+-- correcting a divergence, is a single-table edit. agents.lua registers each
+-- adapter's `build_args` at load (the arg builder needs agents.lua internals),
+-- and `agents.build_args` dispatches through this table instead of an if-chain.
+--
+-- The brand names are written exactly once, below; `M.adapters` (name → adapter
+-- lookup) and `M.names` (cycle/selection order) are both derived from it.
+local ADAPTERS = {
+  {
+    name = "claude",
+    -- Claude's --effort flag: low|medium|high|xhigh|max. "ultracode" = xhigh +
+    -- dynamic workflow orchestration (see agents.lua / provider.set_effort).
+    effort_levels = { "low", "medium", "high", "xhigh", "max", "ultracode" },
+    effort_aliases = { ultra = "ultracode", maximum = "max" },
+  },
+  {
+    name = "codex",
+    -- Codex maps the level to model_reasoning_effort (no "max"/"ultracode").
+    effort_levels = { "low", "medium", "high", "xhigh" },
+    effort_aliases = { ["extra high"] = "xhigh", ["extra-high"] = "xhigh", extrahigh = "xhigh", xh = "xhigh" },
+  },
+}
+
+M.adapters = {}
+M.names = {}
+for _, adapter in ipairs(ADAPTERS) do
+  M.adapters[adapter.name] = adapter
+  M.names[#M.names + 1] = adapter.name
+end
+
+-- The adapter for a provider name, or nil when unknown.
+function M.adapter(name)
+  return M.adapters[name or M.current()]
+end
 
 local function normalize_opts(opts)
   if type(opts) == "string" then
@@ -290,20 +329,10 @@ end
 -- Claude's effort flag takes low|medium|high|xhigh|max. "ultracode" is a Claude
 -- Code mode = xhigh effort + dynamic workflow orchestration; nvime reproduces it
 -- non-interactively by passing `--effort xhigh` AND CLAUDE_CODE_WORKFLOWS=1 in the
--- agent env (see agents.lua). Codex maps to model_reasoning_effort.
-local EFFORT_LEVELS = {
-  claude = { "low", "medium", "high", "xhigh", "max", "ultracode" },
-  codex = { "low", "medium", "high", "xhigh" },
-}
-
--- Friendly aliases → a canonical level.
-local EFFORT_ALIASES = {
-  claude = { ultra = "ultracode", maximum = "max" },
-  codex = { ["extra high"] = "xhigh", ["extra-high"] = "xhigh", extrahigh = "xhigh", xh = "xhigh" },
-}
-
+-- agent env (see agents.lua). Codex maps to model_reasoning_effort. The levels
+-- and friendly aliases live on each provider's adapter (see ADAPTERS above).
 function M.effort_levels(provider_name)
-  return EFFORT_LEVELS[provider_name or M.current()] or {}
+  return (M.adapter(provider_name) or {}).effort_levels or {}
 end
 
 local function provider_cfg(provider_name)
@@ -324,7 +353,7 @@ function M.set_effort(level, provider_name)
   provider_name = provider_name or M.current()
   if level and level ~= "" then
     -- Resolve a friendly alias (e.g. "ultracode" → "max") to the real CLI value.
-    local alias = (EFFORT_ALIASES[provider_name] or {})[tostring(level):lower()]
+    local alias = ((M.adapter(provider_name) or {}).effort_aliases or {})[tostring(level):lower()]
     if alias then
       level = alias
     end
