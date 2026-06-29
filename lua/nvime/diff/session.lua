@@ -858,10 +858,12 @@ local function render_visual_group(session, group)
   local virt_lines = {}
   if (group.index or 1) == 1 and session.rationale and session.rationale ~= "" then
     -- Show the agent's self-rationalization once per session, on the first
-    -- visual group, so the user has the "why" before they hit ga.
-    local rationale_text = "  " .. ui.icon("review") .. " rationale: " .. session.rationale
+    -- visual group, so the user has the "why" before they hit ga. The label
+    -- rides as a pill so the banner reads as a titled callout, not a sentence.
     virt_lines[#virt_lines + 1] = {
-      { clip_review_text(session, rationale_text), "NvimeQuote" },
+      { "  ", "NvimeMuted" },
+      { " " .. ui.icon("edit") .. " RATIONALE ", "NvimeBanner" },
+      { "  " .. clip_review_text(session, session.rationale), "NvimeQuote" },
     }
   end
   if (group.index or 1) == 1 and session.verify then
@@ -930,12 +932,14 @@ local function render_visual_group(session, group)
     end
   end
   virt_lines[#virt_lines + 1] = { { clip_review_text(session, group_summary(group)), "NvimeDiffHunk" } }
-  virt_lines[#virt_lines + 1] = {
-    {
-      clip_review_text(session, "  ]b/[b move  ga accept  gb reject  gA/gB all  gc discuss  g? keys"),
-      "NvimeMuted",
-    },
-  }
+  virt_lines[#virt_lines + 1] = ui.keyhint_segments({
+    { "]b/[b", "move" },
+    { "ga", "accept" },
+    { "gb", "reject" },
+    { "gA/gB", "all" },
+    { "gc", "discuss" },
+    { "g?", "keys" },
+  }, { indent = "  " })
 
   local has_conflict = false
   for _, block in ipairs(group.blocks) do

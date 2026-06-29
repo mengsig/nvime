@@ -122,8 +122,19 @@ local function render()
   lines[#lines + 1] =
     "  ───────────────────────────────────────────"
   marks[#marks + 1] = { #lines, 0, -1, "NvimeRule" }
-  lines[#lines + 1] = "  <CR> enter · n new · dd discard · r refresh · q close"
-  marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
+  do
+    local footer, hints = ui.keyhint_line({
+      { "<CR>", "enter" },
+      { "n", "new" },
+      { "dd", "discard" },
+      { "r", "refresh" },
+      { "q", "close" },
+    }, { indent = "  " })
+    lines[#lines + 1] = footer
+    for _, hint in ipairs(hints) do
+      marks[#marks + 1] = { #lines, hint[1], hint[2], hint[3] }
+    end
+  end
 
   vim.bo[view.bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(view.bufnr, 0, -1, false, lines)

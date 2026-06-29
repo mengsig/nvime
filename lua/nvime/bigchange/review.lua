@@ -256,18 +256,22 @@ local function render_left()
   lines[#lines + 1] = "  ─────────────────────────────"
   marks[#marks + 1] = { #lines, 0, -1, "NvimeRule" }
   if R.busy then
-    lines[#lines + 1] = "  ● " .. (R.status or "submitting…")
+    lines[#lines + 1] = "  " .. ui.icon("active") .. " " .. (R.status or "submitting…")
     marks[#marks + 1] = { #lines, 0, -1, "NvimeStatusRunning" }
   else
+    -- Footer hints through the shared formatter: keys pop, descriptions recede.
+    local function hint_row(items)
+      local line, hints = ui.keyhint_line(items, { indent = "  " })
+      lines[#lines + 1] = line
+      for _, hint in ipairs(hints) do
+        marks[#marks + 1] = { #lines, hint[1], hint[2], hint[3] }
+      end
+    end
     local other = (R.mode == "inline") and "diff" or "inline"
-    lines[#lines + 1] = "  <CR> open · ]c/[c hunks"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
-    lines[#lines + 1] = string.format("  t → %s view · w → %s", other, (R.wrap ~= false) and "no-wrap" or "wrap")
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
-    lines[#lines + 1] = "  a approve · r request-changes"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
-    lines[#lines + 1] = "  <C-s> submit · M " .. complete_label(session) .. " · q close · g? keys"
-    marks[#marks + 1] = { #lines, 0, -1, "NvimeHelp" }
+    hint_row({ { "<CR>", "open" }, { "]c/[c", "hunks" } })
+    hint_row({ { "t", other .. " view" }, { "w", (R.wrap ~= false) and "no-wrap" or "wrap" } })
+    hint_row({ { "a", "approve" }, { "r", "request-changes" } })
+    hint_row({ { "<C-s>", "submit" }, { "M", complete_label(session) }, { "q", "close" }, { "g?", "keys" } })
   end
 
   vim.bo[R.left_buf].modifiable = true

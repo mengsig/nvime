@@ -80,13 +80,22 @@ local ASCII_ICONS = {
   list = "=",
 }
 
--- nvime palette. A single cohesive dark scheme (Tokyo-Night-Moon lineage):
--- a cool blue-tinted base with depth, harmonised accents tuned for legibility
--- against the panel background, and a clear semantic role for every hue. All
--- decoration groups below map through this table so the look stays consistent
--- across the dashboard, plan, diff, and chat surfaces — and so retuning is a
--- one-line change instead of a hex-hunt across the file.
-local C = {
+-- nvime palette.
+--
+-- The palette is *colorscheme-derived*: on every (re)definition cycle we read
+-- the user's active theme through standard semantic groups (Normal, Comment,
+-- DiffAdd, DiagnosticError, Special, …) and map each accent onto the role that
+-- carries it — running/info → DiagnosticInfo, success/add → DiffAdd, warn →
+-- DiagnosticWarn, error/delete → DiagnosticError, and so on. Surfaces are
+-- blended from the resolved Normal background so the panel reads as a lit card
+-- on any theme and honours `background=light` automatically.
+--
+-- FALLBACK is the curated Tokyo-Night-Moon lineage used when a source group is
+-- undefined or when `termguicolors` is off (a cohesive cool blue-tinted base
+-- with a clear semantic role for every hue). It is the source of truth for the
+-- look only when the colorscheme can't supply one — otherwise the user's theme
+-- always wins, which is the whole point: nvime inherits, it does not impose.
+local FALLBACK = {
   -- Surfaces (deepest → most elevated). The steps between layers are
   -- deliberately wide enough to read as physical elevation: a near-black
   -- backdrop makes every float sit forward as a lit card, and each surface
@@ -128,7 +137,144 @@ local C = {
   warn_bg = "#332b18",
 }
 
+-- Live palette. Starts as a copy of FALLBACK and is refreshed from the active
+-- colorscheme by resolve_palette() at the top of every define cycle.
+local C = vim.deepcopy(FALLBACK)
+
+-- ── colour helpers ──────────────────────────────────────────────────────────
+-- nvim_get_hl returns colours as decimal integers; we round-trip through
+-- #rrggbb so blending and storage stay uniform with the FALLBACK literals.
+
+local function int_to_hex(n)
+  if type(n) ~= "number" then
+    return nil
+  end
+  return string.format("#%06x", n)
+end
+
+local function hex_to_rgb(hex)
+  if type(hex) ~= "string" then
+    return nil
+  end
+  local r, g, b = hex:match("^#(%x%x)(%x%x)(%x%x)$")
+  if not r then
+    return nil
+  end
+  return tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)
+end
+
+-- Linear blend of two #rrggbb colours; t=0 → a, t=1 → b. Used to derive raised
+-- surfaces (toward fg) and washes (toward an accent) from the theme background.
+local function blend(a, b, t)
+  local ar, ag, ab = hex_to_rgb(a)
+  local br, bg, bb = hex_to_rgb(b)
+  if not ar or not br then
+    return a or b
+  end
+  local function mix(x, y)
+    return math.floor(x + (y - x) * t + 0.5)
+  end
+  return string.format("#%02x%02x%02x", mix(ar, br), mix(ag, bg), mix(ab, bb))
+end
+
+-- Resolve a highlight group to its effective attributes, following links.
+local function resolved(group)
+  local ok, def = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+  if ok and type(def) == "table" then
+    return def
+  end
+  return {}
+end
+
+-- First defined foreground across an ordered list of source groups, as #rrggbb,
+-- else the fallback. Lets each accent name the *role* it plays (DiagnosticInfo,
+-- DiffAdd, …) and degrade through near-synonyms before giving up.
+local function pick_fg(groups, fallback)
+  for _, g in ipairs(groups) do
+    local hex = int_to_hex(resolved(g).fg)
+    if hex then
+      return hex
+    end
+  end
+  return fallback
+end
+
+local function pick_bg(groups, fallback)
+  for _, g in ipairs(groups) do
+    local hex = int_to_hex(resolved(g).bg)
+    if hex then
+      return hex
+    end
+  end
+  return fallback
+end
+
+-- Rebuild C from the active colorscheme. No-op (keeps FALLBACK) when colours
+-- can't be derived: terminals without truecolor render gui values inconsistently
+-- and resolved() may return cterm indices we can't blend, so we lean on the
+-- semantic *links* in define_highlights for those environments instead.
+local function resolve_palette()
+  C = vim.deepcopy(FALLBACK)
+  if not vim.o.termguicolors then
+    return
+  end
+  local base = pick_bg({ "NormalFloat", "Normal" }, nil)
+  local fg = pick_fg({ "Normal" }, nil)
+  if not base or not fg then
+    return
+  end
+
+  C.bg = base
+  C.fg = fg
+  -- Surfaces: blend toward fg for elevation, toward black for the backdrop.
+  C.backdrop = blend(base, "#000000", 0.5)
+  C.bg_input = blend(base, fg, 0.06)
+  C.bg_band = blend(base, fg, 0.11)
+  C.bg_cursor = pick_bg({ "CursorLine" }, blend(base, fg, 0.18))
+
+  -- Structure.
+  C.border = pick_fg({ "FloatBorder", "WinSeparator" }, blend(base, fg, 0.42))
+  C.rule = blend(base, fg, 0.18)
+  C.faint = pick_fg({ "NonText", "Whitespace" }, blend(base, fg, 0.30))
+
+  -- Text tiers.
+  C.fg_bright = blend(fg, "#ffffff", 0.22)
+  C.fg_dim = blend(fg, base, 0.20)
+  C.muted = pick_fg({ "Comment" }, FALLBACK.muted)
+  C.comment = blend(C.muted, base, 0.18)
+
+  -- Accents, mapped by semantic role so each tracks the theme's own hue.
+  C.blue = pick_fg({ "DiagnosticInfo", "Function", "@function" }, FALLBACK.blue)
+  C.cyan = pick_fg({ "Special", "@constant.builtin", "Identifier" }, FALLBACK.cyan)
+  C.teal = pick_fg({ "@function.builtin", "Operator", "Identifier" }, FALLBACK.teal)
+  C.green = pick_fg({ "DiagnosticOk", "String", "@string", "diffAdded" }, FALLBACK.green)
+  C.yellow = pick_fg({ "DiagnosticWarn", "WarningMsg", "@number" }, FALLBACK.yellow)
+  C.orange = pick_fg({ "Constant", "Number", "@constant" }, FALLBACK.orange)
+  C.red = pick_fg({ "DiagnosticError", "ErrorMsg", "@error", "diffRemoved" }, FALLBACK.red)
+  C.magenta = pick_fg({ "Keyword", "Statement", "@keyword" }, FALLBACK.magenta)
+
+  -- Washes: tint the theme background toward each accent so a whole filled
+  -- block reads as a single lit field rather than a stripe of saturated colour.
+  C.add_bg = pick_bg({ "DiffAdd" }, blend(base, C.green, 0.18))
+  C.del_bg = pick_bg({ "DiffDelete" }, blend(base, C.red, 0.18))
+  C.hunk_bg = pick_bg({ "DiffText", "DiffChange" }, blend(base, C.blue, 0.18))
+  C.warn_bg = blend(base, C.yellow, 0.16)
+end
+
+-- Semantic links. These map an nvime role straight onto a standard group, so
+-- the user's colorscheme drives them directly (and they carry the theme's cterm
+-- colours in non-truecolor terminals, which the composed groups below cannot).
+-- `default = true` keeps a user `:hi link` override winning.
+local SEMANTIC_LINKS = {
+  NvimeCursorLine = "CursorLine",
+  NvimeError = "DiagnosticError",
+}
+
 local function define_highlights()
+  resolve_palette()
+  for name, target in pairs(SEMANTIC_LINKS) do
+    vim.api.nvim_set_hl(0, name, { link = target, default = true })
+  end
   vim.api.nvim_set_hl(0, "NvimeNormal", { bg = C.bg, fg = C.fg, default = true })
   vim.api.nvim_set_hl(0, "NvimeBackdrop", { bg = C.backdrop, default = true })
   vim.api.nvim_set_hl(0, "NvimeBorder", { fg = C.border, default = true })
@@ -229,12 +375,17 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeDiffDeleteLine", { bg = C.del_bg })
   vim.api.nvim_set_hl(0, "NvimeDiffHunk", { fg = C.fg, bg = C.hunk_bg, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeConflict", { fg = C.yellow, bg = C.warn_bg, bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeError", { fg = C.red, bold = true, default = true })
-  vim.api.nvim_set_hl(0, "NvimeCursorLine", { bg = C.bg_cursor, default = true })
   vim.api.nvim_set_hl(0, "NvimeRowIndex", { fg = C.yellow, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeRowTitle", { fg = C.fg, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeRowMeta", { fg = C.muted, default = true })
   vim.api.nvim_set_hl(0, "NvimeRowDetail", { fg = C.fg_dim, default = true })
+  -- A running session row: a subtle blue-tinted band so an in-flight agent is
+  -- legible at a glance in the dashboard without shouting (reads as "live",
+  -- not as a diff hunk).
+  vim.api.nvim_set_hl(0, "NvimeRowRunning", { bg = C.hunk_bg, default = true })
+  -- Banner label chip (e.g. the diff RATIONALE tag): dark text on a calm accent
+  -- so the label reads as a pill, distinct from the body that follows it.
+  vim.api.nvim_set_hl(0, "NvimeBanner", { fg = C.bg, bg = C.cyan, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeProviderClaude", { fg = C.orange, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeProviderCodex", { fg = C.teal, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeBadge", { fg = C.bg, bg = C.teal, bold = true, default = true })
@@ -295,6 +446,14 @@ function M.ensure_highlights()
     return
   end
   define_highlights()
+end
+
+-- Expose the resolved palette (a copy, so callers can't mutate the live table).
+-- Primarily for tests asserting that nvime tracks the active colorscheme; also
+-- handy for downstream code that wants a theme-derived accent.
+function M.palette()
+  resolve_palette()
+  return vim.deepcopy(C)
 end
 
 -- Re-apply our defaults whenever a colorscheme load wipes them. Without
@@ -371,6 +530,71 @@ function M.relative_time(timestamp)
     return tostring(hours) .. "h"
   end
   return tostring(math.floor(hours / 24)) .. "d"
+end
+
+-- ── key hints ───────────────────────────────────────────────────────────────
+-- One formatter for every in-buffer / virt-line key hint so the keys read the
+-- same everywhere: the key glyphs pop (NvimeKey), the descriptions recede
+-- (NvimeMuted), and the separators are barely-there (NvimeFaint). Footers that
+-- used to be a single flat-coloured string become scannable — the eye lands on
+-- the keys, which is the whole point of a hint row.
+--
+-- `items` is a list of { key, desc } pairs (desc optional). `opts.indent`
+-- (string) is prepended; `opts.sep` overrides the " · " separator.
+
+local function keyhint_sep(opts)
+  return (opts and opts.sep) or "  ·  "
+end
+
+-- Returns (line, marks): the display string plus a list of
+-- { col_start, col_end, hl } byte-range marks the caller applies as extmarks
+-- (e.g. via bigchange.uikit.apply_marks-style loops). Byte offsets, 0-based.
+function M.keyhint_line(items, opts)
+  opts = opts or {}
+  local sep = keyhint_sep(opts)
+  local line = opts.indent or ""
+  local marks = {}
+  for index, item in ipairs(items or {}) do
+    if index > 1 then
+      local from = #line
+      line = line .. sep
+      marks[#marks + 1] = { from, #line, "NvimeFaint" }
+    end
+    local key = tostring(item[1] or "")
+    local from = #line
+    line = line .. key
+    marks[#marks + 1] = { from, #line, "NvimeKey" }
+    local desc = tostring(item[2] or "")
+    if desc ~= "" then
+      line = line .. " "
+      from = #line
+      line = line .. desc
+      marks[#marks + 1] = { from, #line, "NvimeMuted" }
+    end
+  end
+  return line, marks
+end
+
+-- Returns a virt_lines segment list ({ {text, hl}, ... }) for the same hint,
+-- suitable for an extmark `virt_lines` row (e.g. the inline diff footer).
+function M.keyhint_segments(items, opts)
+  opts = opts or {}
+  local sep = keyhint_sep(opts)
+  local segments = {}
+  if opts.indent and opts.indent ~= "" then
+    segments[#segments + 1] = { opts.indent, "NvimeMuted" }
+  end
+  for index, item in ipairs(items or {}) do
+    if index > 1 then
+      segments[#segments + 1] = { sep, "NvimeFaint" }
+    end
+    segments[#segments + 1] = { tostring(item[1] or ""), "NvimeKey" }
+    local desc = tostring(item[2] or "")
+    if desc ~= "" then
+      segments[#segments + 1] = { " " .. desc, "NvimeMuted" }
+    end
+  end
+  return segments
 end
 
 local function set_scratch_options(bufnr, filetype)

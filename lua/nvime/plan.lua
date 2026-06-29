@@ -820,6 +820,18 @@ local function render_plan_lines(plan)
     return push("  " .. glyph_or_bar(SECTION_ICONS[label] or "review", "  ") .. label, "NvimePlanHeading")
   end
 
+  -- A footer / hint row where the keys pop (NvimeKey) and the descriptions
+  -- recede (NvimeMuted) — built from the shared ui.keyhint formatter so plan
+  -- footers read like every other nvime surface. `items` = { {key, desc}, ... }.
+  local function push_keyhint(items)
+    local line, hints = ui.keyhint_line(items, { indent = "    " })
+    local hint_row = push(line)
+    for _, hint in ipairs(hints) do
+      mark_range(hint_row, hint[1], hint[2], hint[3], 200)
+    end
+    return hint_row
+  end
+
   local title = plan.title or plan.id or "(unnamed plan)"
   local status = plan_overall_status(plan)
   local updated = plan.updated_at or plan.created_at
@@ -1002,8 +1014,19 @@ local function render_plan_lines(plan)
   end
 
   push_rule()
-  push("    <CR>/ga agree → scaffold      gu update plan      gr re-plan      gN reset session", "NvimePlanFooter")
-  push("    ]s [s navigate    o open file    c copy intent    g? keys    q close", "NvimePlanFooter")
+  push_keyhint({
+    { "<CR>/ga", "agree → scaffold" },
+    { "gu", "update plan" },
+    { "gr", "re-plan" },
+    { "gN", "reset session" },
+  })
+  push_keyhint({
+    { "]s/[s", "navigate" },
+    { "o", "open file" },
+    { "c", "copy intent" },
+    { "g?", "keys" },
+    { "q", "close" },
+  })
   push_blank()
 
   return lines, marks, step_index
@@ -2715,10 +2738,26 @@ local function render_update_plan()
 end
 
 local function update_winbar()
-  if U.chat_win and vim.api.nvim_win_is_valid(U.chat_win) then
-    vim.wo[U.chat_win].winbar = U.busy and "  updating the plan…"
-      or "  type your change · <C-s> send · <C-c> cancel · q close"
+  if not (U.chat_win and vim.api.nvim_win_is_valid(U.chat_win)) then
+    return
   end
+  if U.busy then
+    vim.wo[U.chat_win].winbar = "  %#NvimeStatusRunning#" .. glyph_or_bar("pending", " ") .. "updating the plan…%*"
+    return
+  end
+  -- Keys pop, descriptions recede — same register as every other footer.
+  local function key(lhs, desc)
+    return "%#NvimeKey#" .. lhs .. "%* %#NvimeMuted#" .. desc .. "%*"
+  end
+  local sep = " %#NvimeFaint#·%* "
+  vim.wo[U.chat_win].winbar = "  "
+    .. key("<C-s>", "send")
+    .. sep
+    .. key("<C-c>", "cancel")
+    .. sep
+    .. key("q", "close")
+    .. sep
+    .. key("<Tab>", "plan pane")
 end
 
 local function update_set_busy(on)
@@ -3063,6 +3102,17 @@ refresh_picker = function()
     marks[#marks + 1] = { row = row, hl = hl, col_start = col_start, col_end = col_end }
   end
 
+  -- Footer hint row with the keys highlighted, via the shared ui.keyhint
+  -- formatter so the picker footer matches the plan view and diff surfaces.
+  local function push_keyhint(items)
+    local line, hints = ui.keyhint_line(items, { indent = "    " })
+    local hint_row = push(line)
+    for _, hint in ipairs(hints) do
+      mark_range(hint_row, hint[1], hint[2], hint[3])
+    end
+    return hint_row
+  end
+
   push("")
   local brand_glyph = glyph_or_bar("brand", " ")
   local header_row = push("  " .. brand_glyph .. " PLANS ", "NvimePlanHeading")
@@ -3174,7 +3224,14 @@ refresh_picker = function()
   end
 
   push("  " .. string.rep("─", 76), "NvimePlanRule")
-  push("    <CR> open    n new    R re-plan    dd delete    r refresh    q close", "NvimePlanFooter")
+  push_keyhint({
+    { "<CR>", "open" },
+    { "n", "new" },
+    { "R", "re-plan" },
+    { "dd", "delete" },
+    { "r", "refresh" },
+    { "q", "close" },
+  })
   push("")
 
   local bufnr = panel.bufnr

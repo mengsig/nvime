@@ -793,21 +793,29 @@ the MCP server for symbol listings.
 
 ## `nvime.ui` (lua/nvime/ui.lua)
 
-Shared UI primitives: highlight definitions, icons, panels.
+Shared UI primitives: colorscheme-derived highlight definitions, the key-hint
+formatters, icons, and panels.
 
 ### Public API
 | Symbol | Lines | Notes |
 |---|---|---|
-| `M.ensure_highlights` | 184–197 | Define nvime highlight groups. |
-| `M.icon` | 213–223 | Resolve an icon by name with fallbacks. |
-| `M.truncate` | 225–250 | Truncate to a display width. |
-| `M.relative_time` | 252–270 | Human-friendly relative time. |
-| `M.panel` | 403–415 | Open a panel (float / split / buffer). |
+| `M.ensure_highlights` | 436–449 | Define nvime highlight groups (palette resolved from the active colorscheme). |
+| `M.palette` | 454–457 | Return a copy of the resolved (colorscheme-derived) palette. |
+| `M.icon` | 473–486 | Resolve an icon by name with fallbacks. |
+| `M.truncate` | 488–513 | Truncate to a display width. |
+| `M.relative_time` | 515–533 | Human-friendly relative time. |
+| `M.keyhint_line` | 552–576 | Build a key-hint string + byte-range `{col_start, col_end, hl}` marks. |
+| `M.keyhint_segments` | 580–598 | Build key-hint `virt_lines` segments for the same hint. |
+| `M.configure_panel_window` | 638–656 | Apply nvime panel window options to a window. |
+| `M.panel` | 750–762 | Open a panel (float / split / buffer). |
 
 ### Local helpers
-`define_highlights` (43), `set_scratch_options` (272), `find_buffer_by_name`
-(281), `ensure_named_buffer` (290), `configure_window` (303), `float_config`
-(315), `open_float` (348), `open_split` (362), `open_buffer` (385).
+Colour/palette helpers: `int_to_hex` (148), `hex_to_rgb` (155), `blend` (168),
+`resolved` (181), `pick_fg` (192), `pick_bg` (202), `resolve_palette` (216).
+`define_highlights` (273), `keyhint_sep` (545), `set_scratch_options` (600),
+`find_buffer_by_name` (609), `ensure_named_buffer` (618), `configure_window`
+(658), `float_config` (662), `open_float` (695), `open_split` (709),
+`open_buffer` (732).
 
 ---
 
