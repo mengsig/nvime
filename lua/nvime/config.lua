@@ -120,8 +120,12 @@ M.defaults = {
     -- verify.block_on_parse_error, independent of this table. Trivial /
     -- auto-cleared changes are unaffected: this gate sits on the manual diff
     -- accept path, not the instant-approve path. Signals:
-    --   critic_reject     — the read-only critic returned REJECT.
-    --   critic_flag       — the critic returned FLAG.
+    --   critic_reject     — the read-only critic returned REJECT. The critic
+    --                       verdict is set async, so (like verify_tool_error)
+    --                       "block" is not a hard guarantee: an accept before
+    --                       the critic returns sees no verdict and is allowed.
+    --   critic_flag       — the critic returned FLAG (same async caveat as
+    --                       critic_reject).
     --   risk_high         — the blast-radius score is `high`.
     --   verify_tool_error — an external linter/type-checker flagged an error
     --                       (a non-parse finding with severity "error").

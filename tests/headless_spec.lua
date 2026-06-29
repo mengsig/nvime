@@ -7207,6 +7207,49 @@ end)();
     8,
     "verify map: finding after a rejected block does not drift by old_count"
   )
+end)();
+
+(function()
+  -- ]v/[v navigation must use target-buffer coordinates for the cursor even when
+  -- pressed from the proposed/review buffer (where the cursor is in proposed
+  -- coordinates). A pending block that adds lines makes the two diverge.
+  local diff = require("nvime.diff")
+  local state = require("nvime.state")
+  vim.cmd.edit(tmp .. "/findnav.lua")
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "L1", "L2", "L3", "L4", "L5" })
+  local nav_target = vim.api.nvim_get_current_buf()
+  local nav_result = diff.start_session(
+    { bufnr = nav_target, line1 = 1, line2 = 5, path = "findnav.lua", source = "test" },
+    "--- a/findnav.lua\n+++ b/findnav.lua\n@@ -1,5 +1,7 @@\n L1\n-L2\n+n1\n+n2\n+n3\n L3\n L4\n L5",
+    "claude",
+    ""
+  )
+  assert(nav_result.status == "diff", "find-nav: diff session opens")
+  local nav_session = nav_result.session
+  -- Findings in PROPOSED coordinates: proposed line 6 = L4, 7 = L5; the pending
+  -- +2 block maps those to target lines 4 and 5.
+  nav_session.verify = {
+    status = "warn",
+    findings = {
+      { line = 6, col = 1, severity = "warn", message = "f-at-L4", source = "test" },
+      { line = 7, col = 1, severity = "warn", message = "f-at-L5", source = "test" },
+    },
+  }
+  diff.open_view()
+  local nav_review = state.current_diff.review
+  assert(nav_review and vim.api.nvim_win_is_valid(nav_review.proposed_winid), "find-nav: review opens")
+  -- Sit in the proposed pane at proposed line 5 (= target line 3). Without the
+  -- fix the raw proposed cursor (5) skips both findings and wraps to the first;
+  -- with the fix the cursor maps to target 3 and the next finding is target 4.
+  vim.api.nvim_set_current_win(nav_review.proposed_winid)
+  vim.api.nvim_win_set_cursor(0, { 5, 0 })
+  diff.next_finding()
+  assert_eq(
+    vim.api.nvim_win_get_cursor(0)[1],
+    4,
+    "find-nav: next_finding from the proposed buffer maps the cursor to target coordinates"
+  )
+  diff.close_view()
 end)()
 
 print("nvime headless spec passed")

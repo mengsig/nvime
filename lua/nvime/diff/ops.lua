@@ -1042,6 +1042,20 @@ local function verify_findings(diff_session)
   return out
 end
 
+-- ]v/[v are installed in both the target buffer and the proposed/review buffer.
+-- verify_findings() returns finding.line in TARGET coordinates, so when nav is
+-- pressed from the proposed buffer the cursor (in proposed coordinates) must be
+-- remapped proposed->target before the comparison, or the first jump mixes
+-- coordinate systems and can skip the nearest finding.
+local function target_cursor_line(session)
+  local cursor = vim.api.nvim_win_get_cursor(0)[1]
+  local review = session.review
+  if review and review.proposed_bufnr == vim.api.nvim_get_current_buf() then
+    return map_proposed_line(session, cursor) or cursor
+  end
+  return cursor
+end
+
 local function jump_to_finding(session, finding)
   if not finding then
     vim.notify("No located nvime verify finding", vim.log.levels.INFO)
@@ -1064,7 +1078,7 @@ function M.next_finding()
     vim.notify("No nvime verify findings to navigate", vim.log.levels.INFO)
     return
   end
-  local cursor = vim.api.nvim_win_get_cursor(0)[1]
+  local cursor = target_cursor_line(session)
   for _, finding in ipairs(findings) do
     if finding.line > cursor then
       jump_to_finding(session, finding)
@@ -1084,7 +1098,7 @@ function M.prev_finding()
     vim.notify("No nvime verify findings to navigate", vim.log.levels.INFO)
     return
   end
-  local cursor = vim.api.nvim_win_get_cursor(0)[1]
+  local cursor = target_cursor_line(session)
   for index = #findings, 1, -1 do
     if findings[index].line < cursor then
       jump_to_finding(session, findings[index])

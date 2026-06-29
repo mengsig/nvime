@@ -86,11 +86,15 @@ local cached_rules_signature
 local function rules_signature()
   local uv = vim.uv or vim.loop
   local path = policy_path()
+  -- The cache key must track cfg().inherit_defaults too: a runtime change to it
+  -- without touching policy.json (which would change mtime/size) otherwise keeps
+  -- a stale merge/replace result.
+  local inherit = cfg().inherit_defaults ~= false and "1" or "0"
   local stat = uv.fs_stat(path)
   if not stat then
-    return "default::no-file"
+    return "default::no-file::" .. inherit
   end
-  return string.format("%s::%d::%d", path, stat.mtime.sec or 0, stat.size or 0)
+  return string.format("%s::%d::%d::%s", path, stat.mtime.sec or 0, stat.size or 0, inherit)
 end
 
 local function load_rules()
