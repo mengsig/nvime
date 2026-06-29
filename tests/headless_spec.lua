@@ -6929,18 +6929,31 @@ end)();
 end)();
 
 (function()
-  -- B3: the post-accept test loop must time out a hanging runner so it can
-  -- never wedge (in_flight set forever, exit callback never firing). Drive
-  -- maybe_run with a runner that hangs well past a short timeout and assert
-  -- it reports a timed-out test_loop_done (which only fires from the exit
-  -- callback — proving the loop was freed, not wedged).
+  -- B3: the post-accept test loop must time out an over-running runner so it
+  -- can never wedge (in_flight set forever, exit callback never firing) and
+  -- so the verdict reaches a timed-out test_loop_done (which only fires from
+  -- the exit callback — proving the loop was freed, not wedged).
+  --
+  -- This used to spawn `sleep 30` and rely on the timeout machinery SIGTERMing
+  -- a truly-hanging process within the wait window. That raced the runner's
+  -- neovim/libuv build: on ubuntu CI neither our scheduled kill nor
+  -- vim.system's native `timeout` reliably reaped the runner during vim.wait,
+  -- so the exit callback never fired, test_loop_done never landed, and the
+  -- sleep leaked as an orphan reaped only at job cleanup. The decision logic
+  -- (run_runner) deliberately does NOT depend on the kill landing — it reads
+  -- the timed_out verdict from WALL-CLOCK elapsed >= limit. So drive it
+  -- deterministically with a runner that EXCEEDS the timeout and then exits ON
+  -- ITS OWN: the exit callback fires through the normal process-exit path (no
+  -- kill needed, portable across builds) and elapsed (~700ms) far exceeds the
+  -- 200ms limit, so the wall-clock branch stamps timed_out=true regardless of
+  -- whether any SIGTERM was delivered.
   local tl = require("nvime.test_loop")
   local state = require("nvime.state")
   local saved = state.config.test_loop
   state.config.test_loop = {
     enabled = true,
-    runner = "sleep 30",
-    timeout_ms = 300,
+    runner = "sleep 0.7",
+    timeout_ms = 200,
     max_retries = 2,
     capture_lines = 50,
     auto_fix = false,
@@ -6993,8 +7006,9 @@ end)();
     return false
   end, 50)
   assert(restarted, "test_loop: a timed-out run does not wedge — the next run starts")
-  -- Let the second hanging run time out too, so no sleep process outlives the
-  -- spec (its own 300ms timeout SIGTERMs it).
+  -- Drain the second over-running run to its timed-out test_loop_done so no
+  -- sleep process outlives the spec (it self-exits at ~700ms, past the 200ms
+  -- limit, so the verdict lands without relying on a SIGTERM).
   vim.wait(5000, function()
     if vim.fn.filereadable(audit_path) ~= 1 then
       return false
