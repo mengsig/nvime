@@ -54,7 +54,9 @@ Provider tool-allowlists: `claude_read_tools`, `claude_disallowed_tools`,
 `claude_web_disallowed_tools`, `claude_nonreview_disallowed`,
 `claude_review_disallowed`, `claude_review_tools`, `claude_plan_tools`,
 `claude_plan_disallowed`, `claude_selection_tools` (57–137).
-Argv builders: `claude_args` (139), `codex_args` (245), `build_args` (297).
+Argv builders: `claude_args` (139), `codex_args` (245), `register_adapter_args`
+(registers each adapter's builder on `provider.adapters` at load), `build_args`
+(297, dispatches through `provider.adapters[name].build_args`).
 Workspace prep: `mkdir_p`, `normalize_dir`, `ensure_workspace_git_root`,
 `copy_file`, `copy_tree`, `copy_plans_into_workspace`, `is_markdown`,
 `same_file`, `collect_markdown`, `collect_plan_files`,

@@ -214,6 +214,12 @@ agent does not need to author these — they are runtime state.
   shape, but for plan_author refinements (which run in a separate temp
   workspace cwd). Kept distinct from `provider_sessions` because session
   ids are not portable across cwds.
+- `provider` — the provider that authored (or last refined) this plan,
+  captured when the author session is first stored. `gN` and the phase-0
+  continuity badge resolve the plan's own provider from this (falling back
+  to a captured author-session provider, then the config default) so a
+  codex-authored plan under a `claude` default still targets the codex
+  bucket.
 
 Step-level fields nvime updates as the user works the plan:
 
