@@ -40,6 +40,38 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   flat single-colour footer; thread these instead (see `plan.lua`/`diff/session.lua`/
   `bigchange/*` callers). The usage dashboard footer is the original precedent.
 
+## Big Change comprehension gate
+
+- The forced-comprehension review (`bigchange/review.lua`) gates the merge on every
+  block reaching `state == "cleared"`. Three independent mechanisms feed it, all in
+  `bigchange/`:
+  - **Trivial auto-clear** (`triviality.lua`): genuinely self-evident blocks
+    (imports/requires, doc/markdown prose, comment-only edits, docstrings,
+    version/config bumps, and pure whitespace/formatting) clear with NO explanation.
+    This frictionless instant-approve is intentional — *enhance* it, never add friction.
+    Whitespace detection (`_is_whitespace_only`) pairs non-blank del/add lines in order
+    and compares a `ws_sig` that drops leading indent + collapses internal runs but
+    preserves string contents verbatim; it is order-sensitive and conservative
+    (token-adjacency changes like `mut x`↔`mutx` never match). Leading indentation is
+    treated as significant for `py`/`yaml` (a re-indent there is not cosmetic). Every
+    relaxation is guarded so an executable code line is never waved through.
+  - **Independent grader** (`review.lua` `submit_round`): explanations are graded by a
+    FRESH, READ-ONLY `critic`-lane turn that never resumes the worktree author
+    (`grade_turn = {lane="critic", resume=false, scope="grade"}`). The author's resumed
+    write session (`scope="worktree"`) only runs to act on `request_changes` critiques.
+    Keeping the grader independent removes the self-grading conflict-of-interest.
+  - **Devil's-advocate critic** (`critic.lua`, opt-in via `bigchange.critic.enabled`):
+    one fresh read-only pass annotates each gradeable block with an APPROVE/FLAG/REJECT
+    verdict before review opens. Advisory only — it never blocks.
+- `agent.turn` session buckets are scoped (`agent.lua` `session_bucket`): `worktree`
+  (resumable author), `intake`, plus read-only `grade`/`critic` buckets kept SEPARATE so
+  a stray session id from a read-only turn can never overwrite the author's resumable id.
+- Binary / pure-rename / mode-only diffs carry no `@@` hunk, so `diffparse.parse` emits a
+  synthetic **meta hunk** (`meta = "binary"|"rename"|"copy"|"mode"`) for them; `blocks.lua`
+  flags those blocks `meta_kind` (never trivial-auto-cleared) and `review.lua` requires an
+  explicit acknowledgment (`a`) to clear them — otherwise they'd merge unreviewed via
+  `merge.lua`'s `git diff --binary`.
+
 ## Sharp edges
 
 - `vim.system()` **throws synchronously** when `args[1]` (the provider/tool binary) is

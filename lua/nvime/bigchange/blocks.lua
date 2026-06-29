@@ -202,7 +202,7 @@ local function assemble(session, groups, prior_blocks)
   end
   local blocks = {}
   for index, g in ipairs(normalized) do
-    blocks[#blocks + 1] = {
+    local block = {
       id = index,
       title = g.title,
       file = g.file,
@@ -216,13 +216,24 @@ local function assemble(session, groups, prior_blocks)
       agent_response = nil,
       agent_trivial = g.trivial == true,
     }
+    blocks[#blocks + 1] = block
+    -- A block carrying a meta hunk (binary blob / pure rename / mode change) has
+    -- no reviewable content — it is un-gradeable but must NOT slip through
+    -- silently. Flag it so the review surfaces it as an explicit acknowledge row
+    -- and so triviality never auto-clears it (e.g. a renamed *.md file).
+    for _, h in ipairs(M.block_hunks(session, block)) do
+      if h.meta then
+        block.meta_kind = block.meta_kind or h.meta
+      end
+    end
   end
   carry_state(session, blocks, prior_blocks)
   -- Auto-clear self-evident blocks (imports/docs/comments/config bumps) so the
-  -- user never writes a graded explanation for them.
+  -- user never writes a graded explanation for them. Meta blocks are never
+  -- self-evident — they carry no content to judge — so they are excluded.
   local triviality = require("nvime.bigchange.triviality")
   for _, b in ipairs(blocks) do
-    if b.state ~= "cleared" then
+    if b.state ~= "cleared" and not b.meta_kind then
       local res = triviality.classify(session, b, M.block_hunks(session, b))
       if res.trivial then
         b.state, b.action = "cleared", "auto_trivial"
@@ -233,6 +244,9 @@ local function assemble(session, groups, prior_blocks)
   end
   session.blocks = blocks
 end
+
+-- Test-only export.
+M._assemble = assemble
 
 -- Capture the diff, parse it, and ask the agent to group it into blocks.
 -- cb(ok, err). On success session.diff_hunks and session.blocks are populated.

@@ -67,9 +67,24 @@ local function state_meta(s)
   return STATE[s] or STATE.pending
 end
 
--- A block's display meta. Trivial auto-clears get a distinct ⚡ badge; earned
--- clears keep the standard cleared ✓ meta.
+-- Highlight for a devil's-advocate critic verdict (F1). Advisory only.
+local function critic_hl(decision)
+  return (decision == "APPROVE" and "NvimeStatusSuccess")
+    or (decision == "FLAG" and "NvimeStatusWarn")
+    or "NvimeStatusError"
+end
+
+-- A block's display meta. Trivial auto-clears get a distinct ⚡ badge; an
+-- un-gradeable binary/rename/mode row gets a ⬢ badge that must be explicitly
+-- ACKNOWLEDGED (it carries no content to explain, but it must never merge
+-- silently); earned clears keep the standard cleared ✓ meta.
 local function block_meta(b)
+  if b.meta_kind then
+    if b.state == "cleared" then
+      return { icon = "✓", hl = "NvimeMuted", label = b.meta_kind .. " · acknowledged" }
+    end
+    return { icon = "⬢", hl = "NvimeStatusWarn", label = b.meta_kind .. " · acknowledge (a)" }
+  end
   if b.trivial and b.state == "cleared" then
     return { icon = "⚡", hl = "NvimeMuted", label = "trivial · auto-cleared" }
   end
@@ -153,13 +168,16 @@ end
 -- attempted counts as 0 so the grade reflects real, demonstrated coverage.
 -- Trivial auto-clears are self-evident and excluded entirely (both numerator
 -- and denominator) so they neither inflate nor dilute the demonstrated grade.
+-- Un-gradeable meta rows (binary/rename/mode) are likewise excluded: they are
+-- acknowledged, not explained, so counting an acknowledgment as 100% would
+-- inflate the demonstrated comprehension.
 -- Returns (percent:int, scored:int, nontrivial:int), or nil when there are no
 -- gradeable (non-trivial) blocks.
 local function overall_grade(session)
   local blocks = session.blocks or {}
   local sum, scored, nontrivial = 0, 0, 0
   for _, b in ipairs(blocks) do
-    if not b.trivial then
+    if not b.trivial and not b.meta_kind then
       nontrivial = nontrivial + 1
       local g
       if type(b.grade) == "number" then
@@ -246,10 +264,21 @@ local function render_left()
       local grade = b.grade and (" " .. tostring(b.grade) .. "%") or ""
       local sel = (b.id == R.active_block_id) and "›" or " "
       local text = string.format("  %s  %s %d %s%s", sel, meta.icon, b.id, b.title, grade)
+      -- Devil's-advocate verdict (F1) trails the title, coloured by decision.
+      local verdict_at, verdict_hl
+      if b.critic and b.critic.decision then
+        verdict_at = #text
+        verdict_hl = critic_hl(b.critic.decision)
+        text = text .. "  " .. b.critic.decision
+      end
       lines[#lines + 1] = text
       R.row_to_block[#lines] = b.id
       marks[#marks + 1] = { #lines, 0, 7, meta.hl }
-      marks[#marks + 1] = { #lines, 7, -1, (b.id == R.active_block_id) and "NvimeHeader" or "NvimeNormal" }
+      marks[#marks + 1] =
+        { #lines, 7, verdict_at or -1, (b.id == R.active_block_id) and "NvimeHeader" or "NvimeNormal" }
+      if verdict_at then
+        marks[#marks + 1] = { #lines, verdict_at, -1, verdict_hl }
+      end
     end
   end
 
@@ -370,6 +399,15 @@ local function overlay_lines(block)
     { string.format("Block %d · %s", block.id, block.title), "NvimeHeader" },
     { "  [" .. meta.label .. grade .. "]", meta.hl },
   }
+
+  -- Devil's-advocate verdict (F1): advisory, shown before the user explains.
+  if block.critic and block.critic.decision then
+    out[#out + 1] = {
+      { "│ critic ", "NvimeAgent" },
+      { block.critic.decision, critic_hl(block.critic.decision) },
+      { " — " .. (block.critic.justification or ""), "NvimeMuted" },
+    }
+  end
 
   -- An unsubmitted draft (typed but not yet committed with <C-s>).
   local pending_draft = block.draft
@@ -496,6 +534,12 @@ local function show_diff(block, on_disk)
   marks[#marks + 1] = { #lines, 0, -1, "NvimeHeader" }
   lines[#lines + 1] = "  [" .. meta.label .. grade .. "]"
   marks[#marks + 1] = { #lines, 0, -1, meta.hl }
+  if block.critic and block.critic.decision then
+    lines[#lines + 1] = "  critic " .. block.critic.decision .. " — " .. (block.critic.justification or "")
+    marks[#marks + 1] = { #lines, 0, 9, "NvimeAgent" }
+    marks[#marks + 1] = { #lines, 9, 9 + #block.critic.decision, critic_hl(block.critic.decision) }
+    marks[#marks + 1] = { #lines, 9 + #block.critic.decision, -1, "NvimeMuted" }
+  end
   lines[#lines + 1] =
     "  ───────────────────────────────────────────────"
   marks[#marks + 1] = { #lines, 0, -1, "NvimeRule" }
@@ -712,6 +756,32 @@ local function approve()
     return
   end
   ensure_shown(block)
+  if block.meta_kind then
+    -- A binary/rename/mode row has no content to explain or grade — approving it
+    -- is an explicit ACKNOWLEDGMENT that the change is intended. We record it so
+    -- the merge of an otherwise-invisible change stays accountable.
+    block.state = "cleared"
+    block.action = "acknowledged"
+    block.comment = nil
+    block.grade = nil
+    store.touch(R.session)
+    audit.write({
+      event = "bigchange_block_graded",
+      project = R.session.id or R.session.title,
+      block_id = block.id,
+      block_title = block.title,
+      file = block.file,
+      difficulty = R.session.difficulty,
+      meta_kind = block.meta_kind,
+      acknowledged = true,
+    })
+    vim.notify(
+      string.format("nvime big change: acknowledged %s change in %s", block.meta_kind, block.file),
+      vim.log.levels.INFO
+    )
+    render()
+    return
+  end
   if threshold(R.session) == nil then
     -- vibe: approve clears instantly, no explanation.
     block.state = "cleared"
@@ -754,6 +824,13 @@ local function request_changes()
   end
   local block = target_block()
   if not block then
+    return
+  end
+  if block.meta_kind then
+    vim.notify(
+      "nvime big change: a " .. block.meta_kind .. " change can't be critiqued — press a to acknowledge it",
+      vim.log.levels.INFO
+    )
     return
   end
   ensure_shown(block)
@@ -812,47 +889,21 @@ end
 -- ---------------------------------------------------------------------------
 -- batched grading round
 -- ---------------------------------------------------------------------------
-local function grade_prompt(session, pending)
-  local d = difficulty(session)
-  local lines = {
-    "You are grading a forced-comprehension review of code YOU implemented.",
-    string.format("Difficulty: %s — explanations should demonstrate: %s.", d.label, d.detail),
-    string.format("Passing grade is %s%% or higher.", tostring(d.threshold)),
-    "",
-    "For each block below:",
-    "- action=approve: the user EXPLAINS the code. Grade 0-100 how accurately and",
-    "  completely their explanation matches what the code actually DOES and WHY, at",
-    "  this difficulty. Reward genuine understanding in the user's OWN words.",
-    "  ANTI-CHEAT — grade these <= 15 (failing) regardless of difficulty:",
-    "    * the explanation merely restates or lightly rephrases the block TITLE,",
-    "    * it parrots identifiers/comments/strings copied verbatim from the diff",
-    "      without saying what they mean or why they're there,",
-    "    * it is generic boilerplate that would fit almost any code change.",
-    "  An explanation must add information not already visible in the title/diff to",
-    "  pass. If below passing, give a SOCRATIC hint (see below).",
-    "- action=request_changes: the user CRITIQUES your code. If the critique is valid,",
-    "  FIX the code now (edit the files in this worktree) and set revised=true. If the",
-    "  critique is wrong or misguided, set valid=false and explain why in response.",
-    "",
-    "HINTS must be Socratic: pose a question or point at the concept/area the user",
-    'MISSED — e.g. "What happens to the second branch when the list is empty?" — and',
-    "NEVER state the correct explanation, name the answer, or quote the fix. A reader",
-    "should still have to think. One line, no spoilers.",
-    "",
-    "Output ONLY a JSON array wrapped in <JSON></JSON>:",
-    '  [{"id": <int>, "action": "approve"|"request_changes",',
-    '    "grade": <int 0-100>, "verdict": "...", "hint": "...",',
-    '    "valid": <bool>, "revised": <bool>, "response": "..."}]',
-    "",
-  }
-  -- A lane-specific note (e.g. the Plan scaffold phase tells the agent the user
-  -- may have hand-edited the worktree files, which are the source of truth).
-  if session.review_prompt_note and session.review_prompt_note ~= "" then
-    lines[#lines + 1] = session.review_prompt_note
-    lines[#lines + 1] = ""
-  end
+-- The grading turn runs as a FRESH, READ-ONLY session that did NOT build the
+-- code (S2). Keeping the grader independent of the author removes the
+-- self-grading conflict-of-interest: the anti-cheat rules no longer lean on the
+-- honesty of the very model that wants its work merged. These constants are the
+-- contract; they're exported (_grade_turn) so a test can assert the grader
+-- stays independent.
+local grade_turn = { lane = "critic", resume = false, scope = "grade" }
+-- The revision turn DOES resume the worktree author (write access) so a valid
+-- critique can revise the code in place.
+local revise_turn = { lane = "bigchange", resume = true, scope = "worktree" }
+
+-- Append "### Block N … diff … user comment" sections for `pending` onto lines.
+local function append_block_sections(lines, session, pending)
   for _, b in ipairs(pending) do
-    lines[#lines + 1] = string.format("### Block %d — %s (%s) — action=%s", b.id, b.title, b.file, b.action)
+    lines[#lines + 1] = string.format("### Block %d — %s (%s)", b.id, b.title, b.file)
     lines[#lines + 1] = "diff:"
     for _, h in ipairs(blocks_mod.block_hunks(session, b)) do
       lines[#lines + 1] = h.header
@@ -865,6 +916,74 @@ local function grade_prompt(session, pending)
     lines[#lines + 1] = b.comment or ""
     lines[#lines + 1] = ""
   end
+end
+
+-- A lane-specific note (e.g. the Plan scaffold phase tells the agent the user
+-- may have hand-edited the worktree files, which are the source of truth).
+local function append_prompt_note(lines, session)
+  if session.review_prompt_note and session.review_prompt_note ~= "" then
+    lines[#lines + 1] = session.review_prompt_note
+    lines[#lines + 1] = ""
+  end
+end
+
+-- Grade the user's EXPLANATIONS (action=approve blocks). Framed for an
+-- INDEPENDENT grader: it did not write the code, so it has no incentive to wave
+-- a weak explanation through to clear the block.
+local function grade_prompt(session, pending)
+  local d = difficulty(session)
+  local lines = {
+    "You are an INDEPENDENT reviewer running a forced-comprehension review. You did",
+    "NOT write this code and you have no stake in whether it merges — your only job",
+    "is to judge, honestly, whether the user actually understands it. Be skeptical.",
+    string.format("Difficulty: %s — explanations should demonstrate: %s.", d.label, d.detail),
+    string.format("Passing grade is %s%% or higher.", tostring(d.threshold)),
+    "",
+    "For each block below the user EXPLAINS the code. Grade 0-100 how accurately and",
+    "completely their explanation matches what the code actually DOES and WHY, at",
+    "this difficulty. Reward genuine understanding in the user's OWN words.",
+    "  ANTI-CHEAT — grade these <= 15 (failing) regardless of difficulty:",
+    "    * the explanation merely restates or lightly rephrases the block TITLE,",
+    "    * it parrots identifiers/comments/strings copied verbatim from the diff",
+    "      without saying what they mean or why they're there,",
+    "    * it is generic boilerplate that would fit almost any code change.",
+    "  An explanation must add information not already visible in the title/diff to",
+    "  pass. If below passing, give a SOCRATIC hint (see below).",
+    "",
+    "You are READ-ONLY — read the worktree to verify the explanation against the",
+    "real code, but do not edit anything.",
+    "",
+    "HINTS must be Socratic: pose a question or point at the concept/area the user",
+    'MISSED — e.g. "What happens to the second branch when the list is empty?" — and',
+    "NEVER state the correct explanation, name the answer, or quote the fix. A reader",
+    "should still have to think. One line, no spoilers.",
+    "",
+    "Output ONLY a JSON array wrapped in <JSON></JSON>:",
+    '  [{"id": <int>, "grade": <int 0-100>, "verdict": "...", "hint": "..."}]',
+    "",
+  }
+  append_prompt_note(lines, session)
+  append_block_sections(lines, session, pending)
+  return table.concat(lines, "\n")
+end
+
+-- Act on the user's CRITIQUES (action=request_changes blocks). This runs in the
+-- worktree author's resumed write session so it can actually fix the code.
+local function revise_prompt(session, pending)
+  local lines = {
+    "You implemented this code. The user has CRITIQUED some of your blocks. For each",
+    "block below:",
+    "- If the critique is valid, FIX the code now (edit the files in this worktree)",
+    "  and set revised=true.",
+    "- If the critique is wrong or misguided, set valid=false and explain why in",
+    "  response. Do not change code you stand behind.",
+    "",
+    "Output ONLY a JSON array wrapped in <JSON></JSON>:",
+    '  [{"id": <int>, "valid": <bool>, "revised": <bool>, "response": "..."}]',
+    "",
+  }
+  append_prompt_note(lines, session)
+  append_block_sections(lines, session, pending)
   return table.concat(lines, "\n")
 end
 
@@ -932,18 +1051,28 @@ local function apply_results(session, results, pending)
   return need_recapture
 end
 
+-- Partition the round's pending blocks into the two turns: explanations (graded
+-- by the independent read-only grader) and critiques (handled by the resumed
+-- worktree author). Exposed for tests.
+local function partition_pending(blocks)
+  local explain, critique = {}, {}
+  for _, b in ipairs(blocks or {}) do
+    if b.state == "explaining" then
+      explain[#explain + 1] = b
+    elseif b.state == "critiquing" then
+      critique[#critique + 1] = b
+    end
+  end
+  return explain, critique
+end
+
 local function submit_round()
   if R.busy then
     return
   end
   local session = R.session
-  local pending = {}
-  for _, b in ipairs(session.blocks or {}) do
-    if b.state == "explaining" or b.state == "critiquing" then
-      pending[#pending + 1] = b
-    end
-  end
-  if #pending == 0 then
+  local explain_pending, critique_pending = partition_pending(session.blocks)
+  if #explain_pending == 0 and #critique_pending == 0 then
     vim.notify("nvime bigchange: nothing to submit (approve or request-changes first)", vim.log.levels.INFO)
     return
   end
@@ -952,54 +1081,98 @@ local function submit_round()
   R.status = "grading round " .. (session.review_round + 1) .. "…"
   render()
 
-  require("nvime.bigchange.agent").turn({
+  local agent = require("nvime.bigchange.agent")
+  local need_recapture = false
+
+  local function status_progress(line)
+    R.status = vim.trim((line or ""):gsub("\n", " "))
+    vim.schedule(render)
+  end
+
+  -- Final step (after both turns): bump the round, recapture if code changed,
+  -- restore busy state, and announce when everything is cleared.
+  local function finalize()
+    session.review_round = (session.review_round or 0) + 1
+    local function finish(did_recapture)
+      R.busy = false
+      R.status = nil
+      store.touch(session)
+      render()
+      if did_recapture then
+        -- The agent rewrote files on disk and blocks were re-grouped: re-resolve
+        -- the active block and reload its buffer so the view reflects the
+        -- revised code instead of stale annotations on stale content.
+        R.active_block_id = default_active()
+        show_active({ reload = true })
+      end
+      if all_cleared(session) then
+        local pct = overall_grade(session)
+        vim.notify(
+          string.format(
+            "nvime: all blocks cleared — final grade %d%% — press M to %s 🔓",
+            pct or 100,
+            complete_label(session)
+          ),
+          vim.log.levels.INFO
+        )
+      end
+    end
+    if need_recapture then
+      R.status = "re-capturing revised diff…"
+      render()
+      blocks_mod.recapture(session, function()
+        finish(true)
+      end)
+    else
+      finish(false)
+    end
+  end
+
+  -- Turn 2: the worktree AUTHOR (resumed, write access) acts on valid critiques.
+  local function run_revise()
+    if #critique_pending == 0 then
+      finalize()
+      return
+    end
+    R.status = "revising critiqued blocks…"
+    vim.schedule(render)
+    agent.turn({
+      session = session,
+      lane = revise_turn.lane,
+      cwd = session.worktree,
+      prompt = revise_prompt(session, critique_pending),
+      resume = revise_turn.resume,
+      scope = revise_turn.scope,
+      on_progress = status_progress,
+      on_done = function(text)
+        local results = agent.extract_json(text)
+        if apply_results(session, results, critique_pending) then
+          need_recapture = true
+        end
+        finalize()
+      end,
+    })
+  end
+
+  -- Turn 1: the INDEPENDENT grader (fresh, read-only) grades explanations. It
+  -- does not touch code, so it runs first; the author revision (which may
+  -- rewrite files and trigger a recapture) runs after.
+  if #explain_pending == 0 then
+    run_revise()
+    return
+  end
+  agent.turn({
     session = session,
-    lane = "bigchange", -- write access so valid critiques can revise code
+    lane = grade_turn.lane,
     cwd = session.worktree,
-    prompt = grade_prompt(session, pending),
-    resume = true,
-    scope = "worktree",
-    on_progress = function(line)
-      R.status = vim.trim((line or ""):gsub("\n", " "))
-      vim.schedule(render)
-    end,
+    prompt = grade_prompt(session, explain_pending),
+    resume = grade_turn.resume,
+    scope = grade_turn.scope,
+    on_progress = status_progress,
     on_done = function(text)
-      local results = require("nvime.bigchange.agent").extract_json(text)
-      local need_recapture = apply_results(session, results, pending)
-      session.review_round = (session.review_round or 0) + 1
-      local function finish(did_recapture)
-        R.busy = false
-        R.status = nil
-        store.touch(session)
-        render()
-        if did_recapture then
-          -- The agent rewrote files on disk and blocks were re-grouped: re-resolve
-          -- the active block and reload its buffer so the view reflects the
-          -- revised code instead of stale annotations on stale content.
-          R.active_block_id = default_active()
-          show_active({ reload = true })
-        end
-        if all_cleared(session) then
-          local pct = overall_grade(session)
-          vim.notify(
-            string.format(
-              "nvime: all blocks cleared — final grade %d%% — press M to %s 🔓",
-              pct or 100,
-              complete_label(session)
-            ),
-            vim.log.levels.INFO
-          )
-        end
-      end
-      if need_recapture then
-        R.status = "re-capturing revised diff…"
-        render()
-        blocks_mod.recapture(session, function()
-          finish(true)
-        end)
-      else
-        finish(false)
-      end
+      local results = agent.extract_json(text)
+      apply_results(session, results, explain_pending)
+      run_revise()
     end,
   })
 end
@@ -1189,5 +1362,10 @@ M._apply_results = apply_results
 M._help_sections = review_help_sections
 M._complete_label = complete_label
 M._grade_prompt = grade_prompt
+M._revise_prompt = revise_prompt
+M._partition_pending = partition_pending
+-- The independent-grader contract (S2): a fresh, read-only critic lane that
+-- never resumes the worktree author. Asserted in tests.
+M._grade_turn = grade_turn
 
 return M

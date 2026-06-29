@@ -2,8 +2,9 @@
 --
 -- Pure, side-effect-free classifier for the Big Change forced-comprehension
 -- review. It decides whether a review block is SELF-EVIDENT — imports/requires,
--- documentation/markdown prose, comment-only edits, docstrings, or
--- version/config value bumps — and therefore needs no graded explanation. Such
+-- documentation/markdown prose, comment-only edits, docstrings, version/config
+-- value bumps, or pure whitespace/formatting (re-indent, trailing trim,
+-- tab↔space, blank lines) — and therefore needs no graded explanation. Such
 -- blocks are auto-cleared by blocks.lua; everything else keeps the usual
 -- grading bar. A docstring inherently restates the functional change it
 -- documents, so editing one is never a substantive change on its own.
@@ -92,6 +93,7 @@ local COMMENT_PREFIXES = {
   ini = { "#" },
   cfg = { "#" },
   conf = { "#" },
+  sql = { "--" },
   js = { "//" },
   ts = { "//" },
   jsx = { "//" },
@@ -103,12 +105,17 @@ local COMMENT_PREFIXES = {
   h = { "//" },
   hpp = { "//" },
   java = { "//" },
+  kt = { "//" },
+  kts = { "//" },
   rs = { "//" },
   zig = { "//" },
+  scss = { "//" },
+  less = { "//" },
 }
 
 -- Extensions whose grammar uses C-style block comments; their comment lines may
 -- begin with `/*`, `*`, or `*/` in addition to the line-comment prefix above.
+-- (css has no line comment, but block comments are still self-evident.)
 local C_FAMILY = {
   js = true,
   ts = true,
@@ -121,8 +128,14 @@ local C_FAMILY = {
   h = true,
   hpp = true,
   java = true,
+  kt = true,
+  kts = true,
   rs = true,
   zig = true,
+  sql = true,
+  css = true,
+  scss = true,
+  less = true,
 }
 
 -- Import/require/use statement pattern(s) by file extension. `is_import` only
@@ -149,6 +162,10 @@ local IMPORT_PATTERNS = {
   cpp = { "^#include" },
   h = { "^#include" },
   java = { "^import%s" },
+  -- Kotlin imports are always top-level `import a.b.c` (no `using`-style
+  -- resource form to confuse with executable code).
+  kt = { "^import%s" },
+  kts = { "^import%s" },
 }
 
 -- Triple-quoted docstring delimiters by file extension. Only languages whose
@@ -538,6 +555,113 @@ function M._pure_category(hunks, file)
 end
 
 -- ---------------------------------------------------------------------------
+-- whitespace / formatting
+-- ---------------------------------------------------------------------------
+-- Extensions where LEADING indentation is semantic — changing it can move a
+-- statement into (or out of) a block, which is a real behavioral change. For
+-- these we never treat a re-indent as cosmetic; trailing / internal whitespace
+-- is still cosmetic everywhere.
+local INDENT_SIGNIFICANT = {
+  py = true,
+  pyi = true,
+  yaml = true,
+  yml = true,
+}
+
+-- Whitespace-normalized signature of a line, used to decide whether a change is
+-- pure formatting. Outside string/char literals: leading indentation is
+-- dropped (re-prefixed as a column count for indentation-significant files so a
+-- re-indent there is NOT cosmetic), trailing whitespace is dropped, and runs of
+-- internal whitespace collapse to a single space. INSIDE string literals every
+-- character is preserved verbatim, so a change to string CONTENT (even just its
+-- spacing) still registers as a real change and is never waved through.
+--
+-- Collapsing runs (rather than stripping all whitespace) is deliberate and
+-- conservative: it equates re-indents, trailing trims, tab↔space, and
+-- multi-space alignment, but NOT adding/removing whitespace that changes token
+-- adjacency (`mut x` vs `mutx`), so a token-boundary change is never masked.
+local function ws_sig(line, file)
+  local out, i, n, quote = {}, 1, #line, nil
+  local pending_space = false
+  while i <= n do
+    local c = line:sub(i, i)
+    if quote then
+      out[#out + 1] = c
+      if c == "\\" then
+        local nx = line:sub(i + 1, i + 1)
+        if nx ~= "" then
+          out[#out + 1] = nx
+          i = i + 2
+        else
+          i = i + 1
+        end
+      else
+        if c == quote then
+          quote = nil
+        end
+        i = i + 1
+      end
+    elseif c == " " or c == "\t" then
+      pending_space = true
+      i = i + 1
+    else
+      -- Emit one collapsed space only BETWEEN tokens (never leading), so the
+      -- indentation is dropped while internal runs become a single space.
+      if pending_space and #out > 0 then
+        out[#out + 1] = " "
+      end
+      pending_space = false
+      out[#out + 1] = c
+      if c == '"' or c == "'" or c == "`" then
+        quote = c
+      end
+      i = i + 1
+    end
+  end
+  local sig = table.concat(out)
+  if INDENT_SIGNIFICANT[ext_of(file)] then
+    -- Prefix the indentation WIDTH (tabs counted as 8 columns) so a re-indent
+    -- that changes the level reads as a real change, while a tab↔8-space swap
+    -- (same width) stays cosmetic.
+    local lead = line:match("^[ \t]*") or ""
+    sig = "[" .. tostring(#(lead:gsub("\t", "        "))) .. "]" .. sig
+  end
+  return sig
+end
+
+-- True when a block's change is purely whitespace / formatting: every non-blank
+-- deleted line pairs (in order) with a non-blank added line whose
+-- whitespace-normalized signature is identical, OR the change only adds/removes
+-- blank lines. Adding or deleting real content makes the counts differ, so new
+-- code never reads as "formatting". Order-sensitive pairing means a reorder of
+-- otherwise-identical lines is NOT masked.
+function M._is_whitespace_only(hunks, file)
+  local dels, adds, any = {}, {}, false
+  for _, h in ipairs(hunks or {}) do
+    local hfile = h.file or file
+    for _, l in ipairs(h.lines or {}) do
+      if l.kind == "add" or l.kind == "del" then
+        any = true
+        local text = l.text or ""
+        if vim.trim(text) ~= "" then
+          local bucket = (l.kind == "add") and adds or dels
+          bucket[#bucket + 1] = ws_sig(text, hfile)
+        end
+      end
+    end
+  end
+  if not any or #dels ~= #adds then
+    return false
+  end
+  for idx = 1, #dels do
+    if dels[idx] ~= adds[idx] then
+      return false
+    end
+  end
+  return true
+end
+
+-- ---------------------------------------------------------------------------
 -- public API
 -- ---------------------------------------------------------------------------
 
@@ -597,6 +721,11 @@ function M.classify(session, block, hunks)
   local cat = M._pure_category(hunks, file)
   if cat then
     return { trivial = true, category = cat, source = "heuristic" }
+  end
+  -- Pure whitespace / formatting (re-indent, trailing trim, tab↔space, blank
+  -- lines): no token changed, so it needs no comprehension check.
+  if M._is_whitespace_only(hunks, file) then
+    return { trivial = true, category = "whitespace", source = "heuristic" }
   end
   -- Agent path: broader (mixed trivial kinds), but guarded so no executable
   -- code line is ever auto-cleared.

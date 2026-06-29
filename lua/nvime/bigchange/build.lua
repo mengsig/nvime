@@ -151,11 +151,28 @@ local function build_done(session, text, result)
     end
     session.status = store.STATUS.REVIEW
     store.touch(session)
-    if is_open() then
-      pcall(vim.api.nvim_win_close, view.winid, true)
-      view.winid = nil
+    local function open_review()
+      if is_open() then
+        pcall(vim.api.nvim_win_close, view.winid, true)
+        view.winid = nil
+      end
+      require("nvime.bigchange.review").open(session)
     end
-    require("nvime.bigchange.review").open(session)
+    -- F1: an opt-in devil's-advocate critic pass annotates each block with an
+    -- APPROVE / FLAG / REJECT verdict BEFORE the human review opens, so the
+    -- riskiest lane gets the same adversarial scrutiny the edit lane has. It is
+    -- advisory only — never blocks — so a disabled/empty/failed pass falls
+    -- straight through to the review.
+    local critic = require("nvime.bigchange.critic")
+    if critic.enabled() then
+      append("")
+      append("Running devil's-advocate critic over the blocks…")
+      critic.review_blocks(session, function()
+        open_review()
+      end)
+    else
+      open_review()
+    end
   end)
 end
 
