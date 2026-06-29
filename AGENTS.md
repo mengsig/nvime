@@ -40,6 +40,33 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   flat single-colour footer; thread these instead (see `plan.lua`/`diff/session.lua`/
   `bigchange/*` callers). The usage dashboard footer is the original precedent.
 
+## Accept gate / verify / policy
+
+- The manual diff accept path (`diff/ops.lua` `accept_blocks`) runs three gate
+  stages in order: (1) the verify tree-sitter **parse** gate (`verify.should_block_accept`,
+  governed by `verify.block_on_parse_error`, blocks plain `ga`/`gA`, `gA!` forces);
+  (2) the unified **accept policy** (`enforce_accept_policy`) — critic verdict / risk
+  level / external-verify findings, each mapped to `off|warn|confirm|block` via
+  `diff.accept_policy` (signals `critic_reject`, `critic_flag`, `risk_high`,
+  `verify_tool_error`); (3) the legacy high-risk force-confirm (`risk.confirm_force_accept`,
+  force-path only). All `accept_policy` signals default to `off` — nothing gains
+  friction unless opted in. This gate is on the MANUAL accept path only; the
+  trivial/auto-cleared instant-approve path (`bigchange/triviality.lua`) is untouched.
+- Verify is keyed on a **changedtick + per-block-status signature**
+  (`verify.lua` `content_signature`), not run-once. A *reject* changes the proposed
+  content without bumping the buffer changedtick, so the signature includes block
+  statuses. `accept_blocks`/`reject_blocks` call `verify.refresh` (a no-op when the
+  signature is unchanged) so the parse gate never reflects content that won't exist.
+- Verify findings carry `line`/`col`; they populate a quickfix list
+  (`verify.quickfix`, set not opened) and are navigable on the diff target with
+  `]v`/`[v` (`diff.next_finding`/`prev_finding`).
+- `policy_rules` **layers** a project `.nvime/policy.json` ON TOP of the built-in
+  human-only defaults (defaults listed first so project rules win ties via
+  longest/last-written specificity in `evaluate`). Opt out with
+  `policy_rules.inherit_defaults = false` or `"inherit_defaults": false` in the JSON.
+  The glob matcher has a local fallback (`local_path_matches`) so a failure to load
+  `nvime.verify` matches **closed**, never silently dropping a secret/lockfile guard.
+
 ## Sharp edges
 
 - `vim.system()` **throws synchronously** when `args[1]` (the provider/tool binary) is
@@ -50,6 +77,24 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `vim.system`'s `kill` is a method: call `handle:kill("sigterm")` /
   `pcall(handle.kill, handle, "sigterm")`. `pcall(handle.kill)` passes nil self and
   silently no-ops.
+- `vim.system`'s `timeout` opt sets the result **`code` to 124** when it fires (it
+  SIGTERMs the process and still invokes the exit callback). `test_loop.lua` keys its
+  timeout detection on `code == 124` (elapsed-wall-clock fallback for jitter), since a
+  hang must be reported as a timeout — not mistaken for a fixable test failure — and
+  the always-firing callback is what clears `in_flight` so a hang can't wedge the loop.
 - `plan.json`, `usage.json`, session/MCP JSON, and per-model rate overrides are all
   untrusted/agent- or user-authored. JSON readers must `type(decoded) == "table"`
   before indexing; per-model rate overrides must be deep-merged onto defaults.
+- Read-only lane enforcement differs by provider (`agents.lua`). claude restricts
+  per-tool (an explicit disallow-list + an allow-list, dropping the shell and web tools
+  per `allow_shell`/`allow_web`). codex `exec` has no per-tool surface — it enforces at
+  the OS sandbox (`-s read-only` forbids all writes and network). Two asymmetries can't
+  be closed from codex flags: codex still runs commands inside a read-only sandbox (so
+  `allow_shell = false` is advisory there), and a sandboxed codex lane has no network
+  (so `allow_web = true` grants it no web access). The workspace-write codex lanes pin
+  `sandbox_workspace_write.network_access=false` explicitly (bigchange excepted).
+- NOTE: this file is the injected `project_guidance` (CLAUDE.md → AGENTS.md content
+  reaches every agent prompt), and several tests grep agent-arg audit lines for the
+  exact provider tool-permission tokens. Don't write those provider tool names verbatim
+  here — describe the shell/web/edit tools generically (as above) so the doc text never
+  collides with those assertions.

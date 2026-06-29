@@ -383,6 +383,7 @@ local function diff_help_sections(review)
       rows = {
         { "]b  [b", "next / previous change block" },
         { "]n  [n", "next / previous change line" },
+        { "]v  [v", "next / previous verify finding" },
       },
     },
     { heading = "Resolve", rows = resolve_rows },
@@ -422,6 +423,12 @@ local function install_buffer_maps(session)
   end, opts)
   vim.keymap.set("n", "[b", function()
     require("nvime.diff").prev_group()
+  end, opts)
+  vim.keymap.set("n", "]v", function()
+    require("nvime.diff").next_finding()
+  end, opts)
+  vim.keymap.set("n", "[v", function()
+    require("nvime.diff").prev_finding()
   end, opts)
   vim.keymap.set("n", "ga", function()
     require("nvime.diff").accept_current_group()
@@ -806,6 +813,12 @@ local function install_review_maps(bufnr)
   end, opts)
   vim.keymap.set("n", "[n", function()
     require("nvime.diff").prev_change()
+  end, opts)
+  vim.keymap.set("n", "]v", function()
+    require("nvime.diff").next_finding()
+  end, opts)
+  vim.keymap.set("n", "[v", function()
+    require("nvime.diff").prev_finding()
   end, opts)
   vim.keymap.set("n", "ga", function()
     require("nvime.diff").accept_current_group()

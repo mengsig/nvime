@@ -7,10 +7,153 @@
 -- policy_rules / attribution at call time for the accept gate + provenance.
 
 local audit = require("nvime.audit")
+local state = require("nvime.state")
 local shared = require("nvime.diff.shared")
 local parser = require("nvime.diff.parser")
 local session = require("nvime.diff.session")
 local M = {}
+
+-- Unified accept policy (S1). The three advisory pre-accept signals (critic
+-- verdict, risk level, external verify findings) historically had inconsistent
+-- teeth: verify blocked on a parse regression, risk only confirmed inside the
+-- force branch, the critic never gated at all. diff.accept_policy maps each
+-- signal to off|warn|confirm|block so they apply consistently on the COMMON
+-- ga/gA path, not just gA!. Defaults are all "off" (backward compatible). The
+-- tree-sitter parse gate keeps its own dedicated block (verify gate, below).
+local ACCEPT_POLICY_RANK = { off = 0, warn = 1, confirm = 2, block = 3 }
+
+local function accept_policy_cfg()
+  local diff_cfg = (state.config or {}).diff or {}
+  if type(diff_cfg.accept_policy) ~= "table" then
+    return {}
+  end
+  return diff_cfg.accept_policy
+end
+
+-- Collect the configured-on signals worried about this diff, as a list of
+-- { signal, action, reason }. Signals set to "off" / absent are skipped.
+local function collect_accept_concerns(diff_session)
+  local policy = accept_policy_cfg()
+  local concerns = {}
+  local function consider(signal, present, reason)
+    if not present then
+      return
+    end
+    local action = policy[signal]
+    if type(action) ~= "string" or action == "off" then
+      return
+    end
+    concerns[#concerns + 1] = { signal = signal, action = action, reason = reason }
+  end
+
+  local verdict = diff_session.verdict
+  if type(verdict) == "table" then
+    if verdict.decision == "REJECT" then
+      consider("critic_reject", true, "critic REJECT: " .. (verdict.justification or ""))
+    elseif verdict.decision == "FLAG" then
+      consider("critic_flag", true, "critic FLAG: " .. (verdict.justification or ""))
+    end
+  end
+
+  local ok_risk, risk = pcall(require, "nvime.risk")
+  if ok_risk and risk and type(risk.score) == "function" then
+    local r = risk.score(diff_session)
+    if r and r.level == "high" then
+      local reason = "risk high"
+      if type(risk.explain_level) == "function" then
+        local why = risk.explain_level(r)
+        if type(why) == "table" and #why > 0 then
+          reason = reason .. ": " .. table.concat(why, ", ")
+        end
+      end
+      consider("risk_high", true, reason)
+    end
+  end
+
+  local ok_verify, verify = pcall(require, "nvime.verify")
+  if ok_verify and verify and type(verify.has_tool_error) == "function" then
+    local has, detail = verify.has_tool_error(diff_session)
+    consider("verify_tool_error", has, "verify tool error" .. (detail and (" (" .. detail .. ")") or ""))
+  end
+
+  return concerns
+end
+
+local function strongest_action(concerns)
+  local best = "off"
+  for _, c in ipairs(concerns) do
+    if (ACCEPT_POLICY_RANK[c.action] or 0) > (ACCEPT_POLICY_RANK[best] or 0) then
+      best = c.action
+    end
+  end
+  return best
+end
+
+local function concern_fields(concerns)
+  local signals, reasons = {}, {}
+  for _, c in ipairs(concerns) do
+    signals[#signals + 1] = c.signal
+    reasons[#reasons + 1] = c.reason
+  end
+  return signals, reasons
+end
+
+-- Evaluate the unified accept policy. Returns true to proceed, false to abort.
+-- On force (gA!) the gate is bypassed but every worried signal is audited as a
+-- forced bypass, mirroring the verify parse-error force path.
+local function enforce_accept_policy(diff_session, opts)
+  local concerns = collect_accept_concerns(diff_session)
+  if #concerns == 0 then
+    return true
+  end
+  local action = strongest_action(concerns)
+  local signals, reasons = concern_fields(concerns)
+  if opts.force then
+    audit.write({
+      event = "accept_policy_force",
+      file = diff_session.file,
+      action = action,
+      signals = signals,
+      reasons = reasons,
+    })
+    return true
+  end
+  if action == "block" then
+    vim.notify(
+      "nvime accept blocked: " .. table.concat(reasons, "; ") .. " — use gA!/:NvimeAccept! to force",
+      vim.log.levels.WARN
+    )
+    audit.write({ event = "accept_policy_block", file = diff_session.file, signals = signals, reasons = reasons })
+    return false
+  end
+  if action == "confirm" then
+    local choice = vim.fn.confirm(
+      "nvime accept policy flagged this diff:\n  - " .. table.concat(reasons, "\n  - ") .. "\n\nAccept anyway?",
+      "&Accept\n&Cancel",
+      2
+    )
+    if choice ~= 1 then
+      vim.notify("nvime accept cancelled (accept policy)", vim.log.levels.INFO)
+      audit.write({ event = "accept_policy_cancelled", file = diff_session.file, signals = signals, reasons = reasons })
+      return false
+    end
+    audit.write({ event = "accept_policy_confirmed", file = diff_session.file, signals = signals, reasons = reasons })
+    return true
+  end
+  -- warn
+  vim.notify("nvime accept warning: " .. table.concat(reasons, "; "), vim.log.levels.WARN)
+  audit.write({ event = "accept_policy_warn", file = diff_session.file, signals = signals, reasons = reasons })
+  return true
+end
+
+-- Recompute verify against the new proposed content after a partial
+-- accept/reject (S3). Cheap no-op when nothing changed (signature guard).
+local function refresh_verify(diff_session)
+  local ok_verify, verify = pcall(require, "nvime.verify")
+  if ok_verify and verify and type(verify.refresh) == "function" then
+    pcall(verify.refresh, diff_session)
+  end
+end
 
 local same_lines = shared.same_lines
 local copy_lines = shared.copy_lines
@@ -501,6 +644,13 @@ function M.accept_blocks(blocks, opts)
     end
   end
 
+  -- Unified accept policy (S1): critic verdict / risk level / external verify
+  -- findings, each gated per diff.accept_policy. Defaults are all "off", so
+  -- this is inert unless a user opts a signal into warn/confirm/block.
+  if not enforce_accept_policy(session, opts) then
+    return
+  end
+
   -- High-risk force-accept confirmation. Only fires when (1) opts.force is
   -- set (gA!), (2) the risk score is `high`, and (3) the user has not
   -- disabled the confirm. Writes a `risk_force` audit event on proceed.
@@ -593,6 +743,7 @@ function M.accept_blocks(blocks, opts)
     offset = offset + apply_block(session, item.block, item.start_line + offset, opts)
   end
   mark_model_synced(session)
+  refresh_verify(session)
   render_session(session)
 end
 
@@ -612,6 +763,7 @@ function M.reject_blocks(blocks)
     reject_block(block)
   end
   mark_model_synced(session)
+  refresh_verify(session)
   render_session(session)
 end
 
@@ -844,6 +996,69 @@ function M.prev_group()
     end
   end
   jump_to_group(session, groups[#groups])
+end
+
+-- Verify-finding navigation (S3). Findings carry line/col; jump the cursor to
+-- the next/previous one (relative to the cursor) in the target buffer and echo
+-- the finding so the reviewer can act on it. Wraps around like next_change.
+local function verify_findings(session)
+  local ok_verify, verify = pcall(require, "nvime.verify")
+  if not (ok_verify and verify and type(verify.findings) == "function") then
+    return {}
+  end
+  return verify.findings(session) or {}
+end
+
+local function jump_to_finding(session, finding)
+  if not finding then
+    vim.notify("No located nvime verify finding", vim.log.levels.INFO)
+    return
+  end
+  focus_target(session)
+  local line = math.max(1, math.min(finding.line, target_line_count(session)))
+  vim.api.nvim_win_set_cursor(0, { line, math.max(0, (finding.col or 1) - 1) })
+  local level = (finding.severity == "error") and vim.log.levels.WARN or vim.log.levels.INFO
+  vim.notify(string.format("verify [%s] L%d: %s", finding.source or "?", finding.line, finding.message or ""), level)
+end
+
+function M.next_finding()
+  local session = session_for_action()
+  if not session then
+    return
+  end
+  local findings = verify_findings(session)
+  if #findings == 0 then
+    vim.notify("No nvime verify findings to navigate", vim.log.levels.INFO)
+    return
+  end
+  local cursor = vim.api.nvim_win_get_cursor(0)[1]
+  for _, finding in ipairs(findings) do
+    if finding.line > cursor then
+      jump_to_finding(session, finding)
+      return
+    end
+  end
+  jump_to_finding(session, findings[1])
+end
+
+function M.prev_finding()
+  local session = session_for_action()
+  if not session then
+    return
+  end
+  local findings = verify_findings(session)
+  if #findings == 0 then
+    vim.notify("No nvime verify findings to navigate", vim.log.levels.INFO)
+    return
+  end
+  local cursor = vim.api.nvim_win_get_cursor(0)[1]
+  for index = #findings, 1, -1 do
+    if findings[index].line < cursor then
+      jump_to_finding(session, findings[index])
+      return
+    end
+  end
+  jump_to_finding(session, findings[#findings])
 end
 
 local function block_state_lines(label, blocks)

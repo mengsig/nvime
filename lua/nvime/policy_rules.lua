@@ -20,10 +20,13 @@
 --     ]
 --   }
 --
--- Built-in defaults apply only when `.nvime/policy.json` is missing or
--- empty. When the project file exists, it fully replaces the defaults —
--- no silent merge. This is deliberate: the user's policy is the source of
--- truth and surprises are worse than verbose configs.
+-- Built-in defaults always apply. When `.nvime/policy.json` exists, its rules
+-- are layered ON TOP of the defaults (project rules win ties via the longest /
+-- last-written specificity in `evaluate`), so adding one custom rule never
+-- silently drops the secret/lockfile/migration guards. Opt out of the merge
+-- with `policy_rules.inherit_defaults = false` (config) or
+-- `"inherit_defaults": false` in policy.json to get the old
+-- replace-everything behavior.
 
 local audit = require("nvime.audit")
 local state = require("nvime.state")
@@ -116,18 +119,81 @@ local function load_rules()
     cached_rules_signature = signature
     return cached_rules
   end
-  cached_rules = decoded.rules
+  -- Layer project rules on top of the built-in defaults unless explicitly
+  -- opted out. Defaults are listed FIRST so that project rules (appended
+  -- after) win ties in `evaluate` (longest glob wins; equal length → last
+  -- index wins), letting a project override a broad built-in while keeping
+  -- the secret/lockfile guards it didn't restate.
+  local inherit = cfg().inherit_defaults ~= false
+  if decoded.inherit_defaults == false then
+    inherit = false
+  end
+  if inherit then
+    local merged = vim.deepcopy(DEFAULT_RULES)
+    for _, rule in ipairs(decoded.rules) do
+      merged[#merged + 1] = rule
+    end
+    cached_rules = merged
+  else
+    cached_rules = decoded.rules
+  end
   cached_rules_signature = signature
   return cached_rules
 end
 
--- Reuse the verify glob matcher so policy and verify agree on glob shapes.
+-- Local glob matcher, kept in lock-step with verify's. Used as a fallback so a
+-- failure to load nvime.verify cannot make policy matching FAIL OPEN (return
+-- "no match" → allowed) for the human-only secret/lockfile guards. A guard
+-- that silently disappears when an unrelated module fails to load is the worst
+-- failure mode for the highest-stakes part of the system, so we match closed.
+local function glob_to_pattern(glob)
+  local pattern = "^"
+  local i = 1
+  while i <= #glob do
+    local c = glob:sub(i, i)
+    if c == "*" then
+      if glob:sub(i + 1, i + 1) == "*" then
+        pattern = pattern .. ".*"
+        i = i + 2
+        if glob:sub(i, i) == "/" then
+          i = i + 1
+        end
+      else
+        pattern = pattern .. "[^/]*"
+        i = i + 1
+      end
+    elseif c == "?" then
+      pattern = pattern .. "[^/]"
+      i = i + 1
+    elseif c:match("[%^%$%(%)%%%.%[%]%+%-]") then
+      pattern = pattern .. "%" .. c
+      i = i + 1
+    else
+      pattern = pattern .. c
+      i = i + 1
+    end
+  end
+  return pattern .. "$"
+end
+
+local function local_path_matches(path, glob)
+  if not path or not glob then
+    return false
+  end
+  local base = path:match("([^/]+)$") or path
+  local target = glob:find("/", 1, true) and path or base
+  return target:match(glob_to_pattern(glob)) ~= nil
+end
+
+-- Reuse the verify glob matcher so policy and verify agree on glob shapes,
+-- falling back to the local matcher above (never to a bare `false`) when
+-- verify is unavailable.
 local function path_matches(path, glob)
   local ok, verify = pcall(require, "nvime.verify")
   if ok and verify and type(verify._path_matches_any) == "function" then
     return verify._path_matches_any(path, { glob })
   end
-  return false
+  return local_path_matches(path, glob)
 end
 
 -- Public: list the active rule set (for :NvimePolicy list / check).
@@ -230,5 +296,6 @@ function M.guard(path, lane, ctx)
 end
 
 M._default_rules = DEFAULT_RULES
+M._local_path_matches = local_path_matches
 
 return M
