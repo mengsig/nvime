@@ -862,12 +862,17 @@ local function render_plan_lines(plan)
   -- provider session, "○ fresh" when not. Lets the user see at a glance
   -- whether the next step will share architecture context with prior steps.
   -- The phase-0 research/refine author runs in a temp workspace cwd and stores
-  -- its resumable session under author_provider_sessions (provider_sessions is
-  -- owned by the implement-phase executor in a different cwd — see
-  -- M.reset_session). Read the author bucket so the badge reflects whether the
-  -- NEXT refinement will actually resume.
+  -- its resumable session under author_provider_sessions; the scaffold/implement
+  -- executor runs in a different cwd and stores its session under
+  -- provider_sessions (see M.reset_session). Pick the bucket that owns the NEXT
+  -- step so the badge reflects whether it will actually resume.
   do
-    local provider_sessions = plan.author_provider_sessions or {}
+    local provider_sessions
+    if (tonumber(plan.phase) or 0) >= 1 then
+      provider_sessions = plan.provider_sessions or {}
+    else
+      provider_sessions = plan.author_provider_sessions or {}
+    end
     local resume_chunks = {}
     for prov_name, sess_id in pairs(provider_sessions) do
       if sess_id and sess_id ~= "" then
