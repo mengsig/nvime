@@ -194,12 +194,58 @@ local function carry_state(session, new_blocks, prior_blocks)
   end
 end
 
+-- Split each group so a meta hunk (binary/rename/copy/mode) never shares a
+-- block with reviewable content. A meta block is acknowledge-only (cleared via
+-- a single keypress, excluded from the comprehension grade); if a meta hunk
+-- rode in the same block as a content hunk — even one from a different file the
+-- grouping agent mis-grouped — that content would clear on the acknowledgment
+-- and bypass the gate. Keep the content hunks in the original gradeable block
+-- and peel each meta hunk into its own dedicated block, so a block is meta only
+-- when ALL of its hunks are meta.
+local function split_meta_groups(session, normalized)
+  local map = M.hunks_by_id(session)
+  local out = {}
+  for _, g in ipairs(normalized) do
+    local content_ids, meta_ids = {}, {}
+    for _, id in ipairs(g.hunk_ids) do
+      local h = map[id]
+      if h and h.meta then
+        meta_ids[#meta_ids + 1] = id
+      else
+        content_ids[#content_ids + 1] = id
+      end
+    end
+    if #meta_ids == 0 or #content_ids == 0 then
+      -- Pure content or pure meta group: keep it as-is.
+      out[#out + 1] = g
+    else
+      out[#out + 1] = {
+        title = g.title,
+        file = g.file,
+        hunk_ids = content_ids,
+        trivial = g.trivial,
+      }
+      for _, id in ipairs(meta_ids) do
+        local h = map[id]
+        out[#out + 1] = {
+          title = vim.fn.fnamemodify(h.file, ":t") .. " (" .. h.meta .. ")",
+          file = h.file,
+          hunk_ids = { id },
+          trivial = false,
+        }
+      end
+    end
+  end
+  return out
+end
+
 local function assemble(session, groups, prior_blocks)
   local hunks = session.diff_hunks or {}
   local normalized = normalize_groups(groups, hunks)
   if #normalized == 0 then
     normalized = fallback_blocks(hunks)
   end
+  normalized = split_meta_groups(session, normalized)
   local blocks = {}
   for index, g in ipairs(normalized) do
     local block = {

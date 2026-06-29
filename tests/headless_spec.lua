@@ -717,6 +717,44 @@ do
   assert_eq(sess.blocks[1].meta_kind, "rename", "B4: renamed-doc block is flagged meta_kind=rename")
   assert(sess.blocks[1].state ~= "cleared", "B4: a renamed *.md is NOT trivial-auto-cleared")
 
+  -- B4: a meta hunk must NEVER share a block with reviewable content — if the
+  -- grouping agent mis-groups a rename (file X) with a content edit (file Y),
+  -- assemble splits them so the content still grades and only the meta hunk is
+  -- the acknowledge-only block. Otherwise the content would clear on a single
+  -- acknowledgment and bypass the comprehension gate.
+  local mixed = { difficulty = "easy" }
+  mixed.diff_hunks = diffparse.parse(lines({
+    "diff --git a/docs/old.md b/docs/new.md",
+    "similarity index 100%",
+    "rename from docs/old.md",
+    "rename to docs/new.md",
+    "diff --git a/src/code.lua b/src/code.lua",
+    "index 1111111..2222222 100644",
+    "--- a/src/code.lua",
+    "+++ b/src/code.lua",
+    "@@ -1,1 +1,1 @@",
+    "-local x = compute(1)",
+    "+local x = compute(2)",
+  }))
+  bc_blocks._assemble(mixed, {
+    { title = "mixed", file = "src/code.lua", hunk_ids = { "docs/new.md#1", "src/code.lua#1" } },
+  }, nil)
+  local content_block, meta_block
+  for _, b in ipairs(mixed.blocks) do
+    if b.hunk_ids[1] == "src/code.lua#1" then
+      content_block = b
+    elseif b.hunk_ids[1] == "docs/new.md#1" then
+      meta_block = b
+    end
+  end
+  assert(content_block, "B4: content hunk lands in its own block")
+  assert_eq(#content_block.hunk_ids, 1, "B4: content block holds only the content hunk")
+  assert_eq(content_block.meta_kind, nil, "B4: content block is NOT flagged meta_kind")
+  assert(content_block.state ~= "cleared", "B4: content block still needs comprehension review")
+  assert(meta_block, "B4: meta hunk peeled into its own block")
+  assert_eq(#meta_block.hunk_ids, 1, "B4: meta block holds only the meta hunk")
+  assert_eq(meta_block.meta_kind, "rename", "B4: meta block is acknowledge-only (meta_kind=rename)")
+
   -- S2: the comprehension grader is INDEPENDENT of the author — a fresh,
   -- read-only critic lane that never resumes the build session.
   local bc_review = require("nvime.bigchange.review")
