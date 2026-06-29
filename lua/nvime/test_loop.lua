@@ -27,6 +27,13 @@ local DEFAULT_TIMEOUT_MS = 120000
 -- sets the authoritative `timed_out` flag before any kill-provoked exit callback.
 local TIMEOUT_BACKSTOP_GRACE_MS = 2000
 
+-- Boundary slop for the wall-clock timeout verdict. The killers fire at-or-after
+-- `limit`, but libuv's oneshot timer can fire a hair shy of it, so a process
+-- SIGTERMed at the deadline may report elapsed a touch under `limit`. This
+-- margin absorbs that jitter; at the default 120s limit the false-positive
+-- window (a genuine pass finishing within 50ms of the limit) is negligible.
+local TIMEOUT_SLOP_MS = 50
+
 local in_flight = {}
 local retry_counters = {}
 
@@ -283,13 +290,24 @@ local function run_runner(runner, cwd, on_done)
       timer = nil
     end
   end
+  local started = uv.hrtime()
   -- sh -c, NOT -lc: a login shell sources the user's profile and may cd
   -- to $HOME, which would defeat the cwd we set explicitly.
   handle = vim.system({ "sh", "-c", runner }, sys_opts, function(result)
     stop_timer()
     local code = result.code or -1
+    -- Decide "timed out" from WALL-CLOCK elapsed, not from whether the fast-
+    -- context timer callback above won the race to set `timed_out` first. During
+    -- vim.wait on CI's neovim build that uv timer callback does NOT reliably fire
+    -- before the native-timeout backstop reaps the runner, so reading the flag
+    -- alone reported a hang as a plain failure. The killers (our scheduled kill
+    -- and vim.system's native timeout) both fire at-or-after `limit`, so a hang
+    -- always has elapsed >= limit by the time this exit callback runs — which it
+    -- always does (clearing in_flight). The flag stays as a fast-path OR.
+    local elapsed_ms = (uv.hrtime() - started) / 1e6
+    local hit_timeout = timed_out or (limit and limit > 0 and elapsed_ms >= limit - TIMEOUT_SLOP_MS)
     vim.schedule(function()
-      on_done(code, table.concat(stdout_chunks), table.concat(stderr_chunks), timed_out)
+      on_done(code, table.concat(stdout_chunks), table.concat(stderr_chunks), hit_timeout)
     end)
   end)
   if limit and limit > 0 then

@@ -84,18 +84,19 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   or fold the term signal into `code == 143` with `result.signal == 0` (the encoding
   that missed on CI). Reverse-engineering "which encoding means timed out" from the
   exit result is therefore NOT portable. `test_loop.lua` instead OWNS the *decision*
-  (not the kill encoding): it arms its own `uv` oneshot timer at exactly `limit` that
-  sets an authoritative `timed_out` flag, so the verdict reads that flag verbatim and
-  never depends on the exit encoding. Killing the runner FROM that fast-event timer
-  callback was itself NOT portable — `handle:kill` issued in the fast context did not
-  reliably terminate the runner on CI's build, so the exit callback never fired within
-  budget and the loop looked wedged. So the kill is now issued from the MAIN loop
-  (`vim.schedule`) AND `vim.system`'s native `timeout` is armed as a backstop killer
-  (set to `limit` + a grace so the flag is always recorded first) — the native timeout
-  provably SIGTERMs the runner and fires the always-firing exit callback on every
-  build even if the scheduled kill never lands. Either way the callback fires (clearing
-  `in_flight`), so a hang can't wedge the loop; a genuine pass/fail leaves the flag
-  false and stays a fixable failure. The timer is stopped+closed in the exit callback
+  (not the kill encoding): it stamps `uv.hrtime()` before the spawn and, in the exit
+  callback, reads the verdict from WALL-CLOCK elapsed (`elapsed >= limit - slop`), not
+  from the exit encoding. It does NOT depend on its `uv` oneshot timer's fast-context
+  callback having won the race to set a flag first — during `vim.wait` on CI's neovim
+  build that timer callback does NOT reliably fire before the runner is reaped, so a
+  flag-only verdict reported a real hang as a plain failure (the CI miss). The timer
+  flag survives only as a fast-path OR. Reaping is belt-and-suspenders: the timer kills
+  from the MAIN loop (`vim.schedule`; the fast-context `handle:kill` did not reliably
+  terminate the runner on CI) AND `vim.system`'s native `timeout` is armed as a backstop
+  killer (set to `limit` + a grace). Both fire at-or-after `limit`, so a hang always has
+  elapsed >= `limit` by the time the always-firing exit callback runs (clearing
+  `in_flight`) — a hang can't wedge the loop; a genuine pass/fail finishes well under
+  `limit` and stays a fixable failure. The timer is stopped+closed in the exit callback
   (and the kill is `pcall`-guarded for the already-reaped race).
 - `plan.json`, `usage.json`, session/MCP JSON, and per-model rate overrides are all
   untrusted/agent- or user-authored. JSON readers must `type(decoded) == "table"`
