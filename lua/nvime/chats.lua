@@ -919,7 +919,7 @@ local function render(bufnr)
     end
     if session and session.busy then
       vim.api.nvim_buf_set_extmark(bufnr, ns, row - 1, 0, {
-        line_hl_group = "NvimeDiffHunk",
+        line_hl_group = "NvimeRowRunning",
       })
     end
   end

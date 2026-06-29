@@ -379,6 +379,13 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, "NvimeRowTitle", { fg = C.fg, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeRowMeta", { fg = C.muted, default = true })
   vim.api.nvim_set_hl(0, "NvimeRowDetail", { fg = C.fg_dim, default = true })
+  -- A running session row: a subtle blue-tinted band so an in-flight agent is
+  -- legible at a glance in the dashboard without shouting (reads as "live",
+  -- not as a diff hunk).
+  vim.api.nvim_set_hl(0, "NvimeRowRunning", { bg = C.hunk_bg, default = true })
+  -- Banner label chip (e.g. the diff RATIONALE tag): dark text on a calm accent
+  -- so the label reads as a pill, distinct from the body that follows it.
+  vim.api.nvim_set_hl(0, "NvimeBanner", { fg = C.bg, bg = C.cyan, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeProviderClaude", { fg = C.orange, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeProviderCodex", { fg = C.teal, bold = true, default = true })
   vim.api.nvim_set_hl(0, "NvimeBadge", { fg = C.bg, bg = C.teal, bold = true, default = true })
@@ -523,6 +530,71 @@ function M.relative_time(timestamp)
     return tostring(hours) .. "h"
   end
   return tostring(math.floor(hours / 24)) .. "d"
+end
+
+-- ── key hints ───────────────────────────────────────────────────────────────
+-- One formatter for every in-buffer / virt-line key hint so the keys read the
+-- same everywhere: the key glyphs pop (NvimeKey), the descriptions recede
+-- (NvimeMuted), and the separators are barely-there (NvimeFaint). Footers that
+-- used to be a single flat-coloured string become scannable — the eye lands on
+-- the keys, which is the whole point of a hint row.
+--
+-- `items` is a list of { key, desc } pairs (desc optional). `opts.indent`
+-- (string) is prepended; `opts.sep` overrides the " · " separator.
+
+local function keyhint_sep(opts)
+  return (opts and opts.sep) or "  ·  "
+end
+
+-- Returns (line, marks): the display string plus a list of
+-- { col_start, col_end, hl } byte-range marks the caller applies as extmarks
+-- (e.g. via bigchange.uikit.apply_marks-style loops). Byte offsets, 0-based.
+function M.keyhint_line(items, opts)
+  opts = opts or {}
+  local sep = keyhint_sep(opts)
+  local line = opts.indent or ""
+  local marks = {}
+  for index, item in ipairs(items or {}) do
+    if index > 1 then
+      local from = #line
+      line = line .. sep
+      marks[#marks + 1] = { from, #line, "NvimeFaint" }
+    end
+    local key = tostring(item[1] or "")
+    local from = #line
+    line = line .. key
+    marks[#marks + 1] = { from, #line, "NvimeKey" }
+    local desc = tostring(item[2] or "")
+    if desc ~= "" then
+      line = line .. " "
+      from = #line
+      line = line .. desc
+      marks[#marks + 1] = { from, #line, "NvimeMuted" }
+    end
+  end
+  return line, marks
+end
+
+-- Returns a virt_lines segment list ({ {text, hl}, ... }) for the same hint,
+-- suitable for an extmark `virt_lines` row (e.g. the inline diff footer).
+function M.keyhint_segments(items, opts)
+  opts = opts or {}
+  local sep = keyhint_sep(opts)
+  local segments = {}
+  if opts.indent and opts.indent ~= "" then
+    segments[#segments + 1] = { opts.indent, "NvimeMuted" }
+  end
+  for index, item in ipairs(items or {}) do
+    if index > 1 then
+      segments[#segments + 1] = { sep, "NvimeFaint" }
+    end
+    segments[#segments + 1] = { tostring(item[1] or ""), "NvimeKey" }
+    local desc = tostring(item[2] or "")
+    if desc ~= "" then
+      segments[#segments + 1] = { " " .. desc, "NvimeMuted" }
+    end
+  end
+  return segments
 end
 
 local function set_scratch_options(bufnr, filetype)

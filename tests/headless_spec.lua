@@ -757,6 +757,34 @@ do
   vim.o.termguicolors = had_tgc
 end
 
+-- Shared key-hint formatter: keys render in NvimeKey, descriptions in NvimeMuted,
+-- separators in NvimeFaint. Every surface footer routes through this so the keys
+-- pop consistently.
+do
+  local hint_ui = require("nvime.ui")
+  local line, marks = hint_ui.keyhint_line({ { "ga", "accept" }, { "gb", "reject" } }, { indent = "  " })
+  assert(line:find("ga", 1, true) and line:find("accept", 1, true), "keyhint line contains keys and descriptions")
+  local key_marks, muted_marks, faint_marks = 0, 0, 0
+  for _, mark in ipairs(marks) do
+    if mark[3] == "NvimeKey" then
+      key_marks = key_marks + 1
+    elseif mark[3] == "NvimeMuted" then
+      muted_marks = muted_marks + 1
+    elseif mark[3] == "NvimeFaint" then
+      faint_marks = faint_marks + 1
+    end
+  end
+  assert_eq(key_marks, 2, "keyhint marks one NvimeKey span per key")
+  assert_eq(muted_marks, 2, "keyhint marks one NvimeMuted span per description")
+  assert_eq(faint_marks, 1, "keyhint marks the separator NvimeFaint")
+  -- The first key mark must cover exactly the key glyphs, after the indent.
+  assert_eq(marks[1][1], 2, "first key mark starts after the indent")
+  assert_eq(marks[1][2], 4, "first key mark covers the two-char key")
+
+  local segments = hint_ui.keyhint_segments({ { "ga", "accept" } }, { indent = "  " })
+  assert_eq(segments[2][2], "NvimeKey", "keyhint_segments tags the key segment NvimeKey")
+end
+
 require("nvime.chat").prompt()
 assert(vim.api.nvim_get_current_buf() == chat_buf, "chat prompt focuses shared input buffer")
 assert(vim.api.nvim_get_current_win() == chat_input_win, "chat prompt focuses the single chat window")
