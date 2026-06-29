@@ -86,7 +86,13 @@ local function merged_rates()
   if cached_rates and cached_rates_signature == sig then
     return cached_rates, cached_sorted_keys
   end
-  cached_rates = vim.tbl_extend("force", {}, DEFAULT_RATES, cfg_rates)
+  -- Deep merge: a partial per-model override like `rates = { ["model"] = {
+  -- input = 20 } }` must keep the model's other fields (output/cache_read/
+  -- cache_creation) from the defaults. A shallow extend replaced the whole
+  -- rate table, leaving those nil, and compute_cost's `tokens * rate.output`
+  -- then threw "arithmetic on a nil value" — inside usage.record, which runs
+  -- in the agent-exit callback before on_exit, wedging the lane "busy".
+  cached_rates = vim.tbl_deep_extend("force", {}, DEFAULT_RATES, cfg_rates)
   cached_sorted_keys = {}
   for k, _ in pairs(cached_rates) do
     cached_sorted_keys[#cached_sorted_keys + 1] = k

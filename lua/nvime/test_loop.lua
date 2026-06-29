@@ -305,7 +305,12 @@ function M.maybe_run(payload)
   cwd = cwd or repo_root()
 
   notify("running `" .. runner .. "` ...")
-  run_runner(runner, cwd, function(code, stdout, stderr)
+  -- vim.system throws synchronously if cwd no longer exists (e.g. the patched
+  -- buffer lived in a throwaway /tmp dir that was removed). Without this guard
+  -- the throw escapes maybe_run with in_flight[key] still set, permanently
+  -- blocking the test loop for this (file, plan) pair for the rest of the
+  -- session. Reset the flag and surface the failure instead.
+  local spawn_ok, spawn_err = pcall(run_runner, runner, cwd, function(code, stdout, stderr)
     in_flight[key] = nil
     local combined = tail_lines((stdout or "") .. (stderr or ""), tonumber(cfg().capture_lines) or 200)
     audit.write({
@@ -344,6 +349,19 @@ function M.maybe_run(payload)
       end
     end)
   end)
+  if not spawn_ok then
+    in_flight[key] = nil
+    audit.write({
+      event = "test_loop_done",
+      runner = runner,
+      code = -1,
+      path = payload.path,
+      plan_id = payload.plan_id,
+      plan_step_id = payload.plan_step_id,
+      spawn_error = tostring(spawn_err),
+    })
+    notify("could not start `" .. runner .. "`: " .. tostring(spawn_err), vim.log.levels.WARN)
+  end
 end
 
 local registered = false

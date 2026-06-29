@@ -180,6 +180,15 @@ end
 local function activate_session(session, opts)
   opts = opts or {}
   if opts.reanchor then
+    -- A queued same-file session is promoted only after the previous diff's
+    -- accepts mutated the buffer. Its hunks are re-anchored against the live
+    -- buffer here, so its baseline snapshot must be refreshed to match —
+    -- otherwise proposed_lines/deletion_confidence compute against the stale
+    -- pre-promotion snapshot and render the already-accepted lines as removed.
+    if session.target_bufnr and vim.api.nvim_buf_is_valid(session.target_bufnr) then
+      session.original_lines = vim.api.nvim_buf_get_lines(session.target_bufnr, 0, -1, false)
+      session.original_changedtick = vim.api.nvim_buf_get_changedtick(session.target_bufnr)
+    end
     reanchor_hunks(session.selection, session.hunks)
     reset_session_render_model(session)
   end

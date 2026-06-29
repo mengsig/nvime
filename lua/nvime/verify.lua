@@ -243,7 +243,10 @@ local BUILTIN_CHECKS = {
       local findings = {}
       local combined = (stdout or "") .. "\n" .. (stderr or "")
       for line in combined:gmatch("[^\r\n]+") do
-        local sev, l, c, msg = line:match("(%a+)%[[^%]]+%]: (.-)\n?$")
+        -- The pattern has exactly two captures: severity word and message.
+        -- Binding four locals left msg (capture 4) always nil, so the message
+        -- below fell back to the raw `path:line:col:` line every time.
+        local sev, msg = line:match("(%a+)%[[^%]]+%]: (.-)\n?$")
         local pl, pc = line:match(":(%d+):(%d+):")
         if pl then
           findings[#findings + 1] = {
@@ -555,7 +558,7 @@ local function run_check(entry, tempfile, on_finish)
   end
   local stdout_chunks = {}
   local stderr_chunks = {}
-  vim.system(args, {
+  local spawn_ok = pcall(vim.system, args, {
     text = true,
     timeout = timeout_ms(),
     stdout = function(_, data)
@@ -596,6 +599,16 @@ local function run_check(entry, tempfile, on_finish)
       })
     end)
   end)
+  -- Built-in checks are skipped when their binary is absent (resolve_checks
+  -- probes vim.fn.executable), but user checks are not probed, and vim.system
+  -- throws synchronously on a missing binary. Without this guard that throw
+  -- escapes M.start's loop: `pending` never reaches 0, finalize never runs,
+  -- and verification hangs. Treat a spawn failure as a skipped check.
+  if not spawn_ok then
+    vim.schedule(function()
+      on_finish({ name = entry.name, kind = entry.kind or "lint", code = 0, findings = {}, excerpt = "" })
+    end)
+  end
 end
 
 -- Public: start verification for a freshly created diff session. Idempotent:
