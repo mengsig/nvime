@@ -216,11 +216,21 @@ M.defaults = {
     project_guidance_files = {},
   },
   bigchange = {
+    -- Devil's-advocate critic for the autonomous build. When enabled, after the
+    -- build's diff is grouped into review blocks, a fresh, read-only critic
+    -- agent annotates each block with an APPROVE / FLAG / REJECT verdict shown
+    -- in the review tree. Advisory ONLY — it never blocks; the human still
+    -- grades and merges. Off by default (one extra agent call per build).
+    critic = {
+      enabled = false,
+    },
     -- Forced-comprehension review relaxation for self-evident blocks. When a
     -- review block is only imports/requires, documentation/markdown prose,
-    -- comments, or version/config bumps, it is auto-cleared (no explanation).
-    -- Disabled implicitly on `extreme` difficulty, where everything must be
-    -- explained. Never applies on `vibe` (which already auto-clears).
+    -- comments, version/config bumps, or pure whitespace/formatting (re-indent,
+    -- trailing trim, tab↔space, blank lines), it is auto-cleared (no
+    -- explanation). Disabled implicitly on `extreme` difficulty, where
+    -- everything must be explained. Never applies on `vibe` (which already
+    -- auto-clears).
     trivial = {
       enabled = true,
       doc_globs = {

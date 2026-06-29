@@ -87,7 +87,11 @@ The forced-comprehension **Review** — block tree on the left, inline diff on t
 
 Difficulty only controls review strictness: `vibe` clears blocks on approve with no explanation; `easy`/`medium`/`extreme` require explanations grading ≥ 40 / 70 / 90%.
 
-On `easy`/`medium`, **self-evident blocks auto-clear** with no explanation: blocks whose changed lines are only imports/requires, documentation/markdown prose, comments, or version/config value bumps. They show as `⚡ trivial · auto-cleared`, count toward the `X/Y cleared` merge lock, and are excluded from the headline comprehension Grade (so a change made entirely of trivial blocks shows no Grade line but still merges). The relaxation is off on `extreme` (everything must be explained) and is a no-op on `vibe` (which already auto-clears). Tune it with `bigchange.trivial.enabled` (default `true`) and `bigchange.trivial.doc_globs` (which files count as documentation).
+On `easy`/`medium`, **self-evident blocks auto-clear** with no explanation: blocks whose changed lines are only imports/requires, documentation/markdown prose, comments, docstrings, version/config value bumps, or pure whitespace/formatting (re-indent, trailing trim, tab↔space, blank lines). They show as `⚡ trivial · auto-cleared`, count toward the `X/Y cleared` merge lock, and are excluded from the headline comprehension Grade (so a change made entirely of trivial blocks shows no Grade line but still merges). The relaxation is off on `extreme` (everything must be explained) and is a no-op on `vibe` (which already auto-clears). Tune it with `bigchange.trivial.enabled` (default `true`) and `bigchange.trivial.doc_globs` (which files count as documentation).
+
+Binary, pure-rename, copy, and mode-only changes carry no diff hunk to read, so they never auto-clear: they surface as un-gradeable **acknowledge rows** (`⬢ … · acknowledge (a)`) that you clear by pressing `a` — no explanation, and excluded from the comprehension Grade — so they can never merge silently.
+
+A separate opt-in **devil's-advocate critic** can scrutinize the build before you review it. Enable `bigchange.critic.enabled` (default `false`) and, once the diff is grouped into blocks, a fresh read-only agent annotates each gradeable block with an advisory `APPROVE` / `FLAG` / `REJECT` verdict (shown in the block tree and on the block overlay). It is advisory only — it never blocks the merge; you still grade and merge every block yourself.
 
 ## Install
 

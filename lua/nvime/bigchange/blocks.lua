@@ -62,6 +62,22 @@ function M.block_hunks(session, block)
   return out
 end
 
+-- Render a block's hunks as prompt/diff lines: each hunk's header followed by
+-- one `<sigil><text>` line per source line (sigil: add `+`, del `-`, ctx ` `).
+-- Shared by review.lua's append_block_sections and critic.lua's critic_prompt
+-- so the two prompt builders stay byte-identical.
+function M.render_hunk_lines(session, block)
+  local out = {}
+  for _, h in ipairs(M.block_hunks(session, block)) do
+    out[#out + 1] = h.header
+    for _, l in ipairs(h.lines) do
+      local sigil = (l.kind == "add" and "+") or (l.kind == "del" and "-") or " "
+      out[#out + 1] = sigil .. l.text
+    end
+  end
+  return out
+end
+
 local function block_signature(session, hunk_ids)
   local map = M.hunks_by_id(session)
   local parts = {}
@@ -194,15 +210,61 @@ local function carry_state(session, new_blocks, prior_blocks)
   end
 end
 
+-- Split each group so a meta hunk (binary/rename/copy/mode) never shares a
+-- block with reviewable content. A meta block is acknowledge-only (cleared via
+-- a single keypress, excluded from the comprehension grade); if a meta hunk
+-- rode in the same block as a content hunk — even one from a different file the
+-- grouping agent mis-grouped — that content would clear on the acknowledgment
+-- and bypass the gate. Keep the content hunks in the original gradeable block
+-- and peel each meta hunk into its own dedicated block, so a block is meta only
+-- when ALL of its hunks are meta.
+local function split_meta_groups(session, normalized)
+  local map = M.hunks_by_id(session)
+  local out = {}
+  for _, g in ipairs(normalized) do
+    local content_ids, meta_ids = {}, {}
+    for _, id in ipairs(g.hunk_ids) do
+      local h = map[id]
+      if h and h.meta then
+        meta_ids[#meta_ids + 1] = id
+      else
+        content_ids[#content_ids + 1] = id
+      end
+    end
+    if #meta_ids == 0 or #content_ids == 0 then
+      -- Pure content or pure meta group: keep it as-is.
+      out[#out + 1] = g
+    else
+      out[#out + 1] = {
+        title = g.title,
+        file = g.file,
+        hunk_ids = content_ids,
+        trivial = g.trivial,
+      }
+      for _, id in ipairs(meta_ids) do
+        local h = map[id]
+        out[#out + 1] = {
+          title = vim.fn.fnamemodify(h.file, ":t") .. " (" .. h.meta .. ")",
+          file = h.file,
+          hunk_ids = { id },
+          trivial = false,
+        }
+      end
+    end
+  end
+  return out
+end
+
 local function assemble(session, groups, prior_blocks)
   local hunks = session.diff_hunks or {}
   local normalized = normalize_groups(groups, hunks)
   if #normalized == 0 then
     normalized = fallback_blocks(hunks)
   end
+  normalized = split_meta_groups(session, normalized)
   local blocks = {}
   for index, g in ipairs(normalized) do
-    blocks[#blocks + 1] = {
+    local block = {
       id = index,
       title = g.title,
       file = g.file,
@@ -216,13 +278,24 @@ local function assemble(session, groups, prior_blocks)
       agent_response = nil,
       agent_trivial = g.trivial == true,
     }
+    blocks[#blocks + 1] = block
+    -- A block carrying a meta hunk (binary blob / pure rename / mode change) has
+    -- no reviewable content — it is un-gradeable but must NOT slip through
+    -- silently. Flag it so the review surfaces it as an explicit acknowledge row
+    -- and so triviality never auto-clears it (e.g. a renamed *.md file).
+    for _, h in ipairs(M.block_hunks(session, block)) do
+      if h.meta then
+        block.meta_kind = block.meta_kind or h.meta
+      end
+    end
   end
   carry_state(session, blocks, prior_blocks)
   -- Auto-clear self-evident blocks (imports/docs/comments/config bumps) so the
-  -- user never writes a graded explanation for them.
+  -- user never writes a graded explanation for them. Meta blocks are never
+  -- self-evident — they carry no content to judge — so they are excluded.
   local triviality = require("nvime.bigchange.triviality")
   for _, b in ipairs(blocks) do
-    if b.state ~= "cleared" then
+    if b.state ~= "cleared" and not b.meta_kind then
       local res = triviality.classify(session, b, M.block_hunks(session, b))
       if res.trivial then
         b.state, b.action = "cleared", "auto_trivial"
@@ -233,6 +306,9 @@ local function assemble(session, groups, prior_blocks)
   end
   session.blocks = blocks
 end
+
+-- Test-only export.
+M._assemble = assemble
 
 -- Capture the diff, parse it, and ask the agent to group it into blocks.
 -- cb(ok, err). On success session.diff_hunks and session.blocks are populated.

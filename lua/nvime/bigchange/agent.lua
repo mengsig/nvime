@@ -16,13 +16,26 @@ local M = {}
 
 -- Provider session buckets are scoped by cwd. Claude/Codex store sessions per
 -- project directory, so an intake session (run in the repo root) CANNOT be
--- resumed from the build worktree. We therefore keep two buckets:
+-- resumed from the build worktree. We therefore keep separate buckets:
 --   scope "intake"   → session.provider_sessions  (runs in the repo root)
 --   scope "worktree" → session.worktree_sessions   (runs in the build worktree)
+--   scope "grade"    → session.grade_sessions      (the INDEPENDENT, read-only
+--                      comprehension grader — kept apart from the build session
+--                      so resuming the worktree author never picks up the
+--                      grader, and vice versa)
+--   scope "critic"   → session.critic_sessions     (the devil's-advocate pass)
+-- The grade/critic buckets exist so a stray session id from those read-only
+-- turns can never overwrite the worktree author's resumable session.
 local function session_bucket(session, scope)
   if scope == "worktree" then
     session.worktree_sessions = session.worktree_sessions or {}
     return session.worktree_sessions
+  elseif scope == "grade" then
+    session.grade_sessions = session.grade_sessions or {}
+    return session.grade_sessions
+  elseif scope == "critic" then
+    session.critic_sessions = session.critic_sessions or {}
+    return session.critic_sessions
   end
   session.provider_sessions = session.provider_sessions or {}
   return session.provider_sessions

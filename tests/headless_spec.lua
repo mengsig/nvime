@@ -436,6 +436,141 @@ do
   local mixed_exec = classify("lua/foo.lua", { { "add", 'local x = require("y")' }, { "add", "x.run()" } })
   assert_eq(mixed_exec.trivial, false, "import + executable assignment is not trivial")
 
+  -- whitespace / formatting-only changes auto-clear (re-indent, trailing trim,
+  -- tab↔space, blank lines), but a real token change never reads as formatting.
+  assert_eq(
+    classify("lua/foo.lua", { { "del", "  foo()" }, { "add", "    foo()" } }).category,
+    "whitespace",
+    "a re-indented code line is whitespace-only"
+  )
+  assert_eq(
+    classify("lua/foo.lua", { { "del", "  foo()" }, { "add", "    foo()" } }).source,
+    "heuristic",
+    "whitespace clears via the deterministic heuristic"
+  )
+  assert_eq(
+    classify("lua/foo.lua", { { "del", "local x = 1   " }, { "add", "local x = 1" } }).category,
+    "whitespace",
+    "trailing-whitespace trim is whitespace-only"
+  )
+  assert_eq(
+    classify("pkg/x.go", { { "del", "\tfmt.Println()" }, { "add", "    fmt.Println()" } }).category,
+    "whitespace",
+    "tab↔space re-indent in a brace language is whitespace-only"
+  )
+  assert_eq(
+    classify("lua/foo.lua", { { "add", "" }, { "add", "" } }).category,
+    "whitespace",
+    "adding blank lines only is whitespace-only"
+  )
+  assert_eq(
+    classify("lua/foo.lua", { { "del", "local x = a  +  b" }, { "add", "local x = a + b" } }).category,
+    "whitespace",
+    "collapsing internal alignment whitespace is whitespace-only"
+  )
+  -- guards: a real change disguised by equal line counts is NOT whitespace.
+  assert_eq(
+    classify("lua/foo.lua", { { "del", "local x = 1" }, { "add", "local x = 2" } }).trivial,
+    false,
+    "a value change is not whitespace-only"
+  )
+  assert_eq(
+    classify("lua/foo.lua", { { "del", "a()" }, { "del", "b()" }, { "add", "b()" }, { "add", "a()" } }).trivial,
+    false,
+    "reordering identical lines is not whitespace-only (order-sensitive)"
+  )
+  assert_eq(
+    classify("lua/foo.lua", { { "add", "do_real_work()" } }).trivial,
+    false,
+    "adding a new code line is not whitespace-only"
+  )
+  -- a string-content change with the same surrounding code must NOT be masked by
+  -- whitespace normalisation (internal string spaces are preserved verbatim).
+  assert_eq(
+    classify("lua/foo.lua", { { "del", 'log("a  b")' }, { "add", 'log("a b")' } }).trivial,
+    false,
+    "a change to string content is not whitespace-only"
+  )
+  -- Python is indentation-significant: a re-indent (which can move a statement
+  -- into another block) is NOT cosmetic, but a trailing trim still is.
+  assert_eq(
+    classify("app/x.py", { { "del", "    do_it()" }, { "add", "        do_it()" } }).trivial,
+    false,
+    "a Python re-indent (level change) is not whitespace-only"
+  )
+  assert_eq(
+    classify("app/x.py", { { "del", "    do_it()   " }, { "add", "    do_it()" } }).category,
+    "whitespace",
+    "a Python trailing-whitespace trim is whitespace-only"
+  )
+  -- a re-indent INSIDE a multi-line string is a content change, not formatting:
+  -- the leading/internal whitespace there is the string's value.
+  assert_eq(
+    classify("lua/foo.lua", {
+      { "ctx", "local sql = [[" },
+      { "del", "  SELECT 1" },
+      { "add", "      SELECT 1" },
+      { "ctx", "]]" },
+    }).trivial,
+    false,
+    "a re-indent inside a Lua [[ ]] long string is not whitespace-only"
+  )
+  assert_eq(
+    triviality._touches_multiline_string(
+      hunks_of("lua/foo.lua", {
+        { "ctx", "local s = [==[" },
+        { "add", "  body  text" },
+        { "ctx", "]==]" },
+      }),
+      "lua/foo.lua"
+    ),
+    true,
+    "a level-2 Lua long bracket is tracked"
+  )
+  -- a JS/TS template literal spans lines via an unterminated backtick.
+  assert_eq(
+    classify("src/x.ts", {
+      { "ctx", "const q = `" },
+      { "del", "  some  text" },
+      { "add", "    some  text" },
+      { "ctx", "`;" },
+    }).trivial,
+    false,
+    "a re-indent inside a JS template literal is not whitespace-only"
+  )
+  -- a shell heredoc body is literal: a re-indent there changes the value.
+  assert_eq(
+    classify("scripts/run.sh", {
+      { "ctx", "cat <<EOF" },
+      { "del", "  hello" },
+      { "add", "      hello" },
+      { "ctx", "EOF" },
+    }).trivial,
+    false,
+    "a re-indent inside a shell heredoc body is not whitespace-only"
+  )
+  -- Makefile recipe lines are tab-significant even though the file has no
+  -- extension: a tab→spaces reindent breaks the recipe and is NOT cosmetic.
+  assert_eq(
+    classify("Makefile", { { "del", "\tcmd build" }, { "add", "    cmd build" } }).trivial,
+    false,
+    "a Makefile recipe tab→spaces reindent is not whitespace-only"
+  )
+  assert_eq(
+    classify("build/rules.mk", { { "del", "\trun" }, { "add", "    run" } }).trivial,
+    false,
+    "a .mk recipe tab→spaces reindent is not whitespace-only"
+  )
+
+  -- broadened comment / import language coverage (conservative additions).
+  assert_eq(
+    classify("styles/app.scss", { { "add", "// brand colour" } }).category,
+    "comments",
+    "scss // comment is comments"
+  )
+  assert_eq(classify("db/query.sql", { { "add", "-- index hint" } }).category, "comments", "sql -- comment is comments")
+  assert_eq(classify("ui/Main.kt", { { "add", "import kotlin.math.max" } }).category, "imports", "kotlin import")
+
   -- agent-tagged block mixing trivial kinds (no executable code) clears via agent path
   local agent_mixed = classify(
     "lua/foo.lua",
@@ -561,6 +696,169 @@ do
     end
   end
   assert(saw_override_audit, "override: bigchange_trivial_overridden audit event written")
+end
+do
+  -- B4: binary / rename / mode changes carry no @@ hunk, so the parser must
+  -- surface them as synthetic meta hunks (else they merge unreviewed).
+  local diffparse = require("nvime.bigchange.diffparse")
+  local function lines(t)
+    return table.concat(t, "\n")
+  end
+  local bin = diffparse.parse(lines({
+    "diff --git a/logo.png b/logo.png",
+    "index 1111111..2222222 100644",
+    "Binary files a/logo.png and b/logo.png differ",
+  }))
+  assert_eq(#bin, 1, "B4: binary diff yields one synthetic hunk")
+  assert_eq(bin[1].meta, "binary", "B4: binary hunk marked meta=binary")
+  assert_eq(bin[1].file, "logo.png", "B4: binary meta hunk carries the file")
+
+  local ren = diffparse.parse(lines({
+    "diff --git a/old.lua b/new.lua",
+    "similarity index 100%",
+    "rename from old.lua",
+    "rename to new.lua",
+  }))
+  assert_eq(#ren, 1, "B4: pure rename yields one synthetic hunk")
+  assert_eq(ren[1].meta, "rename", "B4: rename hunk marked meta=rename")
+  assert_eq(ren[1].file, "new.lua", "B4: rename meta hunk uses the new path")
+
+  local mode = diffparse.parse(lines({
+    "diff --git a/run.sh b/run.sh",
+    "old mode 100644",
+    "new mode 100755",
+  }))
+  assert_eq(mode[1].meta, "mode", "B4: mode-only change yields a meta hunk")
+
+  -- a rename WITH content edits is reviewable via its real hunk — no extra row.
+  local ren_edit = diffparse.parse(lines({
+    "diff --git a/old.lua b/new.lua",
+    "similarity index 80%",
+    "rename from old.lua",
+    "rename to new.lua",
+    "--- a/old.lua",
+    "+++ b/new.lua",
+    "@@ -1,1 +1,1 @@",
+    "-local a = 1",
+    "+local a = 2",
+  }))
+  local meta_count = 0
+  for _, h in ipairs(ren_edit) do
+    if h.meta then
+      meta_count = meta_count + 1
+    end
+  end
+  assert_eq(meta_count, 0, "B4: a rename WITH content hunks needs no extra meta row")
+  assert(#ren_edit >= 1, "B4: rename-with-edit still yields its content hunk")
+  local plain = diffparse.parse(lines({
+    "diff --git a/a.lua b/a.lua",
+    "--- a/a.lua",
+    "+++ b/a.lua",
+    "@@ -1 +1 @@",
+    "-x",
+    "+y",
+  }))
+  assert_eq(plain[1].meta, nil, "B4: a normal content hunk is not meta")
+
+  -- assemble flags a meta block and NEVER trivial-auto-clears it, even for a
+  -- renamed *.md (which would otherwise read as a self-evident doc).
+  local bc_blocks = require("nvime.bigchange.blocks")
+  local sess = { difficulty = "easy" }
+  sess.diff_hunks = diffparse.parse(lines({
+    "diff --git a/docs/old.md b/docs/new.md",
+    "similarity index 100%",
+    "rename from docs/old.md",
+    "rename to docs/new.md",
+  }))
+  bc_blocks._assemble(sess, {}, nil)
+  assert_eq(#sess.blocks, 1, "B4: assemble produces one block for the renamed doc")
+  assert_eq(sess.blocks[1].meta_kind, "rename", "B4: renamed-doc block is flagged meta_kind=rename")
+  assert(sess.blocks[1].state ~= "cleared", "B4: a renamed *.md is NOT trivial-auto-cleared")
+
+  -- B4: a meta hunk must NEVER share a block with reviewable content — if the
+  -- grouping agent mis-groups a rename (file X) with a content edit (file Y),
+  -- assemble splits them so the content still grades and only the meta hunk is
+  -- the acknowledge-only block. Otherwise the content would clear on a single
+  -- acknowledgment and bypass the comprehension gate.
+  local mixed = { difficulty = "easy" }
+  mixed.diff_hunks = diffparse.parse(lines({
+    "diff --git a/docs/old.md b/docs/new.md",
+    "similarity index 100%",
+    "rename from docs/old.md",
+    "rename to docs/new.md",
+    "diff --git a/src/code.lua b/src/code.lua",
+    "index 1111111..2222222 100644",
+    "--- a/src/code.lua",
+    "+++ b/src/code.lua",
+    "@@ -1,1 +1,1 @@",
+    "-local x = compute(1)",
+    "+local x = compute(2)",
+  }))
+  bc_blocks._assemble(mixed, {
+    { title = "mixed", file = "src/code.lua", hunk_ids = { "docs/new.md#1", "src/code.lua#1" } },
+  }, nil)
+  local content_block, meta_block
+  for _, b in ipairs(mixed.blocks) do
+    if b.hunk_ids[1] == "src/code.lua#1" then
+      content_block = b
+    elseif b.hunk_ids[1] == "docs/new.md#1" then
+      meta_block = b
+    end
+  end
+  assert(content_block, "B4: content hunk lands in its own block")
+  assert_eq(#content_block.hunk_ids, 1, "B4: content block holds only the content hunk")
+  assert_eq(content_block.meta_kind, nil, "B4: content block is NOT flagged meta_kind")
+  assert(content_block.state ~= "cleared", "B4: content block still needs comprehension review")
+  assert(meta_block, "B4: meta hunk peeled into its own block")
+  assert_eq(#meta_block.hunk_ids, 1, "B4: meta block holds only the meta hunk")
+  assert_eq(meta_block.meta_kind, "rename", "B4: meta block is acknowledge-only (meta_kind=rename)")
+
+  -- S2: the comprehension grader is INDEPENDENT of the author — a fresh,
+  -- read-only critic lane that never resumes the build session.
+  local bc_review = require("nvime.bigchange.review")
+  assert_eq(bc_review._grade_turn.lane, "critic", "S2: grader runs in the read-only critic lane")
+  assert_eq(bc_review._grade_turn.resume, false, "S2: grader never resumes the author session")
+  assert_eq(bc_review._grade_turn.scope, "grade", "S2: grader uses its own session bucket")
+  local gp = bc_review._grade_prompt({ difficulty = "easy" }, {
+    { id = 1, title = "T", file = "a.lua", action = "approve", comment = "c", hunk_ids = {} },
+  })
+  assert(gp:find("INDEPENDENT", 1, true), "S2: grade prompt frames an independent reviewer")
+  assert(not gp:find("code YOU implemented", 1, true), "S2: grade prompt drops the self-grading framing")
+  local rp = bc_review._revise_prompt({ difficulty = "easy" }, {})
+  assert(rp:find("FIX the code", 1, true), "S2: revise prompt asks the author to fix valid critiques")
+  local ex, cr = bc_review._partition_pending({
+    { state = "explaining" },
+    { state = "critiquing" },
+    { state = "cleared" },
+  })
+  assert_eq(#ex, 1, "S2: one explaining block partitioned to the independent grader")
+  assert_eq(#cr, 1, "S2: one critiquing block partitioned to the author")
+
+  -- F1: the devil's-advocate critic applies APPROVE/FLAG/REJECT verdicts; only
+  -- valid decisions land, and it is off by default.
+  local bc_critic = require("nvime.bigchange.critic")
+  local gblocks = {
+    { id = 1, title = "A", file = "a.lua", hunk_ids = {} },
+    { id = 2, title = "B", file = "b.lua", hunk_ids = {} },
+  }
+  local applied = bc_critic.apply_verdicts(gblocks, {
+    { id = 1, decision = "reject", justification = "removes a guard" },
+    { id = 2, decision = "bogus", justification = "x" },
+  })
+  assert_eq(applied, 1, "F1: only valid verdicts apply (a bogus decision is ignored)")
+  assert_eq(gblocks[1].critic.decision, "REJECT", "F1: decision is normalised to upper-case")
+  assert_eq(gblocks[1].critic.justification, "removes a guard", "F1: justification captured")
+  assert_eq(gblocks[2].critic, nil, "F1: an invalid decision leaves the block un-annotated")
+  local cp = bc_critic._critic_prompt({ diff_hunks = {} }, gblocks)
+  assert(cp:find("DEVIL'S ADVOCATE", 1, true), "F1: critic prompt is adversarial")
+  assert(cp:find("ADVISORY", 1, true), "F1: critic prompt states it is advisory")
+  local fstate = require("nvime.state")
+  fstate.config.bigchange = fstate.config.bigchange or {}
+  local prior_critic = fstate.config.bigchange.critic
+  assert_eq(bc_critic.enabled(), false, "F1: critic is off by default")
+  fstate.config.bigchange.critic = { enabled = true }
+  assert_eq(bc_critic.enabled(), true, "F1: critic.enabled tracks config")
+  fstate.config.bigchange.critic = prior_critic
 end
 do
   local state = require("nvime.state")

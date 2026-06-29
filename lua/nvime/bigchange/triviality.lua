@@ -2,8 +2,9 @@
 --
 -- Pure, side-effect-free classifier for the Big Change forced-comprehension
 -- review. It decides whether a review block is SELF-EVIDENT — imports/requires,
--- documentation/markdown prose, comment-only edits, docstrings, or
--- version/config value bumps — and therefore needs no graded explanation. Such
+-- documentation/markdown prose, comment-only edits, docstrings, version/config
+-- value bumps, or pure whitespace/formatting (re-indent, trailing trim,
+-- tab↔space, blank lines) — and therefore needs no graded explanation. Such
 -- blocks are auto-cleared by blocks.lua; everything else keeps the usual
 -- grading bar. A docstring inherently restates the functional change it
 -- documents, so editing one is never a substantive change on its own.
@@ -92,6 +93,7 @@ local COMMENT_PREFIXES = {
   ini = { "#" },
   cfg = { "#" },
   conf = { "#" },
+  sql = { "--" },
   js = { "//" },
   ts = { "//" },
   jsx = { "//" },
@@ -103,12 +105,17 @@ local COMMENT_PREFIXES = {
   h = { "//" },
   hpp = { "//" },
   java = { "//" },
+  kt = { "//" },
+  kts = { "//" },
   rs = { "//" },
   zig = { "//" },
+  scss = { "//" },
+  less = { "//" },
 }
 
 -- Extensions whose grammar uses C-style block comments; their comment lines may
 -- begin with `/*`, `*`, or `*/` in addition to the line-comment prefix above.
+-- (css has no line comment, but block comments are still self-evident.)
 local C_FAMILY = {
   js = true,
   ts = true,
@@ -121,8 +128,14 @@ local C_FAMILY = {
   h = true,
   hpp = true,
   java = true,
+  kt = true,
+  kts = true,
   rs = true,
   zig = true,
+  sql = true,
+  css = true,
+  scss = true,
+  less = true,
 }
 
 -- Import/require/use statement pattern(s) by file extension. `is_import` only
@@ -149,6 +162,10 @@ local IMPORT_PATTERNS = {
   cpp = { "^#include" },
   h = { "^#include" },
   java = { "^import%s" },
+  -- Kotlin imports are always top-level `import a.b.c` (no `using`-style
+  -- resource form to confuse with executable code).
+  kt = { "^import%s" },
+  kts = { "^import%s" },
 }
 
 -- Triple-quoted docstring delimiters by file extension. Only languages whose
@@ -538,6 +555,259 @@ function M._pure_category(hunks, file)
 end
 
 -- ---------------------------------------------------------------------------
+-- whitespace / formatting
+-- ---------------------------------------------------------------------------
+-- Extensions where LEADING indentation is semantic — changing it can move a
+-- statement into (or out of) a block, which is a real behavioral change. For
+-- these we never treat a re-indent as cosmetic; trailing / internal whitespace
+-- is still cosmetic everywhere.
+local INDENT_SIGNIFICANT = {
+  py = true,
+  pyi = true,
+  yaml = true,
+  yml = true,
+  mk = true,
+}
+
+-- Basenames whose leading whitespace is semantic regardless of extension —
+-- Makefiles use a literal TAB to introduce recipe lines, so a tab→spaces
+-- reindent there breaks the recipe and must NOT auto-clear as cosmetic.
+local INDENT_SIGNIFICANT_BASENAME = {
+  makefile = true,
+  gnumakefile = true,
+  bsdmakefile = true,
+}
+
+-- True when leading indentation is semantic for `file`, keyed by extension OR
+-- (for extensionless formats like Makefile) the lowercased basename.
+local function indent_significant(file)
+  if INDENT_SIGNIFICANT[ext_of(file)] then
+    return true
+  end
+  if not file or file == "" then
+    return false
+  end
+  local base = file:gsub("[/\\]+$", ""):match("[^/\\]*$") or ""
+  return INDENT_SIGNIFICANT_BASENAME[base:lower()] == true
+end
+
+-- Whitespace-normalized signature of a line, used to decide whether a change is
+-- pure formatting. Outside string/char literals: leading indentation is
+-- dropped (re-prefixed as a column count for indentation-significant files so a
+-- re-indent there is NOT cosmetic), trailing whitespace is dropped, and runs of
+-- internal whitespace collapse to a single space. INSIDE string literals every
+-- character is preserved verbatim, so a change to string CONTENT (even just its
+-- spacing) still registers as a real change and is never waved through.
+--
+-- Collapsing runs (rather than stripping all whitespace) is deliberate and
+-- conservative: it equates re-indents, trailing trims, tab↔space, and
+-- multi-space alignment, but NOT adding/removing whitespace that changes token
+-- adjacency (`mut x` vs `mutx`), so a token-boundary change is never masked.
+local function ws_sig(line, file)
+  local out, i, n, quote = {}, 1, #line, nil
+  local pending_space = false
+  while i <= n do
+    local c = line:sub(i, i)
+    if quote then
+      out[#out + 1] = c
+      if c == "\\" then
+        local nx = line:sub(i + 1, i + 1)
+        if nx ~= "" then
+          out[#out + 1] = nx
+          i = i + 2
+        else
+          i = i + 1
+        end
+      else
+        if c == quote then
+          quote = nil
+        end
+        i = i + 1
+      end
+    elseif c == " " or c == "\t" then
+      pending_space = true
+      i = i + 1
+    else
+      -- Emit one collapsed space only BETWEEN tokens (never leading), so the
+      -- indentation is dropped while internal runs become a single space.
+      if pending_space and #out > 0 then
+        out[#out + 1] = " "
+      end
+      pending_space = false
+      out[#out + 1] = c
+      if c == '"' or c == "'" or c == "`" then
+        quote = c
+      end
+      i = i + 1
+    end
+  end
+  local sig = table.concat(out)
+  if indent_significant(file) then
+    -- Prefix the indentation WIDTH (tabs counted as 8 columns) so a re-indent
+    -- that changes the level reads as a real change, while a tab↔8-space swap
+    -- (same width) stays cosmetic.
+    local lead = line:match("^[ \t]*") or ""
+    sig = "[" .. tostring(#(lead:gsub("\t", "        "))) .. "]" .. sig
+  end
+  return sig
+end
+
+-- Extensions whose strings can carry over a line boundary via a here-document
+-- (shell). Heredoc bodies are literal: a re-indent there changes the value.
+local HEREDOC_EXTS = {
+  sh = true,
+  bash = true,
+  zsh = true,
+}
+
+-- Update multi-line string / heredoc region state `st` for ONE source line and
+-- return true when that line is PART OF a multi-line region — it begins inside
+-- an open region, opens one that stays open past end-of-line, or closes one.
+-- Single-line strings (opened and closed on the same line) do NOT count:
+-- ws_sig already preserves their content verbatim. State (`quote`/`long`/
+-- `heredoc`) carries across lines within one hunk stream; reset it per hunk.
+-- Detection is conservative — unterminated quotes (incl. JS/TS template
+-- literals), Lua long brackets `[=*[ … ]=*]`, and shell heredocs all flag.
+local function multiline_region_line(st, text, ext)
+  local started_inside = st.quote ~= nil or st.long ~= nil or st.heredoc ~= nil
+
+  -- Heredoc body: every line is literal until the terminator word stands alone.
+  if st.heredoc ~= nil then
+    if vim.trim(text) == st.heredoc then
+      st.heredoc = nil
+    end
+    return true
+  end
+
+  local markers = COMMENT_PREFIXES[ext] or {}
+  local i, n = 1, #text
+  while i <= n do
+    local c = text:sub(i, i)
+    if st.long ~= nil then
+      if c == "]" then
+        local eqs = text:match("^=*", i + 1)
+        local j = i + 1 + #eqs
+        if #eqs == st.long and text:sub(j, j) == "]" then
+          st.long, i = nil, j + 1
+        else
+          i = i + 1
+        end
+      else
+        i = i + 1
+      end
+    elseif st.quote ~= nil then
+      if c == "\\" then
+        i = i + 2 -- skip the escaped char so an escaped quote does not close early
+      elseif c == st.quote then
+        st.quote, i = nil, i + 1
+      else
+        i = i + 1
+      end
+    else
+      local comment = false
+      for _, m in ipairs(markers) do
+        if text:sub(i, i + #m - 1) == m then
+          comment = true
+          break
+        end
+      end
+      if comment then
+        break -- the rest of the line is a comment; its quotes are not code
+      elseif ext == "lua" and c == "[" then
+        local eqs = text:match("^=*", i + 1)
+        local j = i + 1 + #eqs
+        if text:sub(j, j) == "[" then
+          st.long, i = #eqs, j + 1
+        else
+          i = i + 1
+        end
+      elseif c == "<" and text:sub(i + 1, i + 1) == "<" and text:sub(i + 2, i + 2) ~= "<" and HEREDOC_EXTS[ext] then
+        -- `cmd <<EOF` / `<<-EOF` / `<<"EOF"` / `<< 'EOF'` opens a heredoc body;
+        -- `<<<` is a single-line here-string and is excluded above.
+        local rest = text:sub(i + 2)
+        local word = rest:match('^%-?%s*"([%w_]+)"') or rest:match("^%-?%s*'([%w_]+)'") or rest:match("^%-?%s*([%w_]+)")
+        if word then
+          st.heredoc = word
+          break
+        end
+        i = i + 2
+      elseif c == '"' or c == "'" or c == "`" then
+        st.quote, i = c, i + 1
+      else
+        i = i + 1
+      end
+    end
+  end
+
+  local ends_open = st.quote ~= nil or st.long ~= nil or st.heredoc ~= nil
+  return started_inside or ends_open
+end
+
+-- True when any CHANGED (add/del) line of the block lies inside, opens, or
+-- closes a multi-line string / heredoc / Lua long-bracket region. Such a line's
+-- whitespace is the string's CONTENT, so it must NOT auto-clear as formatting.
+-- Context lines advance the region state (in both streams) but never trip the
+-- check, mirroring scan_changed's per-stream, per-hunk bookkeeping.
+function M._touches_multiline_string(hunks, file)
+  for _, h in ipairs(hunks or {}) do
+    local ext = ext_of(h.file or file)
+    local streams = {
+      add = { quote = nil, long = nil, heredoc = nil },
+      del = { quote = nil, long = nil, heredoc = nil },
+    }
+    for _, l in ipairs(h.lines or {}) do
+      local text = l.text or ""
+      if l.kind == "ctx" then
+        for _, st in pairs(streams) do
+          multiline_region_line(st, text, ext)
+        end
+      elseif l.kind == "add" or l.kind == "del" then
+        if multiline_region_line(streams[l.kind], text, ext) then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+-- True when a block's change is purely whitespace / formatting: every non-blank
+-- deleted line pairs (in order) with a non-blank added line whose
+-- whitespace-normalized signature is identical, OR the change only adds/removes
+-- blank lines. Adding or deleting real content makes the counts differ, so new
+-- code never reads as "formatting". Order-sensitive pairing means a reorder of
+-- otherwise-identical lines is NOT masked. A change that touches a multi-line
+-- string / heredoc body is never whitespace-only: that whitespace is content.
+function M._is_whitespace_only(hunks, file)
+  if M._touches_multiline_string(hunks, file) then
+    return false
+  end
+  local dels, adds, any = {}, {}, false
+  for _, h in ipairs(hunks or {}) do
+    local hfile = h.file or file
+    for _, l in ipairs(h.lines or {}) do
+      if l.kind == "add" or l.kind == "del" then
+        any = true
+        local text = l.text or ""
+        if vim.trim(text) ~= "" then
+          local bucket = (l.kind == "add") and adds or dels
+          bucket[#bucket + 1] = ws_sig(text, hfile)
+        end
+      end
+    end
+  end
+  if not any or #dels ~= #adds then
+    return false
+  end
+  for idx = 1, #dels do
+    if dels[idx] ~= adds[idx] then
+      return false
+    end
+  end
+  return true
+end
+
+-- ---------------------------------------------------------------------------
 -- public API
 -- ---------------------------------------------------------------------------
 
@@ -597,6 +867,11 @@ function M.classify(session, block, hunks)
   local cat = M._pure_category(hunks, file)
   if cat then
     return { trivial = true, category = cat, source = "heuristic" }
+  end
+  -- Pure whitespace / formatting (re-indent, trailing trim, tab↔space, blank
+  -- lines): no token changed, so it needs no comprehension check.
+  if M._is_whitespace_only(hunks, file) then
+    return { trivial = true, category = "whitespace", source = "heuristic" }
   end
   -- Agent path: broader (mixed trivial kinds), but guarded so no executable
   -- code line is ever auto-cleared.
