@@ -756,6 +756,8 @@ function M.start(session)
     started_at = math.floor(uv.hrtime() / 1e6),
   }
   session.verify_signature = signature
+  session.verify_run = (session.verify_run or 0) + 1
+  local run_id = session.verify_run
   for _, finding in ipairs(parse_result.findings) do
     finding.source = finding.source or "parse"
     finding.kind = "parse"
@@ -799,6 +801,9 @@ function M.start(session)
 
   local pending = #checks
   local function finalize()
+    if session.verify_run ~= run_id then
+      return
+    end
     if session.verify.parse_error then
       session.verify.status = "error"
     else
@@ -823,6 +828,9 @@ function M.start(session)
 
   for _, entry in ipairs(checks) do
     run_check(entry, tempfile, function(result)
+      if session.verify_run ~= run_id then
+        return
+      end
       session.verify.by_check[result.name] = {
         code = result.code,
         count = #result.findings,
