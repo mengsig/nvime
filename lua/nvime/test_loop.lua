@@ -19,13 +19,6 @@ local uv = vim.uv or vim.loop
 
 local DEFAULT_TIMEOUT_MS = 120000
 
--- Boundary slop for timeout detection. vim.system's oneshot timer can fire a
--- hair shy of `limit` (measured ~0.1ms under in practice), so an exact
--- `elapsed >= limit` compare is a coin flip at the boundary. This margin
--- absorbs that jitter; it is gated behind a signal-kill so a genuine
--- pass/fail finishing near the limit is never misclassified.
-local TIMEOUT_SLOP_MS = 50
-
 local in_flight = {}
 local retry_counters = {}
 
@@ -253,37 +246,46 @@ local function run_runner(runner, cwd, on_done)
       end
     end,
   }
-  -- A timeout makes vim.system SIGTERM the runner and STILL fire the exit
-  -- callback, so in_flight is always cleared — a hanging test can no longer
-  -- wedge the loop. 0/absent leaves it unbounded (DEFAULT_TIMEOUT_MS otherwise).
-  if limit and limit > 0 then
-    sys_opts.timeout = limit
+  -- Own the timeout decision instead of inferring it from the exit code.
+  -- vim.system's own `timeout` opt SIGTERMs the runner but the resulting
+  -- termination surfaces in build-dependent encodings (code 124, or code 0
+  -- with signal 15, or code 143 with signal 0, …); reverse-engineering which
+  -- encoding means "timed out" is not portable and missed a CI encoding. So we
+  -- arm our OWN one-shot timer that kills the handle and records an
+  -- authoritative `timed_out` flag — the verdict no longer depends on how a
+  -- given libuv/neovim build folds the term signal into the result. The exit
+  -- callback ALWAYS fires (kill still triggers it), so in_flight is always
+  -- cleared and a hanging test can never wedge the loop.
+  local timer
+  local timed_out = false
+  local handle
+  local function stop_timer()
+    if timer then
+      timer:stop()
+      timer:close()
+      timer = nil
+    end
   end
-  local started = uv.hrtime()
   -- sh -c, NOT -lc: a login shell sources the user's profile and may cd
   -- to $HOME, which would defeat the cwd we set explicitly.
-  local handle = vim.system({ "sh", "-c", runner }, sys_opts, function(result)
+  handle = vim.system({ "sh", "-c", runner }, sys_opts, function(result)
+    stop_timer()
     local code = result.code or -1
-    -- A timed-out runner is killed by SIGTERM at ~the limit. Its termination
-    -- surfaces in one of three encodings depending on the libuv/neovim build:
-    --   * code rewritten to 124   — vim.system's own remap (holds locally);
-    --   * code 0, signal 15       — libuv reports the term signal separately;
-    --   * code 143, signal 0      — the term signal (128+15) is folded into
-    --                               the exit code, leaving signal 0 (seen on CI).
-    -- `code == 124` alone is NOT portable, and neither is `signal ~= 0` (it
-    -- missed the third encoding on CI). Detect a signal kill across all three,
-    -- gated behind the wall-clock limit so a genuine pass/fail finishing near
-    -- the boundary is never misclassified — a self-exiting process reports
-    -- code 0..127 with signal 0, so a hang is reported as a timeout while a
-    -- real failure stays a fixable failure.
-    local elapsed_ms = (uv.hrtime() - started) / 1e6
-    local signal = tonumber(result.signal) or 0
-    local signal_killed = signal ~= 0 or code > 128
-    local timed_out = limit and limit > 0 and (code == 124 or (signal_killed and elapsed_ms >= limit - TIMEOUT_SLOP_MS))
     vim.schedule(function()
       on_done(code, table.concat(stdout_chunks), table.concat(stderr_chunks), timed_out)
     end)
   end)
+  if limit and limit > 0 then
+    timer = uv.new_timer()
+    -- The timer fires on a later loop tick, so `handle` is assigned by then. If
+    -- the process already exited the kill is a harmless no-op (pcall guards the
+    -- nil-self / already-reaped cases). Setting the flag BEFORE the kill races
+    -- ahead of the exit callback the kill provokes.
+    timer:start(limit, 0, function()
+      timed_out = true
+      pcall(handle.kill, handle, "sigterm")
+    end)
+  end
   return handle
 end
 

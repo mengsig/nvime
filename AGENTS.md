@@ -78,18 +78,20 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   `pcall(handle.kill, handle, "sigterm")`. `pcall(handle.kill)` passes nil self and
   silently no-ops.
 - `vim.system`'s `timeout` opt SIGTERMs the process and still invokes the exit
-  callback. It tries to rewrite the result **`code` to 124**, but ONLY when the killed
-  process reports exit status 0/1 — some libuv/neovim builds surface a signal-based
-  status instead, so `code == 124` is NOT portable (it held locally yet missed on CI).
-  The term signal surfaces in THREE encodings across libuv/neovim builds: `code == 124`
-  (the remap), `code == 0` with `result.signal == 15`, or `code == 143` (128+15) with
-  `result.signal == 0` (folded into the exit code — the CI encoding that `signal ~= 0`
-  alone missed). `test_loop.lua` therefore detects a timeout as `code == 124` OR a signal
-  kill (`result.signal ~= 0` OR `code > 128`) that reached the wall-clock limit (within a
-  small slop margin for boundary jitter — the oneshot timer can fire a hair shy of
-  `limit`). A genuine pass/fail exits 0..127 with signal 0 and is never misclassified, so
-  a hang is reported as a timeout — not mistaken for a fixable test failure — and the
-  always-firing callback is what clears `in_flight` so a hang can't wedge the loop.
+  callback, but the resulting termination surfaces in build-dependent encodings —
+  the result `code` is rewritten to 124 only when the killed process reports exit
+  status 0/1; other libuv/neovim builds report `code == 0` with `result.signal == 15`
+  or fold the term signal into `code == 143` with `result.signal == 0` (the encoding
+  that missed on CI). Reverse-engineering "which encoding means timed out" from the
+  exit result is therefore NOT portable. `test_loop.lua` instead OWNS the decision:
+  it does not pass `timeout` to `vim.system` but arms its own `uv` oneshot timer that
+  `handle:kill("sigterm")`s the runner and sets an authoritative `timed_out` flag
+  before the kill. The exit callback reads that flag verbatim, so the verdict no
+  longer depends on the exit encoding. The kill still triggers the always-firing
+  callback (which clears `in_flight`), so a hang can't wedge the loop; a genuine
+  pass/fail leaves the flag false and stays a fixable failure. The timer is
+  stopped+closed in the exit callback (and the kill is `pcall`-guarded for the
+  already-reaped race).
 - `plan.json`, `usage.json`, session/MCP JSON, and per-model rate overrides are all
   untrusted/agent- or user-authored. JSON readers must `type(decoded) == "table"`
   before indexing; per-model rate overrides must be deep-merged onto defaults.
