@@ -77,11 +77,16 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `vim.system`'s `kill` is a method: call `handle:kill("sigterm")` /
   `pcall(handle.kill, handle, "sigterm")`. `pcall(handle.kill)` passes nil self and
   silently no-ops.
-- `vim.system`'s `timeout` opt sets the result **`code` to 124** when it fires (it
-  SIGTERMs the process and still invokes the exit callback). `test_loop.lua` keys its
-  timeout detection on `code == 124` (elapsed-wall-clock fallback for jitter), since a
-  hang must be reported as a timeout — not mistaken for a fixable test failure — and
-  the always-firing callback is what clears `in_flight` so a hang can't wedge the loop.
+- `vim.system`'s `timeout` opt SIGTERMs the process and still invokes the exit
+  callback. It tries to rewrite the result **`code` to 124**, but ONLY when the killed
+  process reports exit status 0/1 — some libuv/neovim builds surface a signal-based
+  status instead, so `code == 124` is NOT portable (it held locally yet missed on CI).
+  `test_loop.lua` therefore detects a timeout as `code == 124` OR a signal kill
+  (`result.signal ~= 0`) that reached the wall-clock limit (within a small slop margin
+  for boundary jitter — the oneshot timer can fire a hair shy of `limit`). A genuine
+  pass/fail exits with signal 0 and is never misclassified, so a hang is reported as a
+  timeout — not mistaken for a fixable test failure — and the always-firing callback is
+  what clears `in_flight` so a hang can't wedge the loop.
 - `plan.json`, `usage.json`, session/MCP JSON, and per-model rate overrides are all
   untrusted/agent- or user-authored. JSON readers must `type(decoded) == "table"`
   before indexing; per-model rate overrides must be deep-merged onto defaults.

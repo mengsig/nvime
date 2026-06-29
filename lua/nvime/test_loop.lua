@@ -19,6 +19,13 @@ local uv = vim.uv or vim.loop
 
 local DEFAULT_TIMEOUT_MS = 120000
 
+-- Boundary slop for timeout detection. vim.system's oneshot timer can fire a
+-- hair shy of `limit` (measured ~0.1ms under in practice), so an exact
+-- `elapsed >= limit` compare is a coin flip at the boundary. This margin
+-- absorbs that jitter; it is gated behind a signal-kill so a genuine
+-- pass/fail finishing near the limit is never misclassified.
+local TIMEOUT_SLOP_MS = 50
+
 local in_flight = {}
 local retry_counters = {}
 
@@ -257,14 +264,18 @@ local function run_runner(runner, cwd, on_done)
   -- to $HOME, which would defeat the cwd we set explicitly.
   local handle = vim.system({ "sh", "-c", runner }, sys_opts, function(result)
     local code = result.code or -1
-    -- vim.system sets the exit code to 124 when its `timeout` fires (it
-    -- SIGTERMs the runner). That is the reliable timeout signal. The
-    -- elapsed-wall-clock fallback only fires when the runner ran at least the
-    -- full limit (not a 50ms margin under it), so a genuine pass/fail that
-    -- finishes just shy of the boundary is never misclassified as a timeout —
-    -- a hang is reported as a timeout, never mistaken for a fixable failure.
+    -- vim.system rewrites the exit code to 124 when its `timeout` fires, but
+    -- only when the SIGTERM'd process reports exit status 0/1; some libuv /
+    -- neovim builds surface a signal-based status instead, so `code == 124`
+    -- alone is NOT portable (it holds locally but missed on CI). A timed-out
+    -- runner is ALWAYS terminated by a signal (SIGTERM, then SIGKILL) at ~the
+    -- limit, so also treat a signal kill that reached the wall-clock limit
+    -- (within TIMEOUT_SLOP_MS) as a timeout. A genuine pass/fail exits with
+    -- signal 0 and is never misclassified — a hang is reported as a timeout,
+    -- a real failure stays a fixable failure.
     local elapsed_ms = (uv.hrtime() - started) / 1e6
-    local timed_out = limit and limit > 0 and (code == 124 or elapsed_ms >= limit)
+    local signal = tonumber(result.signal) or 0
+    local timed_out = limit and limit > 0 and (code == 124 or (signal ~= 0 and elapsed_ms >= limit - TIMEOUT_SLOP_MS))
     vim.schedule(function()
       on_done(code, table.concat(stdout_chunks), table.concat(stderr_chunks), timed_out)
     end)
