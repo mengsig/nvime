@@ -62,6 +62,22 @@ function M.block_hunks(session, block)
   return out
 end
 
+-- Render a block's hunks as prompt/diff lines: each hunk's header followed by
+-- one `<sigil><text>` line per source line (sigil: add `+`, del `-`, ctx ` `).
+-- Shared by review.lua's append_block_sections and critic.lua's critic_prompt
+-- so the two prompt builders stay byte-identical.
+function M.render_hunk_lines(session, block)
+  local out = {}
+  for _, h in ipairs(M.block_hunks(session, block)) do
+    out[#out + 1] = h.header
+    for _, l in ipairs(h.lines) do
+      local sigil = (l.kind == "add" and "+") or (l.kind == "del" and "-") or " "
+      out[#out + 1] = sigil .. l.text
+    end
+  end
+  return out
+end
+
 local function block_signature(session, hunk_ids)
   local map = M.hunks_by_id(session)
   local parts = {}

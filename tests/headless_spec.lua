@@ -503,6 +503,64 @@ do
     "whitespace",
     "a Python trailing-whitespace trim is whitespace-only"
   )
+  -- a re-indent INSIDE a multi-line string is a content change, not formatting:
+  -- the leading/internal whitespace there is the string's value.
+  assert_eq(
+    classify("lua/foo.lua", {
+      { "ctx", "local sql = [[" },
+      { "del", "  SELECT 1" },
+      { "add", "      SELECT 1" },
+      { "ctx", "]]" },
+    }).trivial,
+    false,
+    "a re-indent inside a Lua [[ ]] long string is not whitespace-only"
+  )
+  assert_eq(
+    triviality._touches_multiline_string(
+      hunks_of("lua/foo.lua", {
+        { "ctx", "local s = [==[" },
+        { "add", "  body  text" },
+        { "ctx", "]==]" },
+      }),
+      "lua/foo.lua"
+    ),
+    true,
+    "a level-2 Lua long bracket is tracked"
+  )
+  -- a JS/TS template literal spans lines via an unterminated backtick.
+  assert_eq(
+    classify("src/x.ts", {
+      { "ctx", "const q = `" },
+      { "del", "  some  text" },
+      { "add", "    some  text" },
+      { "ctx", "`;" },
+    }).trivial,
+    false,
+    "a re-indent inside a JS template literal is not whitespace-only"
+  )
+  -- a shell heredoc body is literal: a re-indent there changes the value.
+  assert_eq(
+    classify("scripts/run.sh", {
+      { "ctx", "cat <<EOF" },
+      { "del", "  hello" },
+      { "add", "      hello" },
+      { "ctx", "EOF" },
+    }).trivial,
+    false,
+    "a re-indent inside a shell heredoc body is not whitespace-only"
+  )
+  -- Makefile recipe lines are tab-significant even though the file has no
+  -- extension: a tab→spaces reindent breaks the recipe and is NOT cosmetic.
+  assert_eq(
+    classify("Makefile", { { "del", "\tcmd build" }, { "add", "    cmd build" } }).trivial,
+    false,
+    "a Makefile recipe tab→spaces reindent is not whitespace-only"
+  )
+  assert_eq(
+    classify("build/rules.mk", { { "del", "\trun" }, { "add", "    run" } }).trivial,
+    false,
+    "a .mk recipe tab→spaces reindent is not whitespace-only"
+  )
 
   -- broadened comment / import language coverage (conservative additions).
   assert_eq(

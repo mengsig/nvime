@@ -53,12 +53,8 @@ local function critic_prompt(session, gradeable)
   for _, b in ipairs(gradeable) do
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.format("### Block %d — %s (%s)", b.id, b.title, b.file)
-    for _, h in ipairs(blocks.block_hunks(session, b)) do
-      lines[#lines + 1] = h.header
-      for _, l in ipairs(h.lines) do
-        local sigil = (l.kind == "add" and "+") or (l.kind == "del" and "-") or " "
-        lines[#lines + 1] = sigil .. l.text
-      end
+    for _, hl in ipairs(blocks.render_hunk_lines(session, b)) do
+      lines[#lines + 1] = hl
     end
   end
   return table.concat(lines, "\n")

@@ -905,12 +905,8 @@ local function append_block_sections(lines, session, pending)
   for _, b in ipairs(pending) do
     lines[#lines + 1] = string.format("### Block %d — %s (%s)", b.id, b.title, b.file)
     lines[#lines + 1] = "diff:"
-    for _, h in ipairs(blocks_mod.block_hunks(session, b)) do
-      lines[#lines + 1] = h.header
-      for _, l in ipairs(h.lines) do
-        local sigil = (l.kind == "add" and "+") or (l.kind == "del" and "-") or " "
-        lines[#lines + 1] = sigil .. l.text
-      end
+    for _, hl in ipairs(blocks_mod.render_hunk_lines(session, b)) do
+      lines[#lines + 1] = hl
     end
     lines[#lines + 1] = "user " .. (b.action == "request_changes" and "critique" or "explanation") .. ":"
     lines[#lines + 1] = b.comment or ""

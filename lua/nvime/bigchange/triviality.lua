@@ -566,7 +566,30 @@ local INDENT_SIGNIFICANT = {
   pyi = true,
   yaml = true,
   yml = true,
+  mk = true,
 }
+
+-- Basenames whose leading whitespace is semantic regardless of extension —
+-- Makefiles use a literal TAB to introduce recipe lines, so a tab→spaces
+-- reindent there breaks the recipe and must NOT auto-clear as cosmetic.
+local INDENT_SIGNIFICANT_BASENAME = {
+  makefile = true,
+  gnumakefile = true,
+  bsdmakefile = true,
+}
+
+-- True when leading indentation is semantic for `file`, keyed by extension OR
+-- (for extensionless formats like Makefile) the lowercased basename.
+local function indent_significant(file)
+  if INDENT_SIGNIFICANT[ext_of(file)] then
+    return true
+  end
+  if not file or file == "" then
+    return false
+  end
+  local base = file:gsub("[/\\]+$", ""):match("[^/\\]*$") or ""
+  return INDENT_SIGNIFICANT_BASENAME[base:lower()] == true
+end
 
 -- Whitespace-normalized signature of a line, used to decide whether a change is
 -- pure formatting. Outside string/char literals: leading indentation is
@@ -619,7 +642,7 @@ local function ws_sig(line, file)
     end
   end
   local sig = table.concat(out)
-  if INDENT_SIGNIFICANT[ext_of(file)] then
+  if indent_significant(file) then
     -- Prefix the indentation WIDTH (tabs counted as 8 columns) so a re-indent
     -- that changes the level reads as a real change, while a tab↔8-space swap
     -- (same width) stays cosmetic.
@@ -629,13 +652,136 @@ local function ws_sig(line, file)
   return sig
 end
 
+-- Extensions whose strings can carry over a line boundary via a here-document
+-- (shell). Heredoc bodies are literal: a re-indent there changes the value.
+local HEREDOC_EXTS = {
+  sh = true,
+  bash = true,
+  zsh = true,
+}
+
+-- Update multi-line string / heredoc region state `st` for ONE source line and
+-- return true when that line is PART OF a multi-line region — it begins inside
+-- an open region, opens one that stays open past end-of-line, or closes one.
+-- Single-line strings (opened and closed on the same line) do NOT count:
+-- ws_sig already preserves their content verbatim. State (`quote`/`long`/
+-- `heredoc`) carries across lines within one hunk stream; reset it per hunk.
+-- Detection is conservative — unterminated quotes (incl. JS/TS template
+-- literals), Lua long brackets `[=*[ … ]=*]`, and shell heredocs all flag.
+local function multiline_region_line(st, text, ext)
+  local started_inside = st.quote ~= nil or st.long ~= nil or st.heredoc ~= nil
+
+  -- Heredoc body: every line is literal until the terminator word stands alone.
+  if st.heredoc ~= nil then
+    if vim.trim(text) == st.heredoc then
+      st.heredoc = nil
+    end
+    return true
+  end
+
+  local markers = COMMENT_PREFIXES[ext] or {}
+  local i, n = 1, #text
+  while i <= n do
+    local c = text:sub(i, i)
+    if st.long ~= nil then
+      if c == "]" then
+        local eqs = text:match("^=*", i + 1)
+        local j = i + 1 + #eqs
+        if #eqs == st.long and text:sub(j, j) == "]" then
+          st.long, i = nil, j + 1
+        else
+          i = i + 1
+        end
+      else
+        i = i + 1
+      end
+    elseif st.quote ~= nil then
+      if c == "\\" then
+        i = i + 2 -- skip the escaped char so an escaped quote does not close early
+      elseif c == st.quote then
+        st.quote, i = nil, i + 1
+      else
+        i = i + 1
+      end
+    else
+      local comment = false
+      for _, m in ipairs(markers) do
+        if text:sub(i, i + #m - 1) == m then
+          comment = true
+          break
+        end
+      end
+      if comment then
+        break -- the rest of the line is a comment; its quotes are not code
+      elseif ext == "lua" and c == "[" then
+        local eqs = text:match("^=*", i + 1)
+        local j = i + 1 + #eqs
+        if text:sub(j, j) == "[" then
+          st.long, i = #eqs, j + 1
+        else
+          i = i + 1
+        end
+      elseif c == "<" and text:sub(i + 1, i + 1) == "<" and text:sub(i + 2, i + 2) ~= "<" and HEREDOC_EXTS[ext] then
+        -- `cmd <<EOF` / `<<-EOF` / `<<"EOF"` / `<< 'EOF'` opens a heredoc body;
+        -- `<<<` is a single-line here-string and is excluded above.
+        local rest = text:sub(i + 2)
+        local word = rest:match('^%-?%s*"([%w_]+)"') or rest:match("^%-?%s*'([%w_]+)'") or rest:match("^%-?%s*([%w_]+)")
+        if word then
+          st.heredoc = word
+          break
+        end
+        i = i + 2
+      elseif c == '"' or c == "'" or c == "`" then
+        st.quote, i = c, i + 1
+      else
+        i = i + 1
+      end
+    end
+  end
+
+  local ends_open = st.quote ~= nil or st.long ~= nil or st.heredoc ~= nil
+  return started_inside or ends_open
+end
+
+-- True when any CHANGED (add/del) line of the block lies inside, opens, or
+-- closes a multi-line string / heredoc / Lua long-bracket region. Such a line's
+-- whitespace is the string's CONTENT, so it must NOT auto-clear as formatting.
+-- Context lines advance the region state (in both streams) but never trip the
+-- check, mirroring scan_changed's per-stream, per-hunk bookkeeping.
+function M._touches_multiline_string(hunks, file)
+  for _, h in ipairs(hunks or {}) do
+    local ext = ext_of(h.file or file)
+    local streams = {
+      add = { quote = nil, long = nil, heredoc = nil },
+      del = { quote = nil, long = nil, heredoc = nil },
+    }
+    for _, l in ipairs(h.lines or {}) do
+      local text = l.text or ""
+      if l.kind == "ctx" then
+        for _, st in pairs(streams) do
+          multiline_region_line(st, text, ext)
+        end
+      elseif l.kind == "add" or l.kind == "del" then
+        if multiline_region_line(streams[l.kind], text, ext) then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
 -- True when a block's change is purely whitespace / formatting: every non-blank
 -- deleted line pairs (in order) with a non-blank added line whose
 -- whitespace-normalized signature is identical, OR the change only adds/removes
 -- blank lines. Adding or deleting real content makes the counts differ, so new
 -- code never reads as "formatting". Order-sensitive pairing means a reorder of
--- otherwise-identical lines is NOT masked.
+-- otherwise-identical lines is NOT masked. A change that touches a multi-line
+-- string / heredoc body is never whitespace-only: that whitespace is content.
 function M._is_whitespace_only(hunks, file)
+  if M._touches_multiline_string(hunks, file) then
+    return false
+  end
   local dels, adds, any = {}, {}, false
   for _, h in ipairs(hunks or {}) do
     local hfile = h.file or file
