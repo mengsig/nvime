@@ -125,6 +125,10 @@ M.defaults = {
     --   risk_high         — the blast-radius score is `high`.
     --   verify_tool_error — an external linter/type-checker flagged an error
     --                       (a non-parse finding with severity "error").
+    --                       External checks run async, so "block" is not a hard
+    --                       guarantee: an accept during the in-flight window
+    --                       (before checks finish) sees no findings yet and is
+    --                       allowed through.
     accept_policy = {
       critic_reject = "off",
       critic_flag = "off",

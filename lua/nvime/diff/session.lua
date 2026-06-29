@@ -658,6 +658,59 @@ local function proposed_lines(session)
   end)
 end
 
+-- Remap a 1-based line number from *proposed* coordinates (what verify findings
+-- carry — original with every non-rejected block applied) to the corresponding
+-- line in the live target buffer (original with only accepted blocks applied).
+-- While blocks are still pending the two diverge, so a finding's proposed line
+-- would otherwise point at the wrong target line. Walks blocks in old_start
+-- order tracking the proposed/target line cursors; a finding that falls inside a
+-- not-yet-accepted block maps to that region's start in the target (best effort,
+-- since the proposed content for that block isn't present in the target yet).
+local function map_proposed_line(session, pline)
+  pline = tonumber(pline)
+  if not pline then
+    return nil
+  end
+  if not session.blocks then
+    build_blocks(session)
+  end
+  local plan = {}
+  for _, block in ipairs(session.blocks or {}) do
+    plan[#plan + 1] = block
+  end
+  table.sort(plan, function(a, b)
+    if a.old_start == b.old_start then
+      return a.id < b.id
+    end
+    return a.old_start < b.old_start
+  end)
+
+  local orig_cursor, p_cursor, t_cursor = 0, 0, 0
+  for _, block in ipairs(plan) do
+    local context = (block.old_start - 1) - orig_cursor
+    if context > 0 then
+      if pline <= p_cursor + context then
+        return math.max(1, t_cursor + (pline - p_cursor))
+      end
+      p_cursor = p_cursor + context
+      t_cursor = t_cursor + context
+      orig_cursor = orig_cursor + context
+    end
+    local proposed_emit = (block.status ~= "rejected") and #(block.new_lines or {}) or 0
+    local target_emit = (block.status == "accepted") and #(block.new_lines or {}) or (block.old_count or 0)
+    if proposed_emit > 0 and pline <= p_cursor + proposed_emit then
+      if block.status == "accepted" then
+        return math.max(1, t_cursor + (pline - p_cursor))
+      end
+      return math.max(1, t_cursor + 1)
+    end
+    p_cursor = p_cursor + proposed_emit
+    t_cursor = t_cursor + target_emit
+    orig_cursor = orig_cursor + (block.old_count or 0)
+  end
+  return math.max(1, t_cursor + (pline - p_cursor))
+end
+
 local function review_name(session, kind)
   session.review_id = session.review_id or tostring(uv.hrtime())
   return "nvime://diff/" .. kind .. "/" .. session.review_id .. "/" .. tostring(session.file or "buffer")
@@ -1173,6 +1226,7 @@ M.set_lines_unlocked = set_lines_unlocked
 M.apply_blocks_to_lines = apply_blocks_to_lines
 M.original_lines = original_lines
 M.proposed_lines = proposed_lines
+M.map_proposed_line = map_proposed_line
 M.review_name = review_name
 M.configure_review_buffer = configure_review_buffer
 M.ensure_review_buffer = ensure_review_buffer

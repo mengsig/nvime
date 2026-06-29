@@ -30,11 +30,26 @@ local function accept_policy_cfg()
   return diff_cfg.accept_policy
 end
 
+-- True when at least one accept-policy signal is set to a non-"off" action.
+-- The common (default) path has every signal "off", so this lets the accept
+-- gate skip all of risk.score / critic / verify work entirely.
+local function any_policy_signal_enabled(policy)
+  for _, action in pairs(policy) do
+    if type(action) == "string" and action ~= "off" then
+      return true
+    end
+  end
+  return false
+end
+
 -- Collect the configured-on signals worried about this diff, as a list of
 -- { signal, action, reason }. Signals set to "off" / absent are skipped.
 local function collect_accept_concerns(diff_session)
   local policy = accept_policy_cfg()
   local concerns = {}
+  if not any_policy_signal_enabled(policy) then
+    return concerns
+  end
   local function consider(signal, present, reason)
     if not present then
       return
@@ -1001,12 +1016,30 @@ end
 -- Verify-finding navigation (S3). Findings carry line/col; jump the cursor to
 -- the next/previous one (relative to the cursor) in the target buffer and echo
 -- the finding so the reviewer can act on it. Wraps around like next_change.
-local function verify_findings(session)
+local map_proposed_line = session.map_proposed_line
+
+-- Verify findings carry *proposed*-content line numbers; the diff target buffer
+-- holds the live (partially-accepted) file, so the two diverge while blocks are
+-- pending. Remap each finding's line into target coordinates before navigation
+-- so ]v/[v land on the right line. Returns findings sorted by target line.
+local function verify_findings(diff_session)
   local ok_verify, verify = pcall(require, "nvime.verify")
   if not (ok_verify and verify and type(verify.findings) == "function") then
     return {}
   end
-  return verify.findings(session) or {}
+  local findings = verify.findings(diff_session) or {}
+  local out = {}
+  for _, f in ipairs(findings) do
+    local mapped = map_proposed_line(diff_session, f.line) or f.line
+    out[#out + 1] = vim.tbl_extend("force", {}, f, { line = mapped })
+  end
+  table.sort(out, function(a, b)
+    if a.line == b.line then
+      return (a.col or 1) < (b.col or 1)
+    end
+    return a.line < b.line
+  end)
+  return out
 end
 
 local function jump_to_finding(session, finding)

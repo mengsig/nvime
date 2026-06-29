@@ -607,7 +607,9 @@ end
 
 -- Push located findings into a dedicated quickfix list so the reviewer can
 -- jump to each one (the list is replaced, not opened — see verify.quickfix).
--- Entries point at the target buffer so locations track the live file.
+-- Entries point at the target buffer so locations track the live file; finding
+-- lines are in *proposed* coordinates, so remap each into target coordinates
+-- (the proposed/live file diverge while blocks are pending).
 local function populate_quickfix(session)
   if cfg().quickfix == false then
     return
@@ -619,11 +621,22 @@ local function populate_quickfix(session)
   if #locs == 0 then
     return
   end
+  local map_line
+  local ok_diff, diff = pcall(require, "nvime.diff")
+  if ok_diff and diff and type(diff.map_proposed_line) == "function" then
+    map_line = function(line)
+      local ok, mapped = pcall(diff.map_proposed_line, session, line)
+      if ok and type(mapped) == "number" then
+        return mapped
+      end
+      return line
+    end
+  end
   local items = {}
   for _, loc in ipairs(locs) do
     items[#items + 1] = {
       bufnr = session.target_bufnr,
-      lnum = loc.line,
+      lnum = map_line and map_line(loc.line) or loc.line,
       col = loc.col,
       type = (loc.severity == "error") and "E" or "W",
       text = string.format("[%s] %s", loc.source, loc.message),
@@ -866,7 +879,10 @@ end
 -- Public: did an external lint/type check report an *error*-severity finding
 -- (as opposed to the tree-sitter parse gate, which has its own signal)?
 -- Returns (has_error: bool, detail: string?) where detail names the source,
--- e.g. "shellcheck". Drives diff.accept_policy.verify_tool_error.
+-- e.g. "shellcheck". Drives diff.accept_policy.verify_tool_error. External
+-- checks run async: until they complete this returns false even if a tool would
+-- flag an error, so a "block" policy on verify_tool_error is not a hard
+-- guarantee during the in-flight window before checks finish.
 function M.has_tool_error(session)
   local v = session and session.verify
   if not v then

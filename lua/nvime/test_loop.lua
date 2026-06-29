@@ -258,12 +258,13 @@ local function run_runner(runner, cwd, on_done)
   local handle = vim.system({ "sh", "-c", runner }, sys_opts, function(result)
     local code = result.code or -1
     -- vim.system sets the exit code to 124 when its `timeout` fires (it
-    -- SIGTERMs the runner). Treat that as the timeout signal, with an
-    -- elapsed-wall-clock fallback (minus a small margin for timer jitter) in
-    -- case a platform surfaces the kill differently — so a hang is reported as
-    -- a timeout, never mistaken for a fixable test failure.
+    -- SIGTERMs the runner). That is the reliable timeout signal. The
+    -- elapsed-wall-clock fallback only fires when the runner ran at least the
+    -- full limit (not a 50ms margin under it), so a genuine pass/fail that
+    -- finishes just shy of the boundary is never misclassified as a timeout —
+    -- a hang is reported as a timeout, never mistaken for a fixable failure.
     local elapsed_ms = (uv.hrtime() - started) / 1e6
-    local timed_out = limit and limit > 0 and (code == 124 or elapsed_ms >= limit - 50)
+    local timed_out = limit and limit > 0 and (code == 124 or elapsed_ms >= limit)
     vim.schedule(function()
       on_done(code, table.concat(stdout_chunks), table.concat(stderr_chunks), timed_out)
     end)

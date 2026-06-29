@@ -244,4 +244,5 @@ M.prev_finding = ops.prev_finding
 M.remaining_text = ops.remaining_text
 M.refresh_session = ops.refresh_session
 M._proposed_lines = ops._proposed_lines
+M.map_proposed_line = session.map_proposed_line
 return M
