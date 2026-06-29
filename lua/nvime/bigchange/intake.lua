@@ -164,6 +164,17 @@ local function push(lines, marks, text, hl)
   return #lines
 end
 
+-- Footer hint row with the keys highlighted (shared ui.keyhint formatter), so
+-- the intake controls read like every other nvime surface.
+local function push_keyhint(lines, marks, items)
+  local line, hints = ui.keyhint_line(items, { indent = "  " })
+  lines[#lines + 1] = line
+  for _, hint in ipairs(hints) do
+    marks[#marks + 1] = { #lines, hint[1], hint[2], hint[3] }
+  end
+  return #lines
+end
+
 local function push_wrapped(lines, marks, text, hl, indent)
   indent = indent or "    "
   for _, paragraph in ipairs(vim.split(text or "", "\n", { plain = true })) do
@@ -309,13 +320,23 @@ local function render()
     push_wrapped(lines, marks, session.spec, "NvimeNormal", "  │ ")
     push(lines, marks, "  └" .. hrule(rule_width()), "NvimeStatusSuccess")
     push(lines, marks, "")
-    push(lines, marks, "  [a] approve & build · [e] edit spec · [m] more questions · q close", "NvimeHelp")
+    push_keyhint(lines, marks, {
+      { "[a]", "approve & build" },
+      { "[e]", "edit spec" },
+      { "[m]", "more questions" },
+      { "q", "close" },
+    })
   elseif not view.busy and plan_active(session) then
     push(lines, marks, "  " .. hrule(rule_width()), "NvimeRule")
-    push(lines, marks, "  <Space>/<CR> toggle · 1-9 pick · c comment · <C-s> submit", "NvimeHelp")
-    push(lines, marks, "  m message agent · q close", "NvimeHelp")
+    push_keyhint(lines, marks, {
+      { "<Space>/<CR>", "toggle" },
+      { "1-9", "pick" },
+      { "c", "comment" },
+      { "<C-s>", "submit" },
+    })
+    push_keyhint(lines, marks, { { "m", "message agent" }, { "q", "close" } })
   elseif not view.busy then
-    push(lines, marks, "  [m] message agent · q close", "NvimeHelp")
+    push_keyhint(lines, marks, { { "[m]", "message agent" }, { "q", "close" } })
   end
 
   vim.bo[view.bufnr].modifiable = true
