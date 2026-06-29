@@ -33,6 +33,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - The two `syntax/*.vim` files independently `highlight default link Nvime* <Standard>`
   as a fallback for buffers that load syntax before `setup()` runs; keep them aligned
   with the role mapping in `ui.lua`.
+- Key hints (footers, hint rows) go through `ui.keyhint_line(items, opts)` (returns a
+  string + `{col_start, col_end, hl}` byte-range marks) or `ui.keyhint_segments` (a
+  `virt_lines` segment list). Keys render `NvimeKey`, descriptions `NvimeMuted`,
+  separators `NvimeFaint` — so every surface's keys read the same. Don't hand-build a
+  flat single-colour footer; thread these instead (see `plan.lua`/`diff/session.lua`/
+  `bigchange/*` callers). The usage dashboard footer is the original precedent.
 
 ## Sharp edges
 
