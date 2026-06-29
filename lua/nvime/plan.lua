@@ -861,8 +861,13 @@ local function render_plan_lines(plan)
   -- Continuity badge: "↻ claude · resume" when the plan has a stored
   -- provider session, "○ fresh" when not. Lets the user see at a glance
   -- whether the next step will share architecture context with prior steps.
+  -- The phase-0 research/refine author runs in a temp workspace cwd and stores
+  -- its resumable session under author_provider_sessions (provider_sessions is
+  -- owned by the implement-phase executor in a different cwd — see
+  -- M.reset_session). Read the author bucket so the badge reflects whether the
+  -- NEXT refinement will actually resume.
   do
-    local provider_sessions = plan.provider_sessions or {}
+    local provider_sessions = plan.author_provider_sessions or {}
     local resume_chunks = {}
     for prov_name, sess_id in pairs(provider_sessions) do
       if sess_id and sess_id ~= "" then
@@ -1083,6 +1088,9 @@ local function set_locked(bufnr, locked)
   vim.bo[bufnr].readonly = locked
   vim.bo[bufnr].modifiable = not locked
 end
+
+-- Exposed for tests: the pure line/mark renderer (no buffer side effects).
+M._render_plan_lines = render_plan_lines
 
 local function render_plan(plan, opts)
   opts = opts or {}
@@ -1490,6 +1498,28 @@ M.detect_test_runner = detect_test_runner
 -- the conversation has accumulated too much context, when the model has
 -- gone off-track, or simply when you want a clean slate. If `provider` is
 -- nil, clears all providers' sessions for the plan.
+-- The provider that authored (or last refined) this plan. Used so a session
+-- reset / continuity decision targets the plan's OWN provider, not whatever the
+-- global config default happens to be — a codex-authored plan under a claude
+-- default must reset the codex bucket. Falls back to a captured author session's
+-- provider (for plans authored before plan.provider was persisted), then the
+-- config default.
+local function plan_provider(plan)
+  if type(plan) ~= "table" then
+    return (state.config and state.config.provider) or "claude"
+  end
+  if plan.provider and plan.provider ~= "" then
+    return plan.provider
+  end
+  for prov_name, sess_id in pairs(plan.author_provider_sessions or {}) do
+    if sess_id and sess_id ~= "" then
+      return prov_name
+    end
+  end
+  return (state.config and state.config.provider) or "claude"
+end
+M._plan_provider = plan_provider
+
 function M.reset_session(plan_id, provider)
   local plan = M.get(plan_id)
   if not plan then
@@ -1932,8 +1962,9 @@ install_plan_view_keymaps = function(bufnr, plan_id, step_index)
     if not plan then
       return
     end
-    local provider_name = (state.config and state.config.provider) or "claude"
-    M.reset_session(plan_id, provider_name)
+    -- Reset the bucket for the plan's OWN provider, not the global default, so
+    -- gN clears the session that the next refinement would actually resume.
+    M.reset_session(plan_id, plan_provider(plan))
   end, vim.tbl_extend("force", opts, { desc = "nvime plan: reset provider session" }))
 
   vim.keymap.set("n", "]s", function()
@@ -2578,6 +2609,9 @@ function M.create(opts)
           if fresh then
             fresh.author_provider_sessions = fresh.author_provider_sessions or {}
             fresh.author_provider_sessions[provider] = captured_session_id
+            -- Remember which provider authored this plan so gN / the continuity
+            -- badge target the right bucket even under a different config default.
+            fresh.provider = provider
             persist_plan(fresh)
           end
         end

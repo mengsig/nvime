@@ -6590,6 +6590,32 @@ end)();
   state.config.providers.codex.reasoning_effort = nil
 
   assert(vim.fn.exists(":NvimeEffort") == 2, "effort: :NvimeEffort command exists")
+
+  -- B1: provider adapter registry. The brand list and per-provider knobs live in
+  -- one table; M.names/M.adapters derive from it, and effort levels/aliases read
+  -- through it.
+  assert_eq(table.concat(provider.names, ","), "claude,codex", "adapter: names derive from the registry")
+  assert(type(provider.adapters) == "table", "adapter: adapters table exists")
+  assert(provider.adapter("claude") == provider.adapters.claude, "adapter: M.adapter looks up by name")
+  assert(provider.adapter("nope") == nil, "adapter: unknown provider has no adapter")
+  assert_eq(
+    table.concat(provider.adapters.claude.effort_levels, ","),
+    "low,medium,high,xhigh,max,ultracode",
+    "adapter: claude effort levels live on the adapter"
+  )
+  assert_eq(provider.adapters.claude.effort_aliases.ultra, "ultracode", "adapter: claude alias on the adapter")
+  assert_eq(provider.adapters.codex.effort_aliases.xh, "xhigh", "adapter: codex alias on the adapter")
+  -- agents.lua registers each adapter's arg builder, and dispatch routes through
+  -- it (instead of an `if provider == …` chain). Unknown providers still error.
+  assert(type(provider.adapters.claude.build_args) == "function", "adapter: claude build_args registered")
+  assert(type(provider.adapters.codex.build_args) == "function", "adapter: codex build_args registered")
+  local dispatched = provider.adapters.claude.build_args(state.config.providers.claude, "plan", "hi", nil, {})
+  assert(
+    type(dispatched) == "table"
+      and table.concat(dispatched, " ")
+        == table.concat(agents._claude_args(state.config.providers.claude, "plan", "hi", {}), " "),
+    "adapter: registered claude build_args matches claude_args"
+  )
 end)();
 -- Plan-author prompt selection: the full ~8KB header only for a NEW conversation
 -- (fresh author or re-plan); the lean follow-up only for a RESUMED conversational
@@ -6675,6 +6701,90 @@ end)();
   state.config.plan.dir = saved_dir
   state.plan.loaded = false
   state.plan.plans = nil
+end)();
+-- R3: the phase-0 continuity badge + gN reset target the AUTHOR session bucket
+-- (author_provider_sessions) and the plan's OWN provider — not provider_sessions
+-- (owned by the implement-phase executor) or the global config default.
+-- (IIFE: keep locals out of the main chunk's 200-local cap.)
+(function()
+  local plan = require("nvime.plan")
+
+  local function badge_line(p)
+    local lines = plan._render_plan_lines(p)
+    for _, l in ipairs(lines) do
+      if type(l) == "string" and l:find("session:", 1, true) then
+        return l
+      end
+    end
+    return ""
+  end
+
+  -- Author session captured under codex → badge shows codex, NOT "fresh", even
+  -- though provider_sessions (the wrong bucket the badge used to read) is empty.
+  local with_author = {
+    id = "0001-badge",
+    title = "Badge",
+    phase = 0,
+    author_provider_sessions = { codex = "codex-author-sess" },
+    provider_sessions = {},
+  }
+  local line = badge_line(with_author)
+  assert(line:find("codex", 1, true) and not line:find("fresh", 1, true), "R3: badge reads author_provider_sessions")
+
+  -- An implement-phase session in provider_sessions must NOT light the phase-0
+  -- author continuity badge (that bucket lives in a different cwd).
+  local impl_only = {
+    id = "0001-impl",
+    title = "Impl",
+    phase = 0,
+    author_provider_sessions = {},
+    provider_sessions = { claude = "exec-sess" },
+  }
+  assert(badge_line(impl_only):find("fresh", 1, true), "R3: provider_sessions does not light the author badge")
+
+  -- plan_provider: explicit field wins; else a captured author session; else the
+  -- config default.
+  require("nvime.state").config.provider = "claude"
+  assert_eq(plan._plan_provider({ provider = "codex" }), "codex", "R3: plan_provider prefers the plan's provider")
+  assert_eq(
+    plan._plan_provider({ author_provider_sessions = { codex = "x" } }),
+    "codex",
+    "R3: plan_provider falls back to a captured author session"
+  )
+  assert_eq(plan._plan_provider({}), "claude", "R3: plan_provider falls back to the config default")
+
+  -- gN reset (M.reset_session) clears the codex author bucket of a codex-authored
+  -- plan even under a claude default, leaving an unrelated provider untouched.
+  local rdir = vim.fn.tempname()
+  vim.fn.mkdir(rdir .. "/0001-reset", "p")
+  local rfd = io.open(rdir .. "/0001-reset/plan.json", "w")
+  rfd:write(vim.json.encode({
+    version = 1,
+    id = "0001-reset",
+    title = "Reset",
+    why = "x",
+    created_at = os.time(),
+    updated_at = os.time(),
+    files_estimated = {},
+    acceptance = {},
+    provider = "codex",
+    author_provider_sessions = { codex = "codex-sess", claude = "claude-sess" },
+    steps = { { id = 1, intent = "a", file = "a.lua", range = "new", depends_on = {}, tests = {} } },
+  }))
+  rfd:close()
+  local saved_rdir = require("nvime.state").config.plan and require("nvime.state").config.plan.dir
+  require("nvime.state").config.plan = require("nvime.state").config.plan or {}
+  require("nvime.state").config.plan.dir = rdir
+  require("nvime.state").plan.loaded = false
+  require("nvime.state").plan.plans = nil
+  local fetched = plan.get("0001-reset")
+  plan.reset_session("0001-reset", plan._plan_provider(fetched))
+  local after = plan.get("0001-reset")
+  assert(after.author_provider_sessions.codex == nil, "R3: reset clears the plan-provider author bucket")
+  assert_eq(after.author_provider_sessions.claude, "claude-sess", "R3: reset leaves other providers' buckets intact")
+  require("nvime.state").config.plan.dir = saved_rdir
+  require("nvime.state").plan.loaded = false
+  require("nvime.state").plan.plans = nil
 end)();
 -- The update chat renders a CLEAN transcript: agent prose only (internal progress
 -- + the NVIME_PLAN marker/JSON filtered out), a calm footer, no scary warning.

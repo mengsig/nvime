@@ -478,14 +478,31 @@ local function codex_args(cfg, lane, _prompt, cwd, run_opts)
   return args
 end
 
+-- Register each provider's arg builder on its adapter (provider.lua owns the
+-- brand registry; the builders live here because they need agents.lua internals
+-- like claude_args/codex_args). build_args then dispatches through the adapter
+-- table instead of an `if provider == …` chain, so a new provider is a registry
+-- entry rather than another branch to keep in sync.
+local provider_registry = require("nvime.provider")
+local function register_adapter_args(name, builder)
+  local adapter = provider_registry.adapters[name]
+  if adapter then
+    adapter.build_args = builder
+  end
+end
+register_adapter_args("claude", function(cfg, lane, prompt, _cwd, run_opts)
+  return claude_args(cfg, lane, prompt, run_opts)
+end)
+register_adapter_args("codex", function(cfg, lane, prompt, cwd, run_opts)
+  return codex_args(cfg, lane, prompt, cwd, run_opts)
+end)
+
 local function build_args(provider, cfg, lane, prompt, cwd, run_opts)
-  if provider == "claude" then
-    return claude_args(cfg, lane, prompt, run_opts)
+  local adapter = provider_registry.adapters[provider]
+  if adapter and adapter.build_args then
+    return adapter.build_args(cfg, lane, prompt, cwd, run_opts)
   end
-  if provider == "codex" then
-    return codex_args(cfg, lane, prompt, cwd, run_opts)
-  end
-  error("No adapter for provider: " .. provider)
+  error("No adapter for provider: " .. tostring(provider))
 end
 
 local excluded_workspace_dirs = {
