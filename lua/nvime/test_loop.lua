@@ -19,6 +19,14 @@ local uv = vim.uv or vim.loop
 
 local DEFAULT_TIMEOUT_MS = 120000
 
+-- Grace added on top of the configured timeout for vim.system's NATIVE timeout,
+-- used purely as a backstop killer (see run_runner). Our own uv timer fires at
+-- exactly `limit` and SIGTERMs the runner from the main loop; the native timeout
+-- only matters if that main-loop kill never lands (it didn't reliably terminate
+-- the runner from the fast-event context on CI). The grace guarantees our timer
+-- sets the authoritative `timed_out` flag before any kill-provoked exit callback.
+local TIMEOUT_BACKSTOP_GRACE_MS = 2000
+
 local in_flight = {}
 local retry_counters = {}
 
@@ -246,16 +254,25 @@ local function run_runner(runner, cwd, on_done)
       end
     end,
   }
-  -- Own the timeout decision instead of inferring it from the exit code.
-  -- vim.system's own `timeout` opt SIGTERMs the runner but the resulting
-  -- termination surfaces in build-dependent encodings (code 124, or code 0
-  -- with signal 15, or code 143 with signal 0, …); reverse-engineering which
-  -- encoding means "timed out" is not portable and missed a CI encoding. So we
-  -- arm our OWN one-shot timer that kills the handle and records an
-  -- authoritative `timed_out` flag — the verdict no longer depends on how a
-  -- given libuv/neovim build folds the term signal into the result. The exit
-  -- callback ALWAYS fires (kill still triggers it), so in_flight is always
-  -- cleared and a hanging test can never wedge the loop.
+  -- Own the timeout DECISION instead of inferring it from the exit code:
+  -- vim.system's termination surfaces in build-dependent encodings (code 124,
+  -- or code 0 with signal 15, or code 143 with signal 0, …) and reverse-
+  -- engineering which one means "timed out" is not portable. So an authoritative
+  -- `timed_out` flag is set by our own one-shot timer at exactly `limit`.
+  --
+  -- Owning the KILL from that fast-event timer callback, however, did NOT
+  -- reliably terminate the runner on CI's neovim build (the exit callback then
+  -- never fired within budget and the loop looked wedged). So the kill is
+  -- issued from the MAIN loop (vim.schedule) AND vim.system's native `timeout`
+  -- is armed as a backstop killer — it provably SIGTERMs the runner and fires
+  -- the exit callback on every build. The native timeout is set a grace above
+  -- `limit` so our timer always records `timed_out` first; the verdict still
+  -- depends only on our flag, never on the native timeout's exit encoding. The
+  -- exit callback ALWAYS fires, so in_flight is always cleared and a hanging
+  -- test can never wedge the loop.
+  if limit and limit > 0 then
+    sys_opts.timeout = limit + TIMEOUT_BACKSTOP_GRACE_MS
+  end
   local timer
   local timed_out = false
   local handle
@@ -277,13 +294,17 @@ local function run_runner(runner, cwd, on_done)
   end)
   if limit and limit > 0 then
     timer = uv.new_timer()
-    -- The timer fires on a later loop tick, so `handle` is assigned by then. If
-    -- the process already exited the kill is a harmless no-op (pcall guards the
-    -- nil-self / already-reaped cases). Setting the flag BEFORE the kill races
-    -- ahead of the exit callback the kill provokes.
+    -- The timer fires on a later loop tick, so `handle` is assigned by then.
+    -- Set the authoritative flag here, then issue the kill from the main loop
+    -- (the fast-context kill was unreliable on CI). If the process already
+    -- exited the kill is a harmless no-op (pcall guards the nil-self /
+    -- already-reaped cases). The native `timeout` backstop above guarantees the
+    -- runner is reaped even if this scheduled kill never lands.
     timer:start(limit, 0, function()
       timed_out = true
-      pcall(handle.kill, handle, "sigterm")
+      vim.schedule(function()
+        pcall(handle.kill, handle, "sigterm")
+      end)
     end)
   end
   return handle

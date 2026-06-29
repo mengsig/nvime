@@ -83,15 +83,20 @@ This file is the project's committed home for project-intrinsic agent knowledge:
   status 0/1; other libuv/neovim builds report `code == 0` with `result.signal == 15`
   or fold the term signal into `code == 143` with `result.signal == 0` (the encoding
   that missed on CI). Reverse-engineering "which encoding means timed out" from the
-  exit result is therefore NOT portable. `test_loop.lua` instead OWNS the decision:
-  it does not pass `timeout` to `vim.system` but arms its own `uv` oneshot timer that
-  `handle:kill("sigterm")`s the runner and sets an authoritative `timed_out` flag
-  before the kill. The exit callback reads that flag verbatim, so the verdict no
-  longer depends on the exit encoding. The kill still triggers the always-firing
-  callback (which clears `in_flight`), so a hang can't wedge the loop; a genuine
-  pass/fail leaves the flag false and stays a fixable failure. The timer is
-  stopped+closed in the exit callback (and the kill is `pcall`-guarded for the
-  already-reaped race).
+  exit result is therefore NOT portable. `test_loop.lua` instead OWNS the *decision*
+  (not the kill encoding): it arms its own `uv` oneshot timer at exactly `limit` that
+  sets an authoritative `timed_out` flag, so the verdict reads that flag verbatim and
+  never depends on the exit encoding. Killing the runner FROM that fast-event timer
+  callback was itself NOT portable — `handle:kill` issued in the fast context did not
+  reliably terminate the runner on CI's build, so the exit callback never fired within
+  budget and the loop looked wedged. So the kill is now issued from the MAIN loop
+  (`vim.schedule`) AND `vim.system`'s native `timeout` is armed as a backstop killer
+  (set to `limit` + a grace so the flag is always recorded first) — the native timeout
+  provably SIGTERMs the runner and fires the always-firing exit callback on every
+  build even if the scheduled kill never lands. Either way the callback fires (clearing
+  `in_flight`), so a hang can't wedge the loop; a genuine pass/fail leaves the flag
+  false and stays a fixable failure. The timer is stopped+closed in the exit callback
+  (and the kill is `pcall`-guarded for the already-reaped race).
 - `plan.json`, `usage.json`, session/MCP JSON, and per-model rate overrides are all
   untrusted/agent- or user-authored. JSON readers must `type(decoded) == "table"`
   before indexing; per-model rate overrides must be deep-merged onto defaults.
