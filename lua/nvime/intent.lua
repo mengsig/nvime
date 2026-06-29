@@ -275,7 +275,11 @@ local function classify_with_model(intent_text)
   end, 50)
   if not finished then
     if handle and type(handle.kill) == "function" then
-      pcall(handle.kill)
+      -- handle is a vim.system SystemObj; kill is a method, so it needs the
+      -- object as self and a signal. `pcall(handle.kill)` passed nil self and
+      -- no signal, erroring internally (swallowed by pcall) and leaving the
+      -- timed-out classifier subprocess running. Mirror the other call sites.
+      pcall(handle.kill, handle, "sigterm")
     end
     return nil
   end

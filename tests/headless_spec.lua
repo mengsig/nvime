@@ -1332,7 +1332,7 @@ local fake_codex = tmp .. "/fake-codex"
 local native_codex_id = "22222222-2222-2222-2222-222222222222"
 vim.fn.writefile({
   "#!/usr/bin/env sh",
-  "test -d .git || { printf '%s\\n' 'missing temp git root'; exit 3; }",
+  "test -e .git || { printf '%s\\n' 'missing temp git root'; exit 3; }",
   "cat >/dev/null",
   'printf \'%s\\n\' \'{"type":"turn.started","session_id":"' .. native_codex_id .. "\"}'",
   'printf \'%s\\n\' \'{"item":{"type":"reasoning","summary":"checking files"}}\'',
@@ -6782,6 +6782,93 @@ end)();
   assert(loaded and loaded.id == "0001-real", "load_plan: on-disk dir id is authoritative over plan.json")
   state.config.plan.dir = saved_dir
   state.plan.loaded, state.plan.plans = saved_loaded, saved_plans
+end)();
+
+-- regression: a missing provider binary must not throw out of agents.run
+-- (which would leak temp workspaces and wedge the caller's busy state); it
+-- must deliver a synthetic non-zero on_exit instead.
+(function()
+  local state = require("nvime.state")
+  local agents = require("nvime.agents")
+  local saved = state.config.providers.claude.cmd
+  state.config.providers.claude.cmd = "/nonexistent/nvime-no-such-binary-zzz"
+  local exited, code = false, nil
+  local ok = pcall(function()
+    agents.run({
+      provider = "claude",
+      lane = "ask",
+      prompt = "hi",
+      on_exit = function(result)
+        exited = true
+        code = result.code
+      end,
+    })
+  end)
+  state.config.providers.claude.cmd = saved
+  assert(ok, "agents.run does not throw when the provider binary is missing")
+  assert(
+    vim.wait(2000, function()
+      return exited
+    end, 20),
+    "on_exit fires after a spawn failure"
+  )
+  assert(code ~= nil and code ~= 0, "spawn failure delivers a non-zero exit code")
+end)();
+
+-- regression: a partial per-model rate override must not nil out the model's
+-- other rate fields (which made compute_cost throw inside the agent-exit path).
+(function()
+  local state = require("nvime.state")
+  local usage = require("nvime.usage")
+  state.config.usage = state.config.usage or {}
+  local saved_rates = state.config.usage.rates
+  local saved_enabled = state.config.usage.enabled
+  state.config.usage.enabled = true
+  state.config.usage.rates = { ["claude-opus-4-8"] = { input = 99.0 } }
+  local ok = pcall(usage.record, {
+    sample = { input = 1000, output = 10, model = "claude-opus-4-8" },
+    provider = "claude",
+    lane = "ask",
+  })
+  state.config.usage.rates = saved_rates
+  state.config.usage.enabled = saved_enabled
+  assert(ok, "usage.record survives a partial per-model rate override")
+end)();
+
+-- regression: a malformed or newer-version plan.json must not take down the
+-- whole plan list; valid plans still load alongside it.
+(function()
+  local state = require("nvime.state")
+  local plan = require("nvime.plan")
+  local saved_dir = state.config.plan and state.config.plan.dir
+  local saved_loaded, saved_plans = state.plan.loaded, state.plan.plans
+  local tmp = vim.fn.tempname()
+  local function wf(dir, payload)
+    vim.fn.mkdir(tmp .. "/" .. dir, "p")
+    local fd = io.open(tmp .. "/" .. dir .. "/plan.json", "w")
+    fd:write(vim.json.encode(payload))
+    fd:close()
+  end
+  wf("0001-good", { version = 1, title = "g", steps = {} })
+  wf("0002-newer", { version = 9999, title = "n", steps = {} })
+  wf("0003-scalar", { version = 1, title = "s", steps = "oops", acceptance = "nope", updated_at = "yesterday" })
+  state.config.plan = state.config.plan or {}
+  state.config.plan.dir = tmp
+  state.plan.loaded = false
+  state.plan.plans = nil
+  local ok, plans = pcall(function()
+    return plan.plans()
+  end)
+  state.config.plan.dir = saved_dir
+  state.plan.loaded, state.plan.plans = saved_loaded, saved_plans
+  assert(ok, "discover_plans survives malformed/newer-version plan.json files")
+  local found_good = false
+  for _, p in ipairs(plans or {}) do
+    if p.id == "0001-good" then
+      found_good = true
+    end
+  end
+  assert(found_good, "a valid plan still loads alongside malformed ones")
 end)()
 
 print("nvime headless spec passed")

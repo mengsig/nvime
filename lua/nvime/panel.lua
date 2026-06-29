@@ -1131,7 +1131,17 @@ function M.create(policy)
       end)
       return
     end
-    local session = session_id and get_session(session_id) or ensure_active_session()
+    -- A busy update tagged for a deleted session must not flip the active
+    -- session's spinner on; drop it rather than falling back to active.
+    local session
+    if session_id then
+      session = get_session(session_id)
+      if not session then
+        return
+      end
+    else
+      session = ensure_active_session()
+    end
     if session then
       session.busy = value == true
       if not session.busy then
@@ -1161,7 +1171,15 @@ function M.create(policy)
     if compact == "" then
       return
     end
-    local session = session_id and get_session(session_id) or ensure_active_session()
+    -- A chunk tagged for a specific session must never be redirected into the
+    -- active session if that session was deleted mid-run; only fall back to the
+    -- active session for untagged (session_id == nil) output.
+    local session
+    if session_id then
+      session = get_session(session_id)
+    else
+      session = ensure_active_session()
+    end
     if not session then
       return
     end
@@ -1187,7 +1205,14 @@ function M.create(policy)
       return
     end
 
-    local session = session_id and get_session(session_id) or ensure_active_session()
+    -- See set_progress: never redirect a tagged chunk into the active session
+    -- once its own session is gone.
+    local session
+    if session_id then
+      session = get_session(session_id)
+    else
+      session = ensure_active_session()
+    end
     if not session then
       return
     end
@@ -1425,6 +1450,14 @@ function M.create(policy)
     for _, session in ipairs(ensure_sessions()) do
       if remove[tonumber(session.id)] then
         deleted = deleted + 1
+        -- A busy session has a live agent process. Deleting it without
+        -- cancelling left the process running (a leak) and, once the session
+        -- was removed from the list, its streamed output misrouted into the
+        -- active session via the sink fallbacks. Cancel it first so the
+        -- process is killed before the session disappears.
+        if session.busy then
+          pcall(P.cancel_session, session.id)
+        end
         if session.bufnr and vim.api.nvim_buf_is_valid(session.bufnr) then
           pcall(vim.api.nvim_buf_delete, session.bufnr, { force = true })
         else

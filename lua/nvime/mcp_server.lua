@@ -334,6 +334,14 @@ local function read_json(path)
   if not decoded_ok then
     return nil
   end
+  -- A scalar/null JSON file (e.g. a corrupt plan.json containing `1` or `null`)
+  -- decodes to a non-table value; callers index the result (plan.steps,
+  -- decoded.sessions), so returning it would throw "index a number value".
+  -- Treat anything that is not a table as unreadable, matching the readers in
+  -- usage.lua / attribution.lua / mcp.lua.
+  if type(decoded) ~= "table" then
+    return nil
+  end
   return decoded
 end
 
@@ -436,7 +444,10 @@ local function audit_tail(predicate, project, limit)
 end
 
 local function tool_recent_audits(args)
-  local limit = math.min(tonumber(args.limit) or 50, 500)
+  -- Floor at 1 like every other limited tool (git_log, recent_diffs,
+  -- session_search): a 0/negative limit otherwise makes audit_tail's
+  -- `#out >= limit` break fire after the first push, returning 1 entry.
+  local limit = math.min(math.max(tonumber(args.limit) or 50, 1), 500)
   local kind = args.kind
   local ordered = audit_tail(function(decoded)
     return type(decoded) == "table" and (not kind or decoded.event == kind)

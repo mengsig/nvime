@@ -330,13 +330,18 @@ local function migrate_plan(plan)
     return nil
   end
   plan.version = SCHEMA_VERSION
-  plan.steps = plan.steps or {}
-  plan.acceptance = plan.acceptance or {}
+  -- plan.json is untrusted (agent-authored). A scalar where an array is
+  -- expected ("steps": "x") would make ipairs/# throw and, via discover_plans,
+  -- take down the entire plan list — so coerce non-table array fields to {}.
+  plan.steps = type(plan.steps) == "table" and plan.steps or {}
+  plan.acceptance = type(plan.acceptance) == "table" and plan.acceptance or {}
   for index, step in ipairs(plan.steps) do
-    step.id = step.id or index
-    step.status = step_status(step)
-    step.depends_on = step.depends_on or {}
-    step.tests = step.tests or {}
+    if type(step) == "table" then
+      step.id = step.id or index
+      step.status = step_status(step)
+      step.depends_on = type(step.depends_on) == "table" and step.depends_on or {}
+      step.tests = type(step.tests) == "table" and step.tests or {}
+    end
   end
   -- v2: the phased lane. A freshly authored plan (or a migrated v1) starts in
   -- phase 0 (research) until the user agrees; phases 1 (scaffold TODOs) and 2
@@ -345,6 +350,11 @@ local function migrate_plan(plan)
   plan.phase0_agreed = plan.phase0_agreed == true
   plan.phase1_agreed = plan.phase1_agreed == true
   plan.bigchange_session_id = tonumber(plan.bigchange_session_id)
+  -- Coerce timestamps to numbers: a string value (untrusted plan.json) would
+  -- make the `updated_at > updated_at` sort comparators throw "compare string
+  -- with number" when ordering the plan list.
+  plan.created_at = tonumber(plan.created_at)
+  plan.updated_at = tonumber(plan.updated_at)
   return plan
 end
 
@@ -357,6 +367,12 @@ local function load_plan(id)
     return nil
   end
   plan = migrate_plan(plan)
+  -- migrate_plan returns nil for a non-table payload or a plan written by a
+  -- newer schema version; without this guard `plan.id = id` indexed nil and
+  -- threw (a realistic post-downgrade crash).
+  if not plan then
+    return nil
+  end
   -- The on-disk directory name is authoritative; ignore whatever `id` the
   -- (untrusted) plan.json claims, so a forged id can't redirect later writes.
   plan.id = id
@@ -380,8 +396,10 @@ local function discover_plans()
       break
     end
     if kind == "directory" and name:match("^%d+%-") then
-      local plan = load_plan(name)
-      if plan then
+      -- Isolate per-plan failures: a single malformed plan.json must not throw
+      -- out of discover_plans and break the picker / every plan operation.
+      local ok, plan = pcall(load_plan, name)
+      if ok and plan then
         plans[#plans + 1] = plan
       end
     end

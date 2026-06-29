@@ -1142,7 +1142,7 @@ function M.run(opts)
       system_opts.stdin = stdin
     end
 
-    local handle = vim.system(args, system_opts, function(result)
+    local spawn_ok, handle = pcall(vim.system, args, system_opts, function(result)
       drain()
       vim.schedule(function()
         local synced = sync_markdown_workspace(workspace)
@@ -1224,6 +1224,39 @@ function M.run(opts)
         end
       end)
     end)
+    if not spawn_ok then
+      -- vim.system throws synchronously when args[1] (the provider binary) is
+      -- not on PATH, or when cwd no longer exists. Without this guard the throw
+      -- escapes M.run: the exit callback never fires, so the markdown/plan/perf
+      -- temp workspaces leak AND — because callers set busy state before the
+      -- call and clear it only from on_exit — the session is wedged "busy"
+      -- forever (spinner never stops). Mirror the exit-path cleanup and deliver
+      -- a synthetic failure result so the caller resets its state.
+      local spawn_err = handle
+      vim.schedule(function()
+        cleanup_workspace(workspace)
+        if plan_workspace and plan_workspace.tmp then
+          pcall(vim.fn.delete, plan_workspace.tmp, "rf")
+        end
+        if perf_workspace and perf_workspace.tmp then
+          pcall(vim.fn.delete, perf_workspace.tmp, "rf")
+        end
+        audit.write({
+          event = "agent_exit",
+          lane = lane,
+          provider = provider,
+          tool = args[1],
+          code = -1,
+          spawn_error = tostring(spawn_err),
+        })
+        vim.notify(
+          string.format("nvime: could not start %s (%s lane): %s", provider, lane, tostring(spawn_err)),
+          vim.log.levels.ERROR
+        )
+        pcall(on_exit, { code = -1, signal = 0, stdout = "", stderr = tostring(spawn_err) })
+      end)
+      return nil
+    end
     if type(opts.on_handle) == "function" then
       local ok, err = pcall(opts.on_handle, handle)
       if not ok then
