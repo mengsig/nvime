@@ -696,10 +696,10 @@ local function map_proposed_line(session, pline)
       t_cursor = t_cursor + context
       orig_cursor = orig_cursor + context
     end
-    local proposed_emit = (block.status ~= "rejected") and #(block.new_lines or {}) or 0
+    local proposed_emit = (block.status == "rejected") and (block.old_count or 0) or #(block.new_lines or {})
     local target_emit = (block.status == "accepted") and #(block.new_lines or {}) or (block.old_count or 0)
     if proposed_emit > 0 and pline <= p_cursor + proposed_emit then
-      if block.status == "accepted" then
+      if block.status == "accepted" or block.status == "rejected" then
         return math.max(1, t_cursor + (pline - p_cursor))
       end
       return math.max(1, t_cursor + 1)

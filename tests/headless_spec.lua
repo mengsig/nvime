@@ -7189,6 +7189,24 @@ end)();
   )
 
   state.config.policy_rules.path = saved_path
+end)();
+
+(function()
+  local diff = require("nvime.diff")
+  local session = {
+    blocks = {
+      { id = 1, old_start = 2, old_count = 2, new_lines = { "x" }, status = "rejected" },
+      { id = 2, old_start = 6, old_count = 1, new_lines = { "y1", "y2" }, status = "accepted" },
+    },
+  }
+  -- Proposed (non-rejected applied) and target (accepted applied) both keep the
+  -- rejected block's original two lines, so they align 1:1 around it.
+  assert_eq(diff.map_proposed_line(session, 3), 3, "verify map: finding inside a rejected block maps 1:1 to the target")
+  assert_eq(
+    diff.map_proposed_line(session, 8),
+    8,
+    "verify map: finding after a rejected block does not drift by old_count"
+  )
 end)()
 
 print("nvime headless spec passed")
