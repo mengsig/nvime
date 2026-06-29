@@ -312,6 +312,8 @@ Inline diff mappings in the target file:
         [n      previous unresolved line
         ]b      next visual change block
         [b      previous visual change block
+        ]v      next verify finding (linter/type-checker)
+        [v      previous verify finding (linter/type-checker)
         ga      accept the current visual change block
         v_ga    accept unresolved changed lines touched by the visual range
 	        gA      accept all unresolved blocks
@@ -332,6 +334,7 @@ Diff review workspace mappings:
         e       focus the editable source pane
         ]b/[b   next/previous visual change block
         ]n/[n   next/previous unresolved line
+        ]v/[v   next/previous verify finding (linter/type-checker)
         ga/gb   accept/reject the current visual block
         gu      undo the most recently accepted block when unchanged
         gA/gB   accept/reject all unresolved blocks
